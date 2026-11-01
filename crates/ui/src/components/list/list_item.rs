@@ -43,6 +43,7 @@ pub struct ListItem {
     /// This might be a button, a disclosure arrow, a face pile, etc.
     end_slot: Option<AnyElement>,
     end_slot_visibility: EndSlotVisibility,
+    prioritize_end_slot: bool,
     toggle: Option<bool>,
     inset: bool,
     on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
@@ -79,6 +80,7 @@ impl ListItem {
             start_slot: None,
             end_slot: None,
             end_slot_visibility: EndSlotVisibility::default(),
+            prioritize_end_slot: false,
             toggle: None,
             inset: false,
             on_click: None,
@@ -233,6 +235,12 @@ impl ListItem {
         self
     }
 
+    /// Reserve the end slot's width and truncate the main content first.
+    pub fn prioritize_end_slot(mut self) -> Self {
+        self.prioritize_end_slot = true;
+        self
+    }
+
     pub fn end_slot_on_hover<E: IntoElement>(mut self, end_slot_on_hover: E) -> Self {
         self.end_slot_visibility =
             EndSlotVisibility::SwapOnHover(end_slot_on_hover.into_any_element());
@@ -359,6 +367,7 @@ impl RenderOnce for ListItem {
                     })
                     .group("list_item")
                     .w_full()
+                    .when(self.prioritize_end_slot, |this| this.flex_1().min_w_0())
                     .relative()
                     .gap_1()
                     .px(DynamicSpacing::Base06.rems(cx))
@@ -426,6 +435,9 @@ impl RenderOnce for ListItem {
                             .flex_grow_1()
                             .flex_shrink_0()
                             .flex_basis(relative(0.25))
+                            .when(self.prioritize_end_slot, |this| {
+                                this.flex_1().min_w_0().flex_shrink_1()
+                            })
                             .gap(DynamicSpacing::Base06.rems(cx))
                             .map(|list_content| {
                                 if self.overflow_x {
@@ -439,13 +451,19 @@ impl RenderOnce for ListItem {
                     )
                     .when(self.end_slot.is_some(), |this| this.justify_between())
                     .map(|this| match self.end_slot_visibility {
-                        EndSlotVisibility::Always if let Some(end_slot) = self.end_slot => {
-                            this.child(h_flex().flex_shrink_1().overflow_hidden().child(end_slot))
-                        }
+                        EndSlotVisibility::Always if let Some(end_slot) = self.end_slot => this
+                            .child(
+                                h_flex()
+                                    .flex_shrink_1()
+                                    .when(self.prioritize_end_slot, |this| this.flex_shrink_0())
+                                    .overflow_hidden()
+                                    .child(end_slot),
+                            ),
                         EndSlotVisibility::OnHover if let Some(end_slot) = self.end_slot => this
                             .child(
                                 h_flex()
                                     .flex_shrink_1()
+                                    .when(self.prioritize_end_slot, |this| this.flex_shrink_0())
                                     .overflow_hidden()
                                     .visible_on_hover("list_item")
                                     .child(end_slot),
@@ -454,6 +472,7 @@ impl RenderOnce for ListItem {
                             h_flex()
                                 .relative()
                                 .flex_shrink_1()
+                                .when(self.prioritize_end_slot, |this| this.flex_shrink_0())
                                 .child(h_flex().visible_on_hover("list_item").child(hover_slot))
                                 .when_some(self.end_slot, |this, end_slot| {
                                     this.child(

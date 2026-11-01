@@ -788,6 +788,23 @@ impl BufferSerialization {
 pub trait Addon: 'static {
     fn extend_key_context(&self, _: &mut KeyContext, _: &App) {}
 
+    fn line_number_overrides(&self, _: &App) -> Option<Arc<[Option<u32>]>> {
+        None
+    }
+
+    fn gutter_annotations(&self, _: &App) -> Option<Arc<dyn GutterAnnotations>> {
+        None
+    }
+
+    fn extend_context_menu(
+        &self,
+        menu: ui::ContextMenu,
+        _: &mut Window,
+        _: &mut App,
+    ) -> ui::ContextMenu {
+        menu
+    }
+
     fn render_buffer_header_controls(
         &self,
         _: &ExcerptBoundaryInfo,
@@ -817,6 +834,18 @@ pub trait Addon: 'static {
     fn to_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         None
     }
+}
+
+pub trait GutterAnnotations {
+    fn width_in_characters(&self, cx: &App) -> usize;
+
+    fn render_row(
+        &self,
+        row: &RowInfo,
+        style: &TextStyle,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement>;
 }
 
 struct ChangeLocation {
@@ -1278,6 +1307,8 @@ pub struct EditorSnapshot {
     show_breakpoints: Option<bool>,
     show_bookmarks: Option<bool>,
     git_blame_gutter_max_author_length: Option<usize>,
+    gutter_annotation_width: Option<usize>,
+    line_number_overrides: Option<Arc<[Option<u32>]>>,
     pub display_snapshot: DisplaySnapshot,
     pub placeholder_display_snapshot: Option<DisplaySnapshot>,
     is_focused: bool,
@@ -3178,6 +3209,13 @@ impl Editor {
             show_bookmarks: self.show_bookmarks,
             show_breakpoints: self.show_breakpoints,
             git_blame_gutter_max_author_length,
+            line_number_overrides: self
+                .addons
+                .values()
+                .find_map(|addon| addon.line_number_overrides(cx)),
+            gutter_annotation_width: self
+                .gutter_annotations(cx)
+                .map(|annotations| annotations.width_in_characters(cx)),
             scroll_anchor: self.scroll_manager.shared_scroll_anchor(cx),
             display_snapshot,
             placeholder_display_snapshot: self
@@ -3194,6 +3232,16 @@ impl Editor {
 
     pub fn language_at<T: ToOffset>(&self, point: T, cx: &App) -> Option<Arc<Language>> {
         self.buffer.read(cx).language_at(point, cx)
+    }
+
+    fn gutter_annotations(&self, cx: &App) -> Option<Arc<dyn GutterAnnotations>> {
+        if self.mode().is_minimap() {
+            return None;
+        }
+
+        self.addons
+            .values()
+            .find_map(|addon| addon.gutter_annotations(cx))
     }
 
     pub fn file_at<T: ToOffset>(&self, point: T, cx: &App) -> Option<Arc<dyn language::File>> {
@@ -12504,7 +12552,12 @@ impl EditorSnapshot {
     }
 
     pub fn max_line_number_width(&self, style: &EditorStyle, window: &mut Window) -> Pixels {
-        let digit_count = self.widest_line_number().ilog10() + 1;
+        let widest = self
+            .line_number_overrides
+            .as_ref()
+            .and_then(|numbers| numbers.iter().flatten().max().copied())
+            .unwrap_or_default();
+        let digit_count = self.widest_line_number().max(widest).ilog10() + 1;
         column_pixels(style, digit_count as usize, window)
     }
 
@@ -12547,18 +12600,23 @@ impl EditorSnapshot {
             let show_breakpoints = self.show_breakpoints.unwrap_or(gutter_settings.breakpoints);
             let show_bookmarks = self.show_bookmarks.unwrap_or(gutter_settings.bookmarks);
 
-            let git_blame_entries_width =
-                self.git_blame_gutter_max_author_length
-                    .map(|max_author_length| {
-                        let renderer = cx.global::<GlobalBlameRenderer>().0.clone();
+            let git_blame_entries_width = self
+                .gutter_annotation_width
+                .map(|width| ch_advance * width)
+                .or_else(|| {
+                    self.git_blame_gutter_max_author_length
+                        .map(|max_author_length| {
+                            let renderer = cx.global::<GlobalBlameRenderer>().0.clone();
 
-                        let max_char_count = max_author_length.min(renderer.max_author_length())
-                            + ::git::SHORT_SHA_LENGTH
-                            + renderer.max_timestamp_width(cx);
+                            let max_char_count = max_author_length
+                                .min(renderer.max_author_length())
+                                + ::git::SHORT_SHA_LENGTH
+                                + renderer.max_timestamp_width(cx);
 
-                        ch_advance * max_char_count
-                            + renderer.blame_entry_non_text_width(window, cx)
-                    });
+                            ch_advance * max_char_count
+                                + renderer.blame_entry_non_text_width(window, cx)
+                        })
+                });
 
             let is_singleton = self.buffer_snapshot().is_singleton();
 

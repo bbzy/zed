@@ -1821,5 +1821,5 @@
       "cmd-shift-right": ["tabular_data::ExtendSelection", { "direction": "right", "unit": "edge" }],
       "escape": "tabular_data::ClearSelection",
     },
-  },
+  }
 ]

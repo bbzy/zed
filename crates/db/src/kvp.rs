@@ -100,6 +100,13 @@ pub struct ScopedKeyValueStore<'a> {
 }
 
 impl ScopedKeyValueStore<'_> {
+    pub fn keys(&self) -> anyhow::Result<Vec<String>> {
+        self.store.select_bound::<&str, String>(
+            "SELECT key FROM scoped_kv_store WHERE namespace = (?) ORDER BY key",
+        )?(self.namespace)
+        .context("Failed to read scoped_kv_store keys")
+    }
+
     pub fn read(&self, key: &str) -> anyhow::Result<Option<String>> {
         self.store.select_row_bound::<(&str, &str), String>(
             "SELECT value FROM scoped_kv_store WHERE namespace = (?) AND key = (?)",
@@ -198,6 +205,8 @@ mod tests {
             .unwrap();
         assert_eq!(scope_a.read("key-1").unwrap(), Some("value-a1".to_string()));
         assert_eq!(scope_b.read("key-1").unwrap(), Some("value-b1".to_string()));
+        assert_eq!(scope_a.keys().unwrap(), vec!["key-1"]);
+        assert_eq!(scope_b.keys().unwrap(), vec!["key-1"]);
 
         // delete removes a single key without affecting others in the namespace
         scope_a

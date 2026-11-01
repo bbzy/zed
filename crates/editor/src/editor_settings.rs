@@ -262,14 +262,7 @@ impl Settings for EditorSettings {
             },
             scrollbar: Scrollbar {
                 show: scrollbar.show.map(ui_scrollbar_settings_from_raw).unwrap(),
-                git_diff: scrollbar.git_diff.unwrap()
-                    && content
-                        .git
-                        .as_ref()
-                        .unwrap()
-                        .enabled
-                        .unwrap()
-                        .is_git_diff_enabled(),
+                git_diff: scrollbar.git_diff.unwrap(),
                 selected_text: scrollbar.selected_text.unwrap(),
                 selected_symbol: scrollbar.selected_symbol.unwrap(),
                 search_results: scrollbar.search_results.unwrap(),

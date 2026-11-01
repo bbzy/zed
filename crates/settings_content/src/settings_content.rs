@@ -200,6 +200,7 @@ pub struct SettingsContent {
 
     pub git_panel: Option<GitPanelSettingsContent>,
     pub git_graph: Option<GitGraphSettingsContent>,
+    pub kk_workbench: Option<KkWorkbenchSettingsContent>,
 
     pub tabs: Option<ItemSettingsContent>,
     pub tab_bar: Option<TabBarSettingsContent>,
@@ -406,7 +407,7 @@ impl SettingsContent {
 fallible_options::flattened_deserialize!(SettingsContent {
     sections: { project, theme, extension, workspace, editor, remote },
     options: {
-        call_hierarchy, command_palette, file_finder, git_panel, git_graph, tabs, tab_bar, tab_switcher, status_bar, preview_tabs, agent,
+        call_hierarchy, command_palette, file_finder, git_panel, git_graph, kk_workbench, tabs, tab_bar, tab_switcher, status_bar, preview_tabs, agent,
         agent_servers, audio, auto_update, base_keymap, collaboration_panel, debugger, diagnostics,
         git,
         global_lsp_settings, image_viewer, markdown_preview, repl, helix_mode, hide_mouse,
@@ -735,6 +736,31 @@ pub struct CallSettingsContent {
     ///
     /// Default: false
     pub share_on_join: Option<bool>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct KkWorkbenchSettingsContent {
+    /// Side of the workspace where KK Workbench is docked.
+    pub dock: Option<DockPosition>,
+    /// Path to the KK executable.
+    pub executable_path: Option<String>,
+    /// Refresh history and comparisons after saving a file or returning to Zed.
+    pub auto_refresh: Option<bool>,
+    pub blame: Option<KkBlameSettingsContent>,
+    /// Diagnostic categories: `copydiff` and `perf`.
+    pub debug: Option<Vec<String>>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct KkBlameSettingsContent {
+    /// Annotation width in monospace characters, between 24 and 80.
+    pub column_width: Option<u32>,
+    /// Show author and date only on the first line of a contiguous change.
+    pub compact: Option<bool>,
+    /// Show blame information for the current line in the status bar.
+    pub show_status_bar: Option<bool>,
 }
 
 #[with_fallible_options]

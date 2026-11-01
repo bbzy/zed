@@ -412,6 +412,7 @@ impl BranchDiff {
                                 ReviewBranchDiff {
                                     diff_text: diff_text.into(),
                                     base_ref,
+                                    context: None,
                                 }
                                 .boxed_clone(),
                                 cx,

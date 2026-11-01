@@ -93,6 +93,7 @@ pub struct BufferSearchBar {
     scroll_handle: ScrollHandle,
     regex_language: Option<Arc<Language>>,
     splittable_editor: Option<WeakEntity<SplittableEditor>>,
+    single_file_item: bool,
     _splittable_editor_subscription: Option<Subscription>,
 }
 
@@ -544,6 +545,8 @@ impl ToolbarItemView for BufferSearchBar {
     ) -> ToolbarItemLocation {
         cx.notify();
         self.active_searchable_item_subscriptions.take();
+        self.single_file_item =
+            item.is_some_and(|item| item.buffer_kind(cx) == ItemBufferKind::Singleton);
         self.splittable_editor = None;
         self._splittable_editor_subscription = None;
         self.pending_search.take();
@@ -830,6 +833,7 @@ impl BufferSearchBar {
             scroll_handle: ScrollHandle::new(),
             regex_language: None,
             splittable_editor: None,
+            single_file_item: false,
             _splittable_editor_subscription: None,
         }
     }
@@ -995,7 +999,8 @@ impl BufferSearchBar {
     // We provide an expand/collapse button if we are in a multibuffer
     // and not doing a project search.
     fn needs_expand_collapse_option(&self, cx: &App) -> bool {
-        !self.uses_hidden_splittable_editor(cx)
+        !self.single_file_item
+            && !self.uses_hidden_splittable_editor(cx)
             && self.active_searchable_item.as_ref().is_some_and(|item| {
                 item.buffer_kind(cx) == ItemBufferKind::Multibuffer
                     && !item.supported_options(cx).find_in_results

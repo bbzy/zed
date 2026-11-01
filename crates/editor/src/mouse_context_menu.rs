@@ -243,7 +243,7 @@ pub fn deploy_context_menu(
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
             });
 
-        ui::ContextMenu::build(window, cx, |menu, _window, _cx| {
+        ui::ContextMenu::build(window, cx, |menu, window, cx| {
             let builder = menu
                 .on_blur_subscription(Subscription::new(|| {}))
                 .when(run_to_cursor, |builder| {
@@ -326,6 +326,9 @@ pub fn deploy_context_menu(
                     "View File History",
                     Box::new(git::FileHistory),
                 );
+            let builder = editor.addons.values().fold(builder, |menu, addon| {
+                addon.extend_context_menu(menu, window, cx)
+            });
             match focus {
                 Some(focus) => builder.context(focus),
                 None => builder,

@@ -1731,5 +1731,5 @@
       "ctrl-shift-end": ["tabular_data::ExtendSelection", { "direction": "down", "unit": "edge" }],
       "escape": "tabular_data::ClearSelection",
     },
-  },
+  }
 ]

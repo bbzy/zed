@@ -1087,6 +1087,16 @@
     // Show "absolute" or "relative" dates in graph rows.
     "date_style": "absolute",
   },
+  "kk_workbench": {
+    "executable_path": "kk",
+    "auto_refresh": true,
+    "blame": {
+      "column_width": 42,
+      "compact": false,
+      "show_status_bar": true,
+    },
+    "debug": [],
+  },
   "git_panel": {
     // Show "relative" or "absolute" dates in commit history.
     "date_style": "relative",

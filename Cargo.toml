@@ -657,6 +657,8 @@ http = "1.1"
 http-body = "1.0"
 httparse = "1.10"
 human_bytes = "0.4.1"
+icu_collator = "2.3.0"
+icu_locale_core = "2.3.0"
 icu_segmenter = { version = "2.3.0", default-features = false, features = ["compiled_data"] }
 idna = "1.0"
 ignore = "0.4.22"
