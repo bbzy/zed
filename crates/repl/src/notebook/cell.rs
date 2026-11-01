@@ -469,7 +469,7 @@ impl MarkdownCell {
             );
 
             editor.set_show_gutter(false, cx);
-            editor.set_use_modal_editing(true);
+            editor.set_use_modal_editing(true, cx);
             editor.disable_mouse_wheel_zoom();
             editor.disable_scrollbars_and_minimap(window, cx);
             editor
@@ -753,7 +753,7 @@ impl CodeCell {
             editor.disable_scrollbars_and_minimap(window, cx);
             editor.set_text(source.clone(), window, cx);
             editor.set_show_gutter(false, cx);
-            editor.set_use_modal_editing(true);
+            editor.set_use_modal_editing(true, cx);
             editor
         });
 

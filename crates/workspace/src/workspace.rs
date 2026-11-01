@@ -1654,6 +1654,7 @@ struct DispatchingKeystrokes {
 pub struct Workspace {
     weak_self: WeakEntity<Self>,
     workspace_actions: Vec<Box<dyn Fn(Div, &Workspace, &mut Window, &mut Context<Self>) -> Div>>,
+    key_context_contributors: Vec<Box<dyn Fn(&Workspace, &mut KeyContext, &App)>>,
     zoomed: Option<AnyWeakView>,
     previous_dock_drag_coordinates: Option<Point<Pixels>>,
     zoomed_position: Option<DockPosition>,
@@ -2206,6 +2207,7 @@ impl Workspace {
             _subscriptions: subscriptions,
             pane_history_timestamp,
             workspace_actions: Default::default(),
+            key_context_contributors: Vec::new(),
             // This data will be incorrect, but it will be overwritten by the time it needs to be used.
             bounds: Default::default(),
             centered_layout: false,
@@ -8395,7 +8397,18 @@ impl Workspace {
             }
         }
 
+        for contribute in &self.key_context_contributors {
+            contribute(self, &mut context, cx);
+        }
+
         context
+    }
+
+    pub fn register_key_context_contributor(
+        &mut self,
+        contribute: impl Fn(&Workspace, &mut KeyContext, &App) + 'static,
+    ) {
+        self.key_context_contributors.push(Box::new(contribute));
     }
 
     /// Multiworkspace uses this to add workspace action handling to itself

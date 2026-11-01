@@ -1120,6 +1120,7 @@ impl Item for Editor {
         cx: &mut Context<Self>,
     ) {
         self.workspace = Some((workspace.weak_handle(), workspace.database_id()));
+        self.set_use_modal_editing(matches!(self.mode, crate::EditorMode::Full { .. }), cx);
         if let Some(workspace_entity) = &workspace.weak_handle().upgrade() {
             cx.subscribe(
                 workspace_entity,
