@@ -14,9 +14,8 @@ use editor::{
     test::editor_test_context::EditorTestContext,
 };
 use futures::StreamExt;
-#[cfg(target_os = "windows")]
 use gpui::AppContext as _;
-use gpui::{KeyBinding, Modifiers, MouseButton, TestAppContext, px};
+use gpui::{KeyBinding, Modifiers, MouseButton, TestAppContext, UpdateGlobal, px};
 use itertools::Itertools;
 use language::{CursorShape, Language, LanguageConfig, Point};
 pub use neovim_backed_test_context::*;
@@ -41,6 +40,83 @@ use crate::{
 };
 
 use util_macros::perf;
+
+#[gpui::test]
+async fn test_modal_editing_is_limited_to_workspace_content(cx: &mut TestAppContext) {
+    let mut cx = VimTestContext::new(cx, true).await;
+    let embedded = cx.update(|window, cx| {
+        cx.new(|cx| {
+            let buffer = cx.new(|cx| language::Buffer::local("", cx));
+            Editor::for_buffer(buffer, None, window, cx)
+        })
+    });
+    for (vim, helix) in [(true, false), (false, true), (false, false), (true, false)] {
+        cx.update(|_, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.vim_mode = Some(vim);
+                    settings.helix_mode = Some(helix);
+                });
+            });
+        });
+        cx.run_until_parked();
+        cx.update_editor(|editor, _, _| {
+            assert!(editor.use_modal_editing());
+            assert_eq!(editor.addon::<VimAddon>().is_some(), vim || helix);
+        });
+        cx.update(|_, cx| {
+            let editor = embedded.read(cx);
+            assert!(!editor.use_modal_editing());
+            assert!(editor.addon::<VimAddon>().is_none());
+        });
+    }
+    cx.update_editor(|editor, _, cx| editor.set_use_modal_editing(false, cx));
+    cx.run_until_parked();
+    cx.update_editor(|editor, _, _| assert!(editor.addon::<VimAddon>().is_none()));
+    cx.update_editor(|editor, _, cx| editor.set_use_modal_editing(true, cx));
+    cx.run_until_parked();
+    cx.update_editor(|editor, _, _| assert!(editor.addon::<VimAddon>().is_some()));
+    cx.update(|_, cx| {
+        let bindings =
+            settings::KeymapFile::load_asset_allow_partial_failure("keymaps/vim.json", cx)
+                .expect("Vim keymap");
+        let keymap = gpui::Keymap::new(bindings);
+        let key = gpui::Keystroke::parse("j").expect("key");
+        for leaf in [
+            "Editor mode = full",
+            "ProjectPanel not_editing",
+            "OutlinePanel not_editing",
+            "GitGraph",
+            "GitPanel ChangesList",
+            "ThreadsSidebar",
+            "NavigationMenu",
+        ] {
+            let contexts = [
+                gpui::KeyContext::parse("Workspace").expect("workspace context"),
+                gpui::KeyContext::parse(leaf).expect("leaf context"),
+            ];
+            let (bindings, _) = keymap.bindings_for_input(std::slice::from_ref(&key), &contexts);
+            assert!(bindings.is_empty(), "Vim must not handle j in {leaf}");
+        }
+        let enter = gpui::Keystroke::parse("enter").expect("Enter");
+        for (workspace_context, expected) in [
+            ("Workspace", None),
+            ("Workspace VimSearch", Some("vim::SearchSubmit")),
+        ] {
+            let contexts = [
+                gpui::KeyContext::parse(workspace_context).expect("workspace context"),
+                gpui::KeyContext::parse("Pane").expect("pane context"),
+                gpui::KeyContext::parse("BufferSearchBar").expect("search context"),
+                gpui::KeyContext::parse("Editor mode = single_line").expect("input context"),
+            ];
+            let (bindings, _) = keymap.bindings_for_input(std::slice::from_ref(&enter), &contexts);
+            assert_eq!(
+                bindings.first().map(|binding| binding.action().name()),
+                expected
+            );
+        }
+    });
+}
 
 #[perf]
 #[gpui::test]
@@ -2721,6 +2797,7 @@ async fn test_folded_multibuffer_excerpts(cx: &mut gpui::TestAppContext) {
             cx,
         );
         let mut editor = Editor::new(EditorMode::full(), multi_buffer.clone(), None, window, cx);
+        editor.set_use_modal_editing(true, cx);
 
         let buffer_ids = multi_buffer
             .read(cx)

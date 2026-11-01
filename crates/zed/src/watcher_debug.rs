@@ -153,7 +153,6 @@ fn create_editor(
         let mut editor = Editor::for_buffer(buffer, None, window, cx);
         editor.set_read_only(true);
         editor.set_input_enabled(false);
-        editor.set_use_modal_editing(false);
         editor.set_show_gutter(false, cx);
         editor.hide_minimap_by_default(window, cx);
         editor.set_show_edit_predictions(Some(false), window, cx);

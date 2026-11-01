@@ -2483,7 +2483,7 @@ impl Editor {
             workspace: None,
             input_enabled: !is_minimap,
             expects_character_input: !is_minimap,
-            use_modal_editing: full_mode,
+            use_modal_editing: false,
             read_only: is_minimap,
             use_autoclose: true,
             use_auto_surround: true,
@@ -3465,8 +3465,12 @@ impl Editor {
         self.buffer_serialization.is_some()
     }
 
-    pub fn set_use_modal_editing(&mut self, to: bool) {
+    pub fn set_use_modal_editing(&mut self, to: bool, cx: &mut Context<Self>) {
+        if self.use_modal_editing == to {
+            return;
+        }
         self.use_modal_editing = to;
+        cx.emit(EditorEvent::ModalEditingChanged);
     }
 
     pub fn use_modal_editing(&self) -> bool {
@@ -12720,6 +12724,7 @@ impl Deref for EditorSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EditorEvent {
+    ModalEditingChanged,
     /// Emitted when the stored review comments change (added, removed, or updated).
     ReviewCommentsChanged {
         /// The new total count of review comments.

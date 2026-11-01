@@ -289,6 +289,18 @@ pub fn init(cx: &mut App) {
     cx.observe_new(Vim::register).detach();
 
     cx.observe_new(|workspace: &mut Workspace, _, _| {
+        workspace.register_key_context_contributor(|workspace, context, cx| {
+            if workspace
+                .active_item_as::<Editor>(cx)
+                .and_then(|editor| editor.read(cx).addon::<VimAddon>().cloned())
+                .is_some_and(|addon| {
+                    let vim = addon.entity.read(cx);
+                    !vim.search.cmd_f_search && !vim.search.prior_selections.is_empty()
+                })
+            {
+                context.add("VimSearch");
+            }
+        });
         workspace.register_action(|workspace, _: &ToggleVimMode, _, cx| {
             let fs = workspace.app_state().fs.clone();
             let currently_enabled = VimModeSetting::get_global(cx).0;
@@ -622,15 +634,22 @@ impl Vim {
             return;
         };
 
-        if !editor.use_modal_editing() {
-            return;
-        }
-
-        let mut was_enabled = Vim::enabled(cx);
         let mut was_helix_enabled = HelixModeSetting::get_global(cx).0;
         let mut was_toggle = VimSettings::get_global(cx).toggle_relative_line_numbers;
+        cx.subscribe_in(&cx.entity(), window, |editor, _, event, window, cx| {
+            if matches!(event, EditorEvent::ModalEditingChanged) {
+                let enabled = editor.use_modal_editing() && Vim::enabled(cx);
+                if enabled && editor.addon::<VimAddon>().is_none() {
+                    Self::activate(editor, window, cx);
+                } else if !enabled && editor.addon::<VimAddon>().is_some() {
+                    Self::deactivate(editor, cx);
+                }
+            }
+        })
+        .detach();
         cx.observe_global_in::<SettingsStore>(window, move |editor, window, cx| {
-            let enabled = Vim::enabled(cx);
+            let enabled = editor.use_modal_editing() && Vim::enabled(cx);
+            let was_enabled = editor.addon::<VimAddon>().is_some();
             let helix_enabled = HelixModeSetting::get_global(cx).0;
             let toggle = VimSettings::get_global(cx).toggle_relative_line_numbers;
             if enabled && was_enabled && (toggle != was_toggle) {
@@ -654,13 +673,12 @@ impl Vim {
             if was_enabled {
                 Self::deactivate(editor, cx);
             }
-            was_enabled = enabled;
             if enabled {
                 Self::activate(editor, window, cx);
             }
         })
         .detach();
-        if was_enabled {
+        if editor.use_modal_editing() && Vim::enabled(cx) {
             Self::activate(editor, window, cx)
         }
     }
