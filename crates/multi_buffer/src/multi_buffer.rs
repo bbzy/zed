@@ -6584,7 +6584,14 @@ impl MultiBufferSnapshot {
     }
 
     fn try_path_for_anchor(&self, anchor: ExcerptAnchor) -> Option<&PathKey> {
-        self.path_keys.get_index(anchor.path.0 as usize)
+        let original = self.path_keys.get_index(anchor.path.0 as usize)?;
+        // Sorting can change the key while the buffer still belongs to the same file.
+        Some(
+            self.buffers
+                .get(&anchor.buffer_id())
+                .filter(|state| state.path_key.path == original.path)
+                .map_or(original, |state| &state.path_key),
+        )
     }
 
     pub fn path_for_anchor(&self, anchor: ExcerptAnchor) -> &PathKey {
@@ -6843,13 +6850,13 @@ impl MultiBufferSnapshot {
         }
 
         if let Anchor::Excerpt(excerpt_anchor) = range.start
-            && (excerpt_anchor.path != start_excerpt.path_key_index
+            && (self.path_for_anchor(excerpt_anchor) != &start_excerpt.path_key
                 || excerpt_anchor.buffer_id() != snapshot.remote_id())
         {
             return None;
         }
         if let Anchor::Excerpt(excerpt_anchor) = range.end
-            && (excerpt_anchor.path != end_excerpt.path_key_index
+            && (self.path_for_anchor(excerpt_anchor) != &end_excerpt.path_key
                 || excerpt_anchor.buffer_id() != snapshot.remote_id())
         {
             return None;
@@ -7505,7 +7512,7 @@ impl Excerpt {
     }
 
     pub(crate) fn contains(&self, anchor: &ExcerptAnchor, snapshot: &MultiBufferSnapshot) -> bool {
-        self.path_key_index == anchor.path
+        &self.path_key == snapshot.path_for_anchor(*anchor)
             && self.buffer_id == anchor.text_anchor.buffer_id
             && self
                 .range

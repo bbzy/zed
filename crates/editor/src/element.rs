@@ -709,6 +709,10 @@ impl EditorElement {
         register_action(editor, window, Editor::toggle_read_only);
         register_action(editor, window, Editor::reload_file);
 
+        if !editor.read(cx).read_only(cx) || editor.read(cx).diff_hunk_action_target.is_some() {
+            register_action(editor, window, Editor::git_restore);
+        }
+
         if !editor.read(cx).read_only(cx) {
             register_action(editor, window, Editor::newline);
             register_action(editor, window, Editor::newline_above);
@@ -777,7 +781,6 @@ impl EditorElement {
             register_action(editor, window, Editor::accept_next_line_edit_prediction);
             register_action(editor, window, Editor::accept_edit_prediction);
             register_action(editor, window, Editor::restore_file);
-            register_action(editor, window, Editor::git_restore);
             register_action(editor, window, Editor::restore_and_next);
             register_action(editor, window, Editor::apply_all_diff_hunks);
             register_action(editor, window, Editor::apply_selected_diff_hunks);
@@ -1520,10 +1523,8 @@ impl EditorElement {
             ShowScrollbar::Auto => {
                 let editor = self.editor.read(cx);
                 let is_singleton = editor.buffer_kind(cx) == ItemBufferKind::Singleton;
-                let supports_git_diff_markers =
-                    is_singleton || editor.allow_git_diff_scrollbar_markers;
                 // Git
-                (supports_git_diff_markers && scrollbar_settings.git_diff && snapshot.buffer_snapshot().has_diff_hunks())
+                (editor.git_diff_scrollbar_markers_enabled(cx) && snapshot.buffer_snapshot().has_diff_hunks())
                 ||
                 // Buffer Search Results
                 (is_singleton && scrollbar_settings.search_results && editor.has_background_highlights(HighlightKey::BufferSearchHighlights))
@@ -2330,6 +2331,29 @@ impl EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Vec<AnyElement>> {
+        if let Some(annotations) = self.editor.read(cx).gutter_annotations(cx) {
+            let width = max_width.map_or(AvailableSpace::MaxContent, AvailableSpace::Definite);
+            return Some(
+                buffer_rows
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, row)| {
+                        let mut element =
+                            annotations.render_row(row, &self.style.text, window, cx)?;
+                        let start_y = line_height
+                            * (DisplayRow(start_row.0 + index as u32).as_f64() - scroll_position.y)
+                                as f32;
+                        element.prepaint_as_root(
+                            gutter_hitbox.origin + point(em_width, start_y),
+                            size(width, AvailableSpace::Definite(line_height)),
+                            window,
+                            cx,
+                        );
+                        Some(element)
+                    })
+                    .collect(),
+            );
+        }
         if !self
             .editor
             .update(cx, |editor, cx| editor.render_git_blame_gutter(cx))
@@ -2908,7 +2932,11 @@ impl EditorElement {
                     return None;
                 }
 
-                let number = relative_number.unwrap_or(&non_relative_number);
+                let number = if let Some(numbers) = &gutter.snapshot.line_number_overrides {
+                    numbers.get(row_info.buffer_row? as usize)?.as_ref()?
+                } else {
+                    relative_number.unwrap_or(&non_relative_number)
+                };
                 write!(&mut line_number, "{number}").unwrap();
 
                 let spec = active_rows.get(&display_row);
@@ -6404,8 +6432,7 @@ impl EditorElement {
         self.editor.update(cx, |editor, cx| {
             let is_singleton = editor.buffer_kind(cx) == ItemBufferKind::Singleton;
             let scrollbar_settings = EditorSettings::get_global(cx).scrollbar;
-            let show_git_diff_markers = scrollbar_settings.git_diff
-                && (is_singleton || editor.allow_git_diff_scrollbar_markers);
+            let show_git_diff_markers = editor.git_diff_scrollbar_markers_enabled(cx);
             if !is_singleton && !show_git_diff_markers {
                 editor.scrollbar_marker_state.dirty = true;
                 editor.scrollbar_marker_state.markers = Default::default();

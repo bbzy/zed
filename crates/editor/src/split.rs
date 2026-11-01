@@ -1190,6 +1190,13 @@ impl SplittableEditor {
             });
             rhs.inlay_hint_visibility_changed(cx);
         });
+        // Other views can retain the old left editor after the split closes.
+        // Its display map must stop translating edits through the unified right side.
+        lhs.editor.update(cx, |editor, cx| {
+            editor.display_map.update(cx, |display_map, cx| {
+                display_map.set_companion(None, cx);
+            });
+        });
         cx.notify();
     }
 

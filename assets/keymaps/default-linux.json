@@ -1706,5 +1706,5 @@
       "left": ["tabular_data::MoveFocusedCell", { "direction": "left" }],
       "right": ["tabular_data::MoveFocusedCell", { "direction": "right" }],
     },
-  },
+  }
 ]

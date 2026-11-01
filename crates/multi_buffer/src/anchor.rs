@@ -108,10 +108,10 @@ impl ExcerptAnchor {
     }
 
     pub(crate) fn cmp(&self, other: &Self, snapshot: &MultiBufferSnapshot) -> Ordering {
-        let Some(self_path_key) = snapshot.path_keys.get_index(self.path.0 as usize) else {
+        let Some(self_path_key) = snapshot.try_path_for_anchor(*self) else {
             panic!("anchor's path was never added to multibuffer")
         };
-        let Some(other_path_key) = snapshot.path_keys.get_index(other.path.0 as usize) else {
+        let Some(other_path_key) = snapshot.try_path_for_anchor(*other) else {
             panic!("anchor's path was never added to multibuffer")
         };
 
@@ -289,7 +289,7 @@ impl ExcerptAnchor {
 
         Some(AnchorSeekTarget::Excerpt {
             path_key,
-            path_key_index: self.path,
+            path_key_index: state.path_key_index,
             anchor: self.text_anchor(),
             snapshot: &state.buffer_snapshot,
         })

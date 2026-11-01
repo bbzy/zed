@@ -28,7 +28,10 @@ use std::{
     sync::Arc,
 };
 use ui::{DiffStat, Divider, Tooltip, prelude::*};
-use util::paths::{PathExt as _, PathStyle};
+use util::{
+    ResultExt as _,
+    paths::{PathExt as _, PathStyle},
+};
 use workspace::{
     Item, ItemHandle, ItemNavHistory, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
     Workspace,
@@ -488,37 +491,18 @@ impl Item for SoloDiffView {
     }
 
     fn breadcrumbs(&self, cx: &App) -> Option<(Vec<HighlightedText>, Option<gpui::Font>)> {
-        let text: SharedString = self
+        let text = self
             .repo_path
             .as_ref()
             .display(PathStyle::local())
             .into_owned()
             .into();
-
-        // When the git panel is set to convey status via label color rather
-        // than an icon, tint the whole path like multibuffer headers do.
-        let mut highlights = Vec::new();
-        if GitPanelSettings::get_global(cx).status_style == StatusStyle::LabelColor
-            && let Some(status) = self
-                .repository
-                .read(cx)
-                .status_for_path(&self.repo_path)
-                .map(|entry| entry.status)
-        {
-            highlights.push((
-                0..text.len(),
-                HighlightStyle::color(file_status_label_color(Some(status)).color(cx)),
-            ));
-        }
-
-        Some((
-            vec![HighlightedText { text, highlights }],
-            Some(
-                theme_settings::ThemeSettings::get_global(cx)
-                    .buffer_font
-                    .clone(),
-            ),
-        ))
+        let status = self
+            .repository
+            .read(cx)
+            .status_for_path(&self.repo_path)
+            .map(|entry| entry.status);
+        Some(diff_file_breadcrumbs(text, status, cx))
     }
 
     fn added_to_workspace(
@@ -557,15 +541,125 @@ impl Render for SoloDiffView {
 
 pub struct SoloDiffStyleToolbar {
     solo_diff: Option<WeakEntity<SoloDiffView>>,
+    kk_diff: Option<Entity<crate::kk_diff_controls::KkDiffControls>>,
+    _kk_subscription: Option<Subscription>,
+}
+
+pub(super) fn diff_file_breadcrumbs(
+    text: SharedString,
+    status: Option<git::status::FileStatus>,
+    cx: &App,
+) -> (Vec<HighlightedText>, Option<gpui::Font>) {
+    let mut highlights = Vec::new();
+    if GitPanelSettings::get_global(cx).status_style == StatusStyle::LabelColor
+        && let Some(status) = status
+    {
+        highlights.push((
+            0..text.len(),
+            HighlightStyle::color(file_status_label_color(Some(status)).color(cx)),
+        ));
+    }
+    (
+        vec![HighlightedText { text, highlights }],
+        Some(
+            theme_settings::ThemeSettings::get_global(cx)
+                .buffer_font
+                .clone(),
+        ),
+    )
+}
+
+pub(super) fn diff_style_controls(
+    editor: Entity<SplittableEditor>,
+    showing_full_file: bool,
+    on_toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Div {
+    h_flex()
+        .debug_selector(|| "solo-diff-style-controls".into())
+        .pl_0p5()
+        .gap_1()
+        .child(diff_context_control(showing_full_file, on_toggle))
+        .child(DiffStyleControls::new(editor))
+        .child(Divider::vertical().mr_1())
+}
+
+fn diff_context_control(
+    showing_full_file: bool,
+    on_toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> IconButton {
+    let (icon, tooltip) = if showing_full_file {
+        (IconName::ChevronDownUp, "Show Changes Only")
+    } else {
+        (IconName::ChevronUpDown, "Show Full File")
+    };
+    IconButton::new("solo-diff-toggle-excerpts", icon)
+        .icon_size(IconSize::Small)
+        .tooltip(Tooltip::text(tooltip))
+        .on_click(on_toggle)
+}
+
+pub(super) fn diff_navigation_controls(
+    editor: Entity<SplittableEditor>,
+    enabled: bool,
+    cx: &App,
+) -> impl IntoElement + use<> {
+    let focus = editor.focus_handle(cx);
+    let previous_editor = editor.clone();
+    h_group_sm()
+        .child(
+            IconButton::new("up", IconName::ArrowUp)
+                .aria_label("Go to Previous Hunk")
+                .icon_size(IconSize::Small)
+                .disabled(!enabled)
+                .tooltip(Tooltip::for_action_title_in(
+                    "Go to Previous Hunk",
+                    &GoToPreviousHunk,
+                    &focus,
+                ))
+                .on_click(move |_, window, cx| {
+                    dispatch_diff_action(&previous_editor, &GoToPreviousHunk, window, cx);
+                }),
+        )
+        .child(
+            IconButton::new("down", IconName::ArrowDown)
+                .aria_label("Go to Next Hunk")
+                .icon_size(IconSize::Small)
+                .disabled(!enabled)
+                .tooltip(Tooltip::for_action_title_in(
+                    "Go to Next Hunk",
+                    &GoToHunk,
+                    &focus,
+                ))
+                .on_click(move |_, window, cx| {
+                    dispatch_diff_action(&editor, &GoToHunk, window, cx);
+                }),
+        )
+}
+
+pub(super) fn dispatch_diff_action(
+    editor: &Entity<SplittableEditor>,
+    action: &dyn gpui::Action,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let focus = editor.focus_handle(cx);
+    focus.focus(window, cx);
+    focus.dispatch_action(action, window, cx);
 }
 
 pub struct SoloDiffGitToolbar {
     solo_diff: Option<WeakEntity<SoloDiffView>>,
+    kk_diff: Option<Entity<crate::kk_diff_controls::KkDiffControls>>,
+    _kk_subscription: Option<Subscription>,
 }
 
 impl SoloDiffStyleToolbar {
     pub fn new(_: &mut Context<Self>) -> Self {
-        Self { solo_diff: None }
+        Self {
+            solo_diff: None,
+            kk_diff: None,
+            _kk_subscription: None,
+        }
     }
 
     fn solo_diff(&self) -> Option<Entity<SoloDiffView>> {
@@ -593,7 +687,13 @@ impl ToolbarItemView for SoloDiffStyleToolbar {
         self.solo_diff = active_pane_item
             .and_then(|item| item.act_as::<SoloDiffView>(cx))
             .map(|entity| entity.downgrade());
-        if self.solo_diff.is_some() {
+        self.kk_diff = active_pane_item
+            .and_then(|item| item.act_as::<crate::kk_diff_controls::KkDiffControls>(cx));
+        self._kk_subscription = self
+            .kk_diff
+            .as_ref()
+            .map(|controls| cx.observe(controls, |_, _, cx| cx.notify()));
+        if self.solo_diff.is_some() || self.kk_diff.is_some() {
             ToolbarItemLocation::PrimaryLeft
         } else {
             ToolbarItemLocation::Hidden
@@ -603,6 +703,34 @@ impl ToolbarItemView for SoloDiffStyleToolbar {
 
 impl Render for SoloDiffStyleToolbar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(controls) = &self.kk_diff {
+            let editor = controls.read(cx).editor.clone();
+            let showing_full_file = controls.read(cx).showing_full_file;
+            let status = controls.read(cx).status;
+            let generic_style_controls = controls.read(cx).generic_style_controls;
+            let show_status_icon =
+                GitPanelSettings::get_global(cx).status_style != StatusStyle::LabelColor;
+            let controls = controls.downgrade();
+            let on_toggle = move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                controls
+                    .update(cx, |controls, cx| controls.toggle_full_file(cx))
+                    .log_err();
+            };
+            let controls = if generic_style_controls {
+                h_flex()
+                    .pl_0p5()
+                    .gap_1()
+                    .child(diff_context_control(showing_full_file, on_toggle))
+            } else {
+                diff_style_controls(editor, showing_full_file, on_toggle)
+            };
+            return controls
+                .when_some(
+                    show_status_icon.then_some(status).flatten(),
+                    |this, status| this.child(git_status_icon(status)),
+                )
+                .into_any_element();
+        }
         let Some(solo_diff) = self.solo_diff() else {
             return Empty.into_any_element();
         };
@@ -623,36 +751,28 @@ impl Render for SoloDiffStyleToolbar {
         let show_status_icon =
             GitPanelSettings::get_global(cx).status_style != StatusStyle::LabelColor;
 
-        let (expand_icon, expand_tooltip) = if showing_full_file {
-            (IconName::ChevronDownUp, "Show Changes Only")
-        } else {
-            (IconName::ChevronUpDown, "Show Full File")
-        };
-
-        h_flex()
-            .pl_0p5()
-            .gap_1()
-            .child(
-                IconButton::new("solo-diff-toggle-excerpts", expand_icon)
-                    .icon_size(IconSize::Small)
-                    .tooltip(Tooltip::text(expand_tooltip))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.toggle_showing_full_file(cx);
-                    })),
-            )
-            .child(DiffStyleControls::new(editor_entity))
-            .child(Divider::vertical().mr_1())
-            .when_some(
-                show_status_icon.then_some(status).flatten(),
-                |this, status| this.child(git_status_icon(status)),
-            )
-            .into_any_element()
+        diff_style_controls(
+            editor_entity,
+            showing_full_file,
+            cx.listener(|this, _, _, cx| {
+                this.toggle_showing_full_file(cx);
+            }),
+        )
+        .when_some(
+            show_status_icon.then_some(status).flatten(),
+            |this, status| this.child(git_status_icon(status)),
+        )
+        .into_any_element()
     }
 }
 
 impl SoloDiffGitToolbar {
     pub fn new(_: &mut Context<Self>) -> Self {
-        Self { solo_diff: None }
+        Self {
+            solo_diff: None,
+            kk_diff: None,
+            _kk_subscription: None,
+        }
     }
 
     fn solo_diff(&self) -> Option<Entity<SoloDiffView>> {
@@ -696,7 +816,13 @@ impl ToolbarItemView for SoloDiffGitToolbar {
         self.solo_diff = active_pane_item
             .and_then(|item| item.act_as::<SoloDiffView>(cx))
             .map(|entity| entity.downgrade());
-        if self.solo_diff.is_some() {
+        self.kk_diff = active_pane_item
+            .and_then(|item| item.act_as::<crate::kk_diff_controls::KkDiffControls>(cx));
+        self._kk_subscription = self
+            .kk_diff
+            .as_ref()
+            .map(|controls| cx.observe(controls, |_, _, cx| cx.notify()));
+        if self.solo_diff.is_some() || self.kk_diff.is_some() {
             ToolbarItemLocation::PrimaryRight
         } else {
             ToolbarItemLocation::Hidden
@@ -756,7 +882,15 @@ mod tests {
 }
 
 impl Render for SoloDiffGitToolbar {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(controls) = &self.kk_diff {
+            return crate::kk_diff_controls::KkDiffControls::render_actions(
+                controls.clone(),
+                window,
+                cx,
+            )
+            .into_any_element();
+        }
         let Some(solo_diff) = self.solo_diff() else {
             return gpui::Empty.into_any_element();
         };
@@ -780,35 +914,11 @@ impl Render for SoloDiffGitToolbar {
                 DiffStat::new("solo-diff-stat", stat.added as usize, stat.deleted as usize)
             }))
             .child(Divider::vertical().ml_1())
-            .child(
-                h_group_sm()
-                    .child(
-                        IconButton::new("up", IconName::ArrowUp)
-                            .icon_size(IconSize::Small)
-                            .disabled(!button_states.prev_next)
-                            .tooltip(Tooltip::for_action_title_in(
-                                "Go to Previous Hunk",
-                                &GoToPreviousHunk,
-                                &focus_handle,
-                            ))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.dispatch_action(&GoToPreviousHunk, window, cx)
-                            })),
-                    )
-                    .child(
-                        IconButton::new("down", IconName::ArrowDown)
-                            .icon_size(IconSize::Small)
-                            .disabled(!button_states.prev_next)
-                            .tooltip(Tooltip::for_action_title_in(
-                                "Go to Next Hunk",
-                                &GoToHunk,
-                                &focus_handle,
-                            ))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.dispatch_action(&GoToHunk, window, cx)
-                            })),
-                    ),
-            )
+            .child(diff_navigation_controls(
+                solo_diff.editor.clone(),
+                button_states.prev_next,
+                cx,
+            ))
             .child(Divider::vertical())
             .child(
                 h_group_sm()

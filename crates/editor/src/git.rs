@@ -175,6 +175,8 @@ pub(super) struct StoredReviewComment {
     pub(super) comment: String,
     /// Anchors for the code range being reviewed.
     pub(super) range: Range<Anchor>,
+    // Keep source coordinates independent of whether deleted rows are displayed.
+    source_snapshot: MultiBufferSnapshot,
     /// Whether this comment is currently being edited inline.
     pub(super) is_editing: bool,
 }
@@ -182,6 +184,7 @@ pub(super) struct StoredReviewComment {
 /// Represents an active diff review overlay that appears when clicking the "Add Review" button.
 pub(super) struct DiffReviewOverlay {
     pub(super) anchor_range: Range<Anchor>,
+    source_snapshot: MultiBufferSnapshot,
     /// The block ID for the overlay.
     pub(super) block_id: CustomBlockId,
     /// The editor entity for the review input.
@@ -215,11 +218,17 @@ impl DiffReviewDragState {
 }
 
 impl StoredReviewComment {
-    fn new(id: usize, comment: String, anchor_range: Range<Anchor>) -> Self {
+    fn new(
+        id: usize,
+        comment: String,
+        anchor_range: Range<Anchor>,
+        source_snapshot: MultiBufferSnapshot,
+    ) -> Self {
         Self {
             id,
             comment,
             range: anchor_range,
+            source_snapshot,
             is_editing: false,
         }
     }
@@ -484,7 +493,7 @@ impl Editor {
     }
 
     pub fn git_restore(&mut self, _: &Restore, window: &mut Window, cx: &mut Context<Self>) {
-        if self.read_only(cx) {
+        if self.diff_hunk_action_target.is_none() && self.read_only(cx) {
             return;
         }
         let selections = self
@@ -494,6 +503,40 @@ impl Editor {
             .map(|s| s.range())
             .collect();
         self.restore_hunks_in_ranges(selections, window, cx);
+    }
+
+    pub fn can_restore_selected_hunks(&self, window: &Window, cx: &mut App) -> bool {
+        let read_only = match &self.diff_hunk_action_target {
+            Some(target) => target
+                .upgrade()
+                .is_none_or(|target| target.read(cx).read_only(cx)),
+            None => self.read_only(cx),
+        };
+        if read_only {
+            return false;
+        }
+
+        let snapshot = self.snapshot(window, cx);
+        let ranges = self
+            .selections
+            .all(&snapshot.display_snapshot)
+            .into_iter()
+            .map(|selection| selection.range());
+        let hunks = snapshot.hunks_for_ranges(ranges);
+        self.resolve_diff_hunks(hunks, cx).iter().any(|hunks| {
+            hunks.buffer.as_ref().is_some_and(|buffer| {
+                buffer.read(cx).capability() == language::Capability::ReadWrite
+            }) && hunks
+                .diff
+                .read(cx)
+                .operations()
+                .is_some_and(|operations| operations.supports_restore())
+                && hunks.hunks.iter().any(|hunk| {
+                    !(hunk.diff_base_byte_range.is_empty()
+                        && hunk.buffer_range.start.is_min()
+                        && hunk.buffer_range.end.is_max())
+                })
+        })
     }
 
     pub fn status_for_buffer_id(&self, buffer_id: BufferId, cx: &App) -> Option<FileStatus> {
@@ -675,6 +718,7 @@ impl Editor {
 
         self.diff_review_overlays.push(DiffReviewOverlay {
             anchor_range,
+            source_snapshot: buffer_snapshot,
             block_id,
             prompt_editor: prompt_editor.clone(),
             hunk_key,
@@ -736,6 +780,146 @@ impl Editor {
             .map(|overlay| &overlay.prompt_editor)
     }
 
+    pub fn diff_review_ranges(&self, cx: &App) -> impl Iterator<Item = Range<Anchor>> + use<> {
+        let current = self.buffer.read(cx).snapshot(cx);
+        // A comment can span files whose order has changed since it was written.
+        let sources = self
+            .stored_review_comments
+            .iter()
+            .flat_map(|(_, comments)| {
+                comments
+                    .iter()
+                    .map(|comment| (&comment.source_snapshot, &comment.range))
+            })
+            .chain(
+                self.diff_review_overlays
+                    .iter()
+                    .map(|overlay| (&overlay.source_snapshot, &overlay.anchor_range)),
+            );
+        let mut ranges = Vec::new();
+        for (snapshot, range) in sources {
+            for (buffer, range, deleted) in snapshot
+                .range_to_buffer_ranges_with_deleted_hunks(range.clone())
+                .chain(snapshot.range_to_buffer_ranges_with_deleted_hunks(range.end..range.end))
+            {
+                let anchors = if let Some(deleted) = deleted {
+                    let Some(source) = deleted
+                        .buffer_id()
+                        .and_then(|id| snapshot.buffer_for_id(id))
+                    else {
+                        continue;
+                    };
+                    let anchor = deleted.text_anchor_in(source);
+                    // Keep the insertion site when restored text no longer has a deleted hunk.
+                    anchor.bias_left(source)..anchor.bias_right(source)
+                } else {
+                    buffer.anchor_before(range.start)..buffer.anchor_after(range.end)
+                };
+                if let Some(range) = current.anchor_range_in_buffer(anchors) {
+                    ranges.push(range);
+                }
+            }
+        }
+        ranges.into_iter()
+    }
+
+    pub fn diff_review_text(&self, cx: &App) -> String {
+        let current_snapshot = self.buffer.read(cx).snapshot(cx);
+        let mut text = String::new();
+        for (hunk, comments) in &self.stored_review_comments {
+            for comment in comments {
+                let snapshot = &comment.source_snapshot;
+                let locations_start = text.len();
+                // Review selections include the final row; source segments are half-open.
+                let ranges = snapshot
+                    .range_to_buffer_ranges_with_deleted_hunks(comment.range.clone())
+                    .map(|(buffer, range, deleted)| (buffer, range, deleted, false))
+                    .chain(
+                        snapshot
+                            .range_to_buffer_ranges_with_deleted_hunks(
+                                comment.range.end..comment.range.end,
+                            )
+                            .take(1)
+                            .map(|(buffer, range, deleted)| (buffer, range, deleted, true)),
+                    )
+                    .map(|(buffer, range, deleted, endpoint)| {
+                        let source = deleted
+                            .and_then(|anchor| anchor.buffer_id())
+                            .and_then(|buffer_id| snapshot.buffer_for_id(buffer_id))
+                            .unwrap_or(buffer);
+                        (buffer, range, source, deleted.is_some(), endpoint)
+                    })
+                    .coalesce(|previous, next| {
+                        let (
+                            previous_buffer,
+                            ref previous_range,
+                            previous_source,
+                            previous_deleted,
+                            previous_endpoint,
+                        ) = previous;
+                        let (buffer, ref range, _, deleted, endpoint) = next;
+                        if previous_buffer.remote_id() == buffer.remote_id()
+                            && previous_deleted == deleted
+                            && previous_range.end == range.start
+                        {
+                            Ok((
+                                previous_buffer,
+                                previous_range.start..range.end,
+                                previous_source,
+                                previous_deleted,
+                                previous_endpoint || endpoint,
+                            ))
+                        } else {
+                            Err((previous, next))
+                        }
+                    });
+                for (original, range, source, deleted, includes_endpoint) in ranges {
+                    let buffer = if deleted {
+                        original
+                    } else if let Some(buffer) =
+                        current_snapshot.buffer_for_id(original.remote_id())
+                    {
+                        buffer
+                    } else {
+                        continue;
+                    };
+                    let start = original.anchor_after(range.start.0);
+                    let end = original.anchor_before(range.end.0);
+                    if !buffer.can_resolve(&start) || !buffer.can_resolve(&end) {
+                        continue;
+                    }
+                    let start = start.to_point(buffer);
+                    let end = end.to_point(buffer);
+                    let (start, end) = if start <= end {
+                        (start, end)
+                    } else {
+                        (end, start)
+                    };
+                    let path = current_snapshot
+                        .buffer_for_id(source.remote_id())
+                        .and_then(|buffer| buffer.file())
+                        .or_else(|| source.file())
+                        .map(|file| file.path().as_ref())
+                        .unwrap_or(hunk.file_path.as_ref());
+                    let end = if !includes_endpoint && start != end && end.column == 0 {
+                        end.row
+                    } else {
+                        end.row + 1
+                    };
+                    let start = start.row + 1;
+                    let side = if deleted { " (deleted)" } else { "" };
+                    text.push_str(&format!("{path}:{start}-{end}{side}\n"));
+                }
+                if text.len() == locations_start {
+                    continue;
+                }
+                text.push_str(&comment.comment);
+                text.push_str("\n\n");
+            }
+        }
+        text
+    }
+
     /// Sets whether the comments section is expanded in the diff review overlay.
     /// This is primarily used for testing.
     pub fn set_diff_review_comments_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
@@ -764,9 +948,14 @@ impl Editor {
         let id = self.next_review_comment_id;
         self.next_review_comment_id += 1;
 
-        let stored_comment = StoredReviewComment::new(id, comment, anchor_range);
-
         let snapshot = self.buffer.read(cx).snapshot(cx);
+        let source_snapshot = self
+            .diff_review_overlays
+            .iter()
+            .find(|overlay| overlay.anchor_range == anchor_range)
+            .map(|overlay| overlay.source_snapshot.clone())
+            .unwrap_or_else(|| snapshot.clone());
+        let stored_comment = StoredReviewComment::new(id, comment, anchor_range, source_snapshot);
         let key_point = hunk_key.hunk_start_anchor.to_point(&snapshot);
 
         // Find existing entry for this hunk or add a new one
@@ -3266,5 +3455,158 @@ impl Editor {
                 }
             });
         })
+    }
+}
+
+#[cfg(test)]
+mod review_export_tests {
+    use super::*;
+    use crate::test::editor_test_context::EditorTestContext;
+
+    fn start_review(context: &mut EditorTestContext, range: Range<DisplayRow>) {
+        context.update_editor(|editor, window, cx| {
+            editor.show_diff_review_overlay(range, window, cx);
+            let prompt = editor
+                .diff_review_prompt_editor()
+                .expect("review input")
+                .clone();
+            prompt.update(cx, |prompt, cx| {
+                prompt.insert("Keep this behavior", window, cx);
+            });
+        });
+    }
+
+    fn submit_review(context: &mut EditorTestContext, range: Range<DisplayRow>) -> String {
+        start_review(context, range);
+        context.update_editor(|editor, window, cx| {
+            editor.submit_diff_review_comment(window, cx);
+            assert_eq!(editor.total_review_comment_count(), 1);
+            editor.diff_review_text(cx)
+        })
+    }
+
+    #[gpui::test]
+    async fn kk_diff_review_text_preserves_comments_and_tracks_line_edits(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        crate::editor_tests::init_test(cx, |_| {});
+        let mut context = EditorTestContext::new(cx).await;
+        context.set_state("ˇfirst\nsecond\nthird\n");
+        context.update_editor(|editor, _, cx| {
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            let start = snapshot.anchor_before(Point::new(1, 0));
+            let end = snapshot.anchor_after(Point::new(1, 6));
+            let hunk = DiffHunkKey {
+                file_path: Arc::from(
+                    util::rel_path::RelPath::from_unix_str("file").expect("test path"),
+                ),
+                hunk_start_anchor: start,
+            };
+            editor.add_review_comment(hunk, "Keep this behavior".into(), start..end, cx);
+            assert_eq!(
+                editor.diff_review_text(cx),
+                "file:2-2\nKeep this behavior\n\n"
+            );
+            assert_eq!(editor.total_review_comment_count(), 1);
+            editor.buffer().update(cx, |buffer, cx| {
+                buffer.edit([(Point::zero()..Point::zero(), "inserted\n")], None, cx)
+            });
+            assert_eq!(
+                editor.diff_review_text(cx),
+                "file:3-3\nKeep this behavior\n\n"
+            );
+            assert_eq!(editor.total_review_comment_count(), 1);
+        });
+    }
+
+    #[gpui::test]
+    async fn kk_diff_review_text_preserves_deleted_and_current_locations(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        crate::editor_tests::init_test(cx, |_| {});
+        for submit_before_hiding in [true, false] {
+            let mut context = EditorTestContext::new(cx).await;
+            context.set_state("ˇaaa\neee\n");
+            context.set_head_text("aaa\nbbb\nccc\nddd\neee\n");
+            context.update_editor(|editor, window, cx| {
+                editor.expand_all_diff_hunks(&crate::ExpandAllDiffHunks, window, cx);
+            });
+            context.run_until_parked();
+            context.update_editor(|editor, _, cx| {
+                assert_eq!(editor.text(cx), "aaa\nbbb\nccc\nddd\neee\n");
+            });
+            start_review(&mut context, DisplayRow(2)..DisplayRow(4));
+            let expected = "file:3-4 (deleted)\nfile:2-2\nKeep this behavior\n\n";
+            if submit_before_hiding {
+                context.update_editor(|editor, window, cx| {
+                    editor.submit_diff_review_comment(window, cx);
+                    assert_eq!(editor.diff_review_text(cx), expected);
+                });
+            }
+            context.update_editor(|editor, _, cx| {
+                editor
+                    .buffer()
+                    .update(cx, |buffer, cx| buffer.set_show_deleted_hunks(false, cx));
+            });
+            context.run_until_parked();
+            context.update_editor(|editor, window, cx| {
+                if !submit_before_hiding {
+                    let prompt = editor
+                        .diff_review_prompt_editor()
+                        .expect("retained review input");
+                    window.focus(&prompt.focus_handle(cx), cx);
+                    editor.submit_diff_review_comment(window, cx);
+                }
+                assert_eq!(editor.total_review_comment_count(), 1);
+                assert_eq!(editor.diff_review_text(cx), expected);
+            });
+        }
+    }
+
+    #[gpui::test]
+    async fn kk_diff_review_text_preserves_selected_blank_endpoints(cx: &mut gpui::TestAppContext) {
+        crate::editor_tests::init_test(cx, |_| {});
+        for (current, base, range, locations) in [
+            ("ˇfirst\n", None, DisplayRow(0)..DisplayRow(1), "file:1-2\n"),
+            ("ˇ", None, DisplayRow(0)..DisplayRow(0), "file:1-1\n"),
+            (
+                "ˇfirst\n\nthird\n",
+                None,
+                DisplayRow(0)..DisplayRow(1),
+                "file:1-2\n",
+            ),
+            (
+                "ˇfirst\n\nthird\n",
+                None,
+                DisplayRow(1)..DisplayRow(1),
+                "file:2-2\n",
+            ),
+            (
+                "ˇaaa\n\n",
+                Some("aaa\nbbb\n"),
+                DisplayRow(1)..DisplayRow(2),
+                "file:2-2 (deleted)\nfile:2-2\n",
+            ),
+            (
+                "ˇaaa\nccc\n",
+                Some("aaa\nbbb\n\nccc\n"),
+                DisplayRow(1)..DisplayRow(2),
+                "file:2-3 (deleted)\n",
+            ),
+        ] {
+            let mut context = EditorTestContext::new(cx).await;
+            context.set_state(current);
+            if let Some(base) = base {
+                context.set_head_text(base);
+                context.update_editor(|editor, window, cx| {
+                    editor.expand_all_diff_hunks(&crate::ExpandAllDiffHunks, window, cx);
+                });
+                context.run_until_parked();
+            }
+            assert_eq!(
+                submit_review(&mut context, range),
+                format!("{locations}Keep this behavior\n\n")
+            );
+        }
     }
 }

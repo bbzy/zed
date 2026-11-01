@@ -20,7 +20,9 @@ use gpui::{
 use language::File as _;
 use persistence::ImageViewerDb;
 use project::{
-    ImageItem, Project, ProjectPath, git_store::GitStoreEvent, image_store::ImageItemEvent,
+    ImageItem, Project, ProjectPath,
+    git_store::GitStoreEvent,
+    image_store::{ImageItemEvent, ImageMetadata},
 };
 use settings::Settings;
 use theme_settings::ThemeSettings;
@@ -63,7 +65,7 @@ const ZOOM_EDITOR_APPROX_CHAR_WIDTH: f32 = 8.0; // Approximate width of one smal
 const ZOOM_EDITOR_HORIZONTAL_PADDING: f32 = 12.0; // Extra room for cursor and editor edge padding.
 
 pub struct ImageView {
-    image_item: Entity<ImageItem>,
+    source: ImageViewSource,
     project: Entity<Project>,
     focus_handle: FocusHandle,
     zoom_level: f32,
@@ -73,6 +75,41 @@ pub struct ImageView {
     image_size: Option<(u32, u32)>,
     pending_image: Option<Arc<gpui::Image>>,
     displayed_image: Option<DisplayedImage>,
+}
+
+#[derive(Clone)]
+enum ImageViewSource {
+    Project(Entity<ImageItem>),
+    Memory(Entity<MemoryImage>),
+}
+
+struct MemoryImage {
+    image: Arc<gpui::Image>,
+    title: SharedString,
+    metadata: ImageMetadata,
+}
+
+impl ImageViewSource {
+    fn project_item(&self) -> Option<&Entity<ImageItem>> {
+        match self {
+            Self::Project(item) => Some(item),
+            Self::Memory(_) => None,
+        }
+    }
+
+    fn image(&self, cx: &App) -> Arc<gpui::Image> {
+        match self {
+            Self::Project(item) => item.read(cx).image.clone(),
+            Self::Memory(image) => image.read(cx).image.clone(),
+        }
+    }
+
+    fn metadata(&self, cx: &App) -> Option<ImageMetadata> {
+        match self {
+            Self::Project(item) => item.read(cx).image_metadata,
+            Self::Memory(image) => Some(image.read(cx).metadata),
+        }
+    }
 }
 
 struct DisplayedImage {
@@ -92,6 +129,17 @@ impl DisplayedImage {
 }
 
 impl ImageView {
+    pub fn image_metadata(&self, cx: &App) -> Option<ImageMetadata> {
+        self.source.metadata(cx)
+    }
+
+    pub fn source_entity_id(&self) -> gpui::EntityId {
+        match &self.source {
+            ImageViewSource::Project(item) => item.entity_id(),
+            ImageViewSource::Memory(image) => image.entity_id(),
+        }
+    }
+
     fn is_dragging(&self) -> bool {
         self.last_mouse_position.is_some()
     }
@@ -144,12 +192,70 @@ impl ImageView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::from_source(ImageViewSource::Project(image_item), project, window, cx)
+    }
+
+    pub fn from_image(
+        image: Arc<gpui::Image>,
+        title: SharedString,
+        metadata: ImageMetadata,
+        project: Entity<Project>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let image = cx.new(|_| MemoryImage {
+            image,
+            title,
+            metadata,
+        });
+        Self::from_source(ImageViewSource::Memory(image), project, window, cx)
+    }
+
+    pub fn set_image(
+        &mut self,
+        image: Arc<gpui::Image>,
+        metadata: ImageMetadata,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let ImageViewSource::Memory(current) = &self.source else {
+            anyhow::bail!("Project images must be updated through their image store");
+        };
+        current.update(cx, |current, cx| {
+            current.image = image;
+            current.metadata = metadata;
+            cx.notify();
+        });
+        self.image_size = Some((metadata.width, metadata.height));
+        cx.emit(ImageViewEvent::TitleChanged);
+        cx.notify();
+        Ok(())
+    }
+
+    fn from_source(
+        source: ImageViewSource,
+        project: Entity<Project>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // Start loading the image to render in the background to prevent the view
         // from flickering in most cases.
-        let pending_image = image_item.read(cx).image.clone();
+        let pending_image = source.image(cx);
         let _render_image = pending_image.clone().get_render_image(window, cx);
 
-        cx.subscribe(&image_item, Self::on_image_event).detach();
+        if let Some(image_item) = source.project_item() {
+            cx.subscribe(image_item, Self::on_image_event).detach();
+        }
+
+        if let ImageViewSource::Memory(image) = &source {
+            cx.observe(image, |this, image, cx| {
+                let metadata = image.read(cx).metadata;
+                this.image_size = Some((metadata.width, metadata.height));
+                cx.emit(ImageViewEvent::TitleChanged);
+                cx.notify();
+            })
+            .detach();
+        }
+
         let git_store = project.read(cx).git_store().clone();
         cx.subscribe(&git_store, |_, _, event, cx| {
             if matches!(event, GitStoreEvent::DiffBaseChanged(_)) {
@@ -158,7 +264,7 @@ impl ImageView {
         })
         .detach();
         cx.on_release_in(window, |this, window, cx| {
-            let image_data = this.image_item.read(cx).image.clone();
+            let image_data = this.source.image(cx);
             if let Some(image) = image_data.clone().get_render_image(window, cx) {
                 cx.drop_image(image, None);
             }
@@ -166,13 +272,12 @@ impl ImageView {
         })
         .detach();
 
-        let image_size = image_item
-            .read(cx)
-            .image_metadata
-            .map(|m| (m.width, m.height));
+        let image_size = source
+            .metadata(cx)
+            .map(|metadata| (metadata.width, metadata.height));
 
         Self {
-            image_item,
+            source,
             project,
             focus_handle: cx.focus_handle(),
             zoom_level: 1.0,
@@ -196,10 +301,9 @@ impl ImageView {
             | ImageItemEvent::FileHandleChanged
             | ImageItemEvent::Reloaded => {
                 self.image_size = self
-                    .image_item
-                    .read(cx)
-                    .image_metadata
-                    .map(|m| (m.width, m.height));
+                    .source
+                    .metadata(cx)
+                    .map(|metadata| (metadata.width, metadata.height));
                 cx.emit(ImageViewEvent::TitleChanged);
                 cx.notify();
             }
@@ -255,7 +359,11 @@ impl ImageView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(path) = self.image_item.read(cx).abs_path(cx) {
+        if let Some(path) = self
+            .source
+            .project_item()
+            .and_then(|item| item.read(cx).abs_path(cx))
+        {
             self.project
                 .update(cx, |project, cx| project.reveal_path(&path, cx));
         }
@@ -417,7 +525,7 @@ impl Element for ImageContentElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let image_view = self.image_view.read(cx);
-        let image = image_view.image_item.read(cx).image.clone();
+        let image = image_view.source.image(cx);
 
         let first_layout = image_view.container_bounds.is_none();
 
@@ -554,19 +662,26 @@ impl Item for ImageView {
         cx: &App,
         f: &mut dyn FnMut(gpui::EntityId, &dyn project::ProjectItem),
     ) {
-        f(self.image_item.entity_id(), self.image_item.read(cx))
+        if let Some(image_item) = self.source.project_item() {
+            f(image_item.entity_id(), image_item.read(cx));
+        }
     }
 
     fn tab_tooltip_text(&self, cx: &App) -> Option<SharedString> {
-        let abs_path = self.image_item.read(cx).abs_path(cx)?;
+        if let ImageViewSource::Memory(image) = &self.source {
+            return Some(image.read(cx).title.clone());
+        }
+
+        let abs_path = self.source.project_item()?.read(cx).abs_path(cx)?;
         let file_path = abs_path.compact().to_string_lossy().into_owned();
         Some(file_path.into())
     }
 
     fn tab_content(&self, params: TabContentParams, _window: &Window, cx: &App) -> AnyElement {
-        let project_path = self.image_item.read(cx).project_path(cx);
-
-        let label_color = if ItemSettings::get_global(cx).git_status {
+        let label_color = if ItemSettings::get_global(cx).git_status
+            && let Some(image_item) = self.source.project_item()
+        {
+            let project_path = image_item.read(cx).project_path(cx);
             let git_status = self
                 .project
                 .read(cx)
@@ -595,16 +710,21 @@ impl Item for ImageView {
     }
 
     fn tab_content_text(&self, _: usize, cx: &App) -> SharedString {
-        self.image_item
-            .read(cx)
-            .file
-            .file_name(cx)
-            .to_string()
-            .into()
+        match &self.source {
+            ImageViewSource::Project(item) => item.read(cx).file.file_name(cx).to_string().into(),
+            ImageViewSource::Memory(image) => image.read(cx).title.clone(),
+        }
     }
 
     fn tab_icon(&self, _: &Window, cx: &App) -> Option<Icon> {
-        let path = self.image_item.read(cx).abs_path(cx)?;
+        let path = match &self.source {
+            ImageViewSource::Project(item) => item.read(cx).abs_path(cx)?,
+            ImageViewSource::Memory(_) => {
+                return ItemSettings::get_global(cx)
+                    .file_icons
+                    .then(|| Icon::new(IconName::Image));
+            }
+        };
         ItemSettings::get_global(cx)
             .file_icons
             .then(|| FileIcons::get_icon(&path, cx))
@@ -622,7 +742,12 @@ impl Item for ImageView {
     }
 
     fn breadcrumbs(&self, cx: &App) -> Option<(Vec<HighlightedText>, Option<Font>)> {
-        let text = breadcrumbs_text_for_image(self.project.read(cx), self.image_item.read(cx), cx);
+        let text = match &self.source {
+            ImageViewSource::Project(item) => {
+                breadcrumbs_text_for_image(self.project.read(cx), item.read(cx), cx)
+            }
+            ImageViewSource::Memory(image) => image.read(cx).title.to_string(),
+        };
         let font = ThemeSettings::get_global(cx).buffer_font.clone();
 
         Some((
@@ -641,28 +766,24 @@ impl Item for ImageView {
     fn clone_on_split(
         &self,
         _workspace_id: Option<WorkspaceId>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Option<Entity<Self>>>
     where
         Self: Sized,
     {
-        Task::ready(Some(cx.new(|cx| Self {
-            image_item: self.image_item.clone(),
-            project: self.project.clone(),
-            focus_handle: cx.focus_handle(),
-            zoom_level: self.zoom_level,
-            pan_offset: self.pan_offset,
-            last_mouse_position: None,
-            container_bounds: None,
-            image_size: self.image_size,
-            pending_image: None,
-            displayed_image: None,
+        Task::ready(Some(cx.new(|cx| {
+            let mut view = Self::from_source(self.source.clone(), self.project.clone(), window, cx);
+            view.zoom_level = self.zoom_level;
+            view.pan_offset = self.pan_offset;
+            view
         })))
     }
 
     fn has_deleted_file(&self, cx: &App) -> bool {
-        self.image_item.read(cx).file.disk_state().is_deleted()
+        self.source
+            .project_item()
+            .is_some_and(|item| item.read(cx).file.disk_state().is_deleted())
     }
     fn buffer_kind(&self, _: &App) -> workspace::item::ItemBufferKind {
         workspace::item::ItemBufferKind::Singleton
@@ -740,7 +861,7 @@ impl SerializableItem for ImageView {
         cx: &mut Context<Self>,
     ) -> Option<Task<anyhow::Result<()>>> {
         let workspace_id = workspace.database_id()?;
-        let image_path = self.image_item.read(cx).abs_path(cx)?;
+        let image_path = self.source.project_item()?.read(cx).abs_path(cx)?;
 
         let db = ImageViewerDb::global(cx);
         Some(cx.background_spawn({
@@ -1103,6 +1224,59 @@ mod tests {
     fn test_image(red: u8) -> Arc<gpui::Image> {
         let bytes = format!("P3\n1 1\n255\n{red} 0 0\n").into_bytes();
         Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Pnm, bytes))
+    }
+
+    #[gpui::test]
+    async fn memory_images_are_readonly_and_share_refreshes_across_splits(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (project, _) = open_test_image(cx).await;
+        let image = test_image(32);
+        let metadata =
+            ImageItem::compute_metadata_from_bytes(&image.bytes).expect("image metadata");
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ImageView::from_image(
+                image,
+                "image.ppm (revision)".into(),
+                metadata,
+                project,
+                window,
+                cx,
+            )
+        });
+        view.read_with(cx, |view, cx| {
+            assert!(!view.can_save(cx));
+            assert!(!view.is_dirty(cx));
+            assert!(!view.has_deleted_file(cx));
+            let mut project_items = 0;
+            view.for_each_project_item(cx, &mut |_, _| project_items += 1);
+            assert_eq!(project_items, 0);
+            assert_eq!(view.tab_content_text(0, cx), "image.ppm (revision)");
+        });
+        let split = view
+            .update_in(cx, |view, window, cx| {
+                view.set_zoom(2.0, None, cx);
+                view.clone_on_split(None, window, cx)
+            })
+            .await
+            .expect("split image");
+        let replacement = Arc::new(gpui::Image::from_bytes(
+            gpui::ImageFormat::Pnm,
+            b"P3\n2 1\n255\n0 0 0 255 0 0\n".to_vec(),
+        ));
+        let metadata = ImageItem::compute_metadata_from_bytes(&replacement.bytes)
+            .expect("replacement metadata");
+        view.update(cx, |view, cx| {
+            view.set_image(replacement.clone(), metadata, cx)
+        })
+        .expect("refresh image");
+        cx.run_until_parked();
+        for view in [&view, &split] {
+            view.read_with(cx, |view, cx| {
+                assert_eq!(view.image_size, Some((2, 1)));
+                assert_eq!(view.zoom_level, 2.0);
+                assert_eq!(view.source.image(cx).id(), replacement.id());
+            });
+        }
     }
 
     async fn open_test_image(cx: &mut TestAppContext) -> (Entity<Project>, Entity<ImageItem>) {

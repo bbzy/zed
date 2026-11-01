@@ -2351,6 +2351,107 @@ fn path_for_file<'a>(
     }
 }
 
+#[derive(serde::Deserialize, serde::Serialize)]
+pub struct SerializedEditorState {
+    selections: Vec<([u32; 2], [u32; 2])>,
+    scroll: [f64; 2],
+}
+
+impl SerializedEditorState {
+    pub fn capture(editor: &mut Editor, cx: &mut Context<Editor>) -> Self {
+        let snapshot = editor.display_snapshot(cx);
+        let selections = editor
+            .selections
+            .all::<Point>(&snapshot)
+            .into_iter()
+            .map(|selection| {
+                let (start, end) = if selection.reversed {
+                    (selection.end, selection.start)
+                } else {
+                    (selection.start, selection.end)
+                };
+                ([start.row, start.column], [end.row, end.column])
+            })
+            .collect();
+        let scroll = editor.scroll_position(cx);
+        Self {
+            selections,
+            scroll: [scroll.x, scroll.y],
+        }
+    }
+
+    pub fn restore(self, editor: &mut Editor, window: &mut Window, cx: &mut Context<Editor>) {
+        let snapshot = editor.buffer().read(cx).snapshot(cx);
+        let ranges = self
+            .selections
+            .into_iter()
+            .map(|(start, end)| {
+                snapshot.clip_point(Point::new(start[0], start[1]), Bias::Left)
+                    ..snapshot.clip_point(Point::new(end[0], end[1]), Bias::Left)
+            })
+            .collect::<Vec<_>>();
+        if !ranges.is_empty() {
+            editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+                selections.select_ranges(ranges)
+            });
+        }
+
+        editor.set_scroll_position(point(self.scroll[0], self.scroll[1]), window, cx);
+    }
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub struct SerializedBufferContents {
+    contents: String,
+    mtime: Option<MTime>,
+    #[serde(default)]
+    encoding: Option<String>,
+    #[serde(default)]
+    has_bom: Option<bool>,
+    #[serde(default)]
+    windows_line_endings: Option<bool>,
+}
+
+impl SerializedBufferContents {
+    pub fn capture(buffer: &Buffer) -> Self {
+        Self {
+            contents: buffer.text(),
+            mtime: buffer.saved_mtime(),
+            encoding: Some(buffer.encoding().name().to_owned()),
+            has_bom: Some(buffer.has_bom()),
+            windows_line_endings: Some(buffer.line_ending() == text::LineEnding::Windows),
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.contents
+    }
+
+    pub fn restore(self, buffer: &mut Buffer, cx: &mut Context<Buffer>) {
+        if let Some(name) = self.encoding {
+            if let Some(encoding) = encoding_rs::Encoding::for_label(name.as_bytes()) {
+                buffer.set_encoding(encoding);
+            } else {
+                log::warn!("Unknown encoding in saved editor contents: {name}");
+            }
+        }
+        if let Some(has_bom) = self.has_bom {
+            buffer.set_has_bom(has_bom);
+        }
+        restore_serialized_buffer_contents(buffer, self.contents, self.mtime, cx);
+        if let Some(windows) = self.windows_line_endings {
+            let line_ending = if windows {
+                text::LineEnding::Windows
+            } else {
+                text::LineEnding::Unix
+            };
+            if buffer.line_ending() != line_ending {
+                buffer.set_line_ending(line_ending, cx);
+            }
+        }
+    }
+}
+
 /// Restores serialized buffer contents by overwriting the buffer with saved text.
 /// This is somewhat wasteful since we load the whole buffer from disk then overwrite it,
 /// but keeps implementation simple as we don't need to persist all metadata from loading
@@ -2606,6 +2707,31 @@ mod tests {
     use workspace::MultiWorkspace;
 
     use super::*;
+
+    #[gpui::test]
+    fn kk_diff_saved_contents_restore_file_format_and_accept_legacy_state(cx: &mut App) {
+        let source = cx.new(|cx| Buffer::local("draft\n", cx));
+        source.update(cx, |buffer, cx| {
+            buffer.set_encoding(encoding_rs::UTF_16LE);
+            buffer.set_has_bom(true);
+            buffer.set_line_ending(text::LineEnding::Windows, cx);
+        });
+        let saved = SerializedBufferContents::capture(source.read(cx));
+        let json = serde_json::to_string(&saved).expect("serialize draft format");
+        let saved: SerializedBufferContents =
+            serde_json::from_str(&json).expect("decode draft format");
+        let restored = cx.new(|cx| Buffer::local("different\n", cx));
+        restored.update(cx, |buffer, cx| saved.restore(buffer, cx));
+        assert_eq!(restored.read(cx).text(), "draft\n");
+        assert_eq!(restored.read(cx).encoding(), encoding_rs::UTF_16LE);
+        assert!(restored.read(cx).has_bom());
+        assert_eq!(restored.read(cx).line_ending(), text::LineEnding::Windows);
+        let legacy: SerializedBufferContents =
+            serde_json::from_str(r#"{"contents":"legacy\n","mtime":null}"#).expect("legacy draft");
+        restored.update(cx, |buffer, cx| legacy.restore(buffer, cx));
+        assert_eq!(restored.read(cx).text(), "legacy\n");
+        assert_eq!(restored.read(cx).encoding(), encoding_rs::UTF_16LE);
+    }
     use fs::MTime;
     use gpui::{App, VisualTestContext};
     use language::TestFile;
