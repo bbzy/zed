@@ -2,8 +2,9 @@
 use std::process::Command;
 
 fn main() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     #[cfg(target_os = "linux")]
-    {
+    if target_os == "linux" {
         // Add rpaths for libraries that webrtc-sys dlopens at runtime.
         // This is mostly required for hosts with non-standard SO installation
         // locations such as NixOS.
@@ -23,7 +24,7 @@ fn main() {
         }
     }
 
-    if cfg!(target_os = "macos") {
+    if target_os == "macos" {
         println!("cargo:rustc-env=MACOSX_DEPLOYMENT_TARGET=12.0");
 
         println!("cargo:rustc-link-arg=-Wl,-weak_framework,ReplayKit");
