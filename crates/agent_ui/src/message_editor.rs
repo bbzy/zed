@@ -500,7 +500,6 @@ impl MessageEditor {
             editor.set_show_completions_on_input(Some(true));
             editor.set_soft_wrap();
             editor.disable_mouse_wheel_zoom();
-            editor.set_use_modal_editing(true);
             editor.set_context_menu_options(ContextMenuOptions {
                 min_entries_visible: 12,
                 max_entries_visible: 12,
