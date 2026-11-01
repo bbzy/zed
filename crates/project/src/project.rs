@@ -1088,6 +1088,10 @@ impl std::hash::Hash for ColorPresentation {
 #[derive(Clone)]
 pub enum DirectoryLister {
     Project(Entity<Project>),
+    ProjectAt {
+        project: Entity<Project>,
+        directory: PathBuf,
+    },
     Local(Entity<Project>, Arc<dyn Fs>),
 }
 
@@ -1097,6 +1101,11 @@ impl std::fmt::Debug for DirectoryLister {
             DirectoryLister::Project(project) => {
                 write!(f, "DirectoryLister::Project({project:?})")
             }
+            DirectoryLister::ProjectAt { project, directory } => f
+                .debug_struct("DirectoryLister::ProjectAt")
+                .field("project", project)
+                .field("directory", directory)
+                .finish(),
             DirectoryLister::Local(project, _) => {
                 write!(f, "DirectoryLister::Local({project:?})")
             }
@@ -1108,7 +1117,9 @@ impl DirectoryLister {
     pub fn is_local(&self, cx: &App) -> bool {
         match self {
             DirectoryLister::Local(..) => true,
-            DirectoryLister::Project(project) => project.read(cx).is_local(),
+            DirectoryLister::Project(project) | DirectoryLister::ProjectAt { project, .. } => {
+                project.read(cx).is_local()
+            }
         }
     }
 
@@ -1122,33 +1133,38 @@ impl DirectoryLister {
 
     pub fn default_query(&self, cx: &mut App) -> String {
         let project = match self {
-            DirectoryLister::Project(project) => project,
+            DirectoryLister::Project(project) | DirectoryLister::ProjectAt { project, .. } => {
+                project
+            }
             DirectoryLister::Local(project, _) => project,
         }
         .read(cx);
         let path_style = project.path_style(cx);
-        project
-            .visible_worktrees(cx)
-            .next()
-            .map(|worktree| worktree.read(cx).abs_path().to_string_lossy().into_owned())
-            .or_else(|| std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()))
-            .map(|mut s| {
-                s.push_str(path_style.primary_separator());
-                s
-            })
-            .unwrap_or_else(|| {
-                if path_style.is_windows() {
-                    "C:\\"
-                } else {
-                    "~/"
-                }
-                .to_string()
-            })
+        match self {
+            Self::ProjectAt { directory, .. } => Some(directory.to_string_lossy().into_owned()),
+            _ => project
+                .visible_worktrees(cx)
+                .next()
+                .map(|worktree| worktree.read(cx).abs_path().to_string_lossy().into_owned()),
+        }
+        .or_else(|| std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()))
+        .map(|mut s| {
+            s.push_str(path_style.primary_separator());
+            s
+        })
+        .unwrap_or_else(|| {
+            if path_style.is_windows() {
+                "C:\\"
+            } else {
+                "~/"
+            }
+            .to_string()
+        })
     }
 
     pub fn list_directory(&self, path: String, cx: &mut App) -> Task<Result<Vec<DirectoryItem>>> {
         match self {
-            DirectoryLister::Project(project) => {
+            DirectoryLister::Project(project) | DirectoryLister::ProjectAt { project, .. } => {
                 project.update(cx, |project, cx| project.list_directory(path, cx))
             }
             DirectoryLister::Local(_, fs) => {
@@ -1175,9 +1191,9 @@ impl DirectoryLister {
 
     pub fn path_style(&self, cx: &App) -> PathStyle {
         match self {
-            Self::Local(project, ..) | Self::Project(project, ..) => {
-                project.read(cx).path_style(cx)
-            }
+            Self::Local(project, ..)
+            | Self::Project(project, ..)
+            | Self::ProjectAt { project, .. } => project.read(cx).path_style(cx),
         }
     }
 }

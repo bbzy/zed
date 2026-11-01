@@ -625,6 +625,9 @@ pub mod agent {
         pub diff_text: SharedString,
         /// The base ref that the diff was computed against (e.g. "main").
         pub base_ref: SharedString,
+        /// Source context for a diff supplied by another version control backend.
+        #[serde(default)]
+        pub context: Option<SharedString>,
     }
 
     /// A single merge conflict region extracted from a file.

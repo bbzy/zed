@@ -1691,13 +1691,14 @@ impl Buffer {
         let prev_version = self.text.version();
 
         self.reload_task = Some(cx.spawn(async move |this, cx| {
-            let Some((new_mtime, load_bytes_task, current_encoding)) =
+            let Some((new_mtime, load_bytes_task, current_encoding, missing)) =
                 this.update(cx, |this, cx| {
                     let file = this.file.as_ref()?.as_local()?;
                     Some((
                         file.disk_state().mtime(),
                         file.load_bytes(cx),
                         this.encoding,
+                        matches!(file.disk_state(), DiskState::New | DiskState::Deleted),
                     ))
                 })?
             else {
@@ -1706,7 +1707,20 @@ impl Buffer {
 
             let target_encoding = force_encoding.unwrap_or(current_encoding);
 
-            let bytes = load_bytes_task.await?;
+            let (bytes, missing_content) = match load_bytes_task.await {
+                Ok(bytes) => (bytes, false),
+                Err(error)
+                    if missing
+                        && force_encoding.is_none()
+                        && error
+                            .root_cause()
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    (Vec::new(), true)
+                }
+                Err(error) => return Err(error),
+            };
 
             anyhow::ensure!(
                 decode_byte_header(&bytes).1 != ByteContent::Binary,
@@ -1735,18 +1749,24 @@ impl Buffer {
                 (cow.into_owned(), actual_has_bom, used_enc)
             };
 
-            let diff = this.update(cx, |this, cx| this.diff(new_text, cx))?.await;
+            let mut diff = this.update(cx, |this, cx| this.diff(new_text, cx))?.await;
             this.update(cx, |this, cx| {
                 if this.version() == diff.base_version {
                     this.finalize_last_transaction();
                     let old_encoding = this.encoding;
                     let old_has_bom = this.has_bom;
+                    if missing_content {
+                        // Absence has no byte format; retain it for Undo and file recreation.
+                        diff.line_ending = this.line_ending();
+                    }
                     this.apply_diff(diff, cx);
-                    this.encoding = encoding_used;
-                    this.has_bom = has_bom;
+                    if !missing_content {
+                        this.encoding = encoding_used;
+                        this.has_bom = has_bom;
+                    }
                     let transaction = this.finalize_last_transaction().cloned();
                     if let Some(ref txn) = transaction {
-                        if old_encoding != encoding_used || old_has_bom != has_bom {
+                        if old_encoding != this.encoding || old_has_bom != this.has_bom {
                             this.reload_with_encoding_txns
                                 .insert(txn.id, (old_encoding, old_has_bom));
                         }

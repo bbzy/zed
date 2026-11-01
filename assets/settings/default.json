@@ -1083,6 +1083,16 @@
     // Default width of the collaboration panel.
     "default_width": 240,
   },
+  "kk_workbench": {
+    "executable_path": "kk",
+    "auto_refresh": true,
+    "blame": {
+      "column_width": 42,
+      "compact": false,
+      "show_status_bar": true,
+    },
+    "debug": [],
+  },
   "git_panel": {
     // Whether to show the git panel button in the status bar.
     "button": true,

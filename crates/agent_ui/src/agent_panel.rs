@@ -363,6 +363,51 @@ pub fn init(cx: &mut App) {
     cx.observe_new(
         |workspace: &mut Workspace, _window, _cx: &mut Context<Workspace>| {
             workspace
+                .register_action(
+                    |workspace, _: &editor::actions::SendReviewToAgent, window, cx| {
+                        let Some(panel) = workspace.panel::<AgentPanel>(cx) else {
+                            return;
+                        };
+                        let Some(item) = workspace.active_item(cx) else {
+                            return;
+                        };
+                        let text = if let Some(split) = item.act_as::<editor::SplittableEditor>(cx)
+                        {
+                            let split = split.read(cx);
+                            let mut text = split.rhs_editor().read(cx).diff_review_text(cx);
+                            if let Some(left) = split.lhs_editor() {
+                                let original = left.read(cx).diff_review_text(cx);
+                                if !original.is_empty() {
+                                    text.push_str("Original version:\n");
+                                    text.push_str(&original);
+                                }
+                            }
+                            text
+                        } else if let Some(editor) = item.act_as::<editor::Editor>(cx) {
+                            editor.read(cx).diff_review_text(cx)
+                        } else {
+                            return;
+                        };
+                        if text.is_empty() {
+                            return;
+                        }
+                        if let Err(error) = panel
+                            .update(cx, |panel, cx| panel.insert_diff_review(&text, window, cx))
+                        {
+                            workspace.show_toast(
+                                workspace::Toast::new(
+                                    workspace::notifications::NotificationId::unique::<
+                                        editor::actions::SendReviewToAgent,
+                                    >(),
+                                    error.to_string(),
+                                ),
+                                cx,
+                            );
+                            return;
+                        }
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                    },
+                )
                 .register_action(|workspace, _: &NewThread, window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                         panel.update(cx, |panel, cx| {
@@ -533,26 +578,7 @@ pub fn init(cx: &mut App) {
                         return;
                     };
 
-                    let mention_uri = MentionUri::GitDiff {
-                        base_ref: action.base_ref.to_string(),
-                    };
-                    let diff_uri = mention_uri.to_uri().to_string();
-
-                    let content_blocks = vec![
-                        acp_v2::ContentBlock::Text(acp_v2::TextContent::new(
-                            "Please review this branch diff carefully. Point out any issues, \
-                             potential bugs, or improvement opportunities you find.\n\n"
-                                .to_string(),
-                        )),
-                        acp_v2::ContentBlock::Resource(acp_v2::EmbeddedResource::new(
-                            acp_v2::EmbeddedResourceResource::TextResourceContents(
-                                acp_v2::TextResourceContents::new(
-                                    action.diff_text.to_string(),
-                                    diff_uri,
-                                ),
-                            ),
-                        )),
-                    ];
+                    let content_blocks = build_diff_review_content(action);
 
                     workspace.focus_panel::<AgentPanel>(window, cx);
 
@@ -790,6 +816,35 @@ fn conflict_resource_block(conflict: &ConflictContent) -> acp_v2::ContentBlock {
             mention_uri.to_uri().to_string(),
         )),
     ))
+}
+
+fn build_diff_review_content(action: &ReviewBranchDiff) -> Vec<acp_v2::ContentBlock> {
+    if let Some(context) = &action.context {
+        vec![acp_v2::ContentBlock::Text(acp_v2::TextContent::new(
+            format!(
+                "Please review this diff carefully. Point out bugs and improvement opportunities.\n\n{context}\n\n{}",
+                action.diff_text
+            ),
+        ))]
+    } else {
+        let mention_uri = MentionUri::GitDiff {
+            base_ref: action.base_ref.to_string(),
+        };
+        let diff_uri = mention_uri.to_uri().to_string();
+
+        vec![
+            acp_v2::ContentBlock::Text(acp_v2::TextContent::new(
+                "Please review this branch diff carefully. Point out any issues, \
+                             potential bugs, or improvement opportunities you find.\n\n"
+                    .to_string(),
+            )),
+            acp_v2::ContentBlock::Resource(acp_v2::EmbeddedResource::new(
+                acp_v2::EmbeddedResourceResource::TextResourceContents(
+                    acp_v2::TextResourceContents::new(action.diff_text.to_string(), diff_uri),
+                ),
+            )),
+        ]
+    }
 }
 
 fn build_conflict_resolution_prompt(conflicts: &[ConflictContent]) -> Vec<acp_v2::ContentBlock> {
@@ -1748,6 +1803,47 @@ impl AgentPanel {
         self.serialize(cx);
         cx.emit(AgentPanelEvent::ActiveViewChanged);
         cx.notify();
+    }
+
+    fn insert_diff_review(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let text = format!("Please address these review comments:\n\n{text}");
+        if let Some(thread) = self.active_thread_view(cx) {
+            let message_editor = thread.read(cx).message_editor.clone();
+            if message_editor.read(cx).editor().read(cx).read_only(cx) {
+                anyhow::bail!(
+                    "The Agent draft is read-only. Open an editable draft before sending review comments."
+                );
+            }
+            message_editor.update(cx, |editor, cx| {
+                let existing = editor.text(cx);
+                editor.set_cursor_offset(existing.len(), window, cx);
+                if !existing.is_empty() {
+                    editor.insert_text("\n\n", window, cx);
+                }
+                editor.insert_text(&text, window, cx);
+            });
+        } else {
+            self.external_thread(
+                None,
+                None,
+                None,
+                None,
+                Some(AgentInitialContent::ContentBlock {
+                    blocks: vec![acp_v2::ContentBlock::Text(acp_v2::TextContent::new(text))],
+                    auto_submit: false,
+                }),
+                true,
+                AgentThreadSource::GitPanel,
+                window,
+                cx,
+            );
+        }
+        Ok(())
     }
 
     pub fn new_thread(&mut self, _action: &NewThread, window: &mut Window, cx: &mut Context<Self>) {
@@ -7246,6 +7342,64 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn kk_diff_review_appends_to_agent_draft_without_submitting(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |view, _| view.workspace().clone())
+            .expect("workspace");
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            panel
+        });
+        open_thread_with_connection(&panel, StubAgentConnection::new(), cx);
+        let (thread_id, editor) = panel.read_with(cx, |panel, cx| {
+            (
+                panel.active_thread_id(cx),
+                panel
+                    .active_thread_view(cx)
+                    .expect("thread view")
+                    .read(cx)
+                    .message_editor
+                    .clone(),
+            )
+        });
+        editor.update_in(cx, |editor, window, cx| {
+            editor.insert_text("Existing draft", window, cx)
+        });
+        panel
+            .update_in(cx, |panel, window, cx| {
+                panel.insert_diff_review("file.rs:2-3\nKeep this behavior\n", window, cx)
+            })
+            .expect("append review");
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(cx, |panel, cx| panel.active_thread_id(cx)),
+            thread_id
+        );
+        assert_eq!(
+            editor.read_with(cx, |editor, cx| editor.text(cx)),
+            "Existing draft\n\nPlease address these review comments:\n\nfile.rs:2-3\nKeep this behavior\n"
+        );
+        let existing = editor.read_with(cx, |editor, cx| editor.text(cx));
+        editor.update(cx, |editor, cx| editor.set_read_only(true, cx));
+        let result = panel.update_in(cx, |panel, window, cx| {
+            panel.insert_diff_review("another comment", window, cx)
+        });
+        assert!(result.is_err());
+        assert_eq!(editor.read_with(cx, |editor, cx| editor.text(cx)), existing);
+    }
+
+    #[gpui::test]
     async fn test_clicking_tool_call_output_keeps_agent_panel_focused_and_zoomed(
         cx: &mut TestAppContext,
     ) {
@@ -8320,6 +8474,33 @@ mod tests {
              ConversationView is in LoadError; otherwise the bug survives a \
              restart because the KVP has been wiped"
         );
+    }
+
+    #[test]
+    fn kk_diff_review_content_retains_backend_provenance() {
+        let mut action = ReviewBranchDiff {
+            diff_text: "diff --git a/file b/file\n+updated\n".into(),
+            base_ref: "main".into(),
+            context: None,
+        };
+        let git = build_diff_review_content(&action);
+        let (text, uri) = expect_resource_block(&git[1]);
+        assert_eq!(text, action.diff_text.as_ref());
+        assert_eq!(
+            uri,
+            MentionUri::GitDiff {
+                base_ref: "main".into()
+            }
+            .to_uri()
+            .to_string()
+        );
+        action.context = Some("KK /repo operation 123, base abc → @".into());
+        let kk = build_diff_review_content(&action);
+        assert_eq!(kk.len(), 1);
+        let text = expect_text_block(&kk[0]);
+        assert!(text.contains("KK /repo operation 123, base abc → @"));
+        assert!(text.contains(action.diff_text.as_ref()));
+        assert!(!text.contains("zed:///git"));
     }
 
     /// Extracts the text from a Text content block, panicking if it's not Text.

@@ -14,6 +14,76 @@ use util::rel_path::rel_path;
 use util::test::sample_text;
 
 #[gpui::test]
+fn kk_diff_file_order_preserves_buffer_anchors(cx: &mut App) {
+    let first = cx.new(|cx| Buffer::local("abc\ndef\n", cx));
+    let second = cx.new(|cx| Buffer::local("xyz\n", cx));
+    let multibuffer = cx.new(|_| MultiBuffer::new(Capability::ReadWrite));
+    multibuffer.update(cx, |multibuffer, cx| {
+        multibuffer.set_excerpts_for_path(
+            PathKey::sorted(0),
+            first.clone(),
+            [Point::zero()..first.read(cx).max_point()],
+            0,
+            cx,
+        );
+        multibuffer.set_excerpts_for_path(
+            PathKey::sorted(1),
+            second.clone(),
+            [Point::zero()..second.read(cx).max_point()],
+            0,
+            cx,
+        );
+    });
+    let original = multibuffer.read(cx).snapshot(cx);
+    let anchor = original.anchor_after(Point::new(0, 2));
+    multibuffer.update(cx, |multibuffer, cx| {
+        multibuffer.update_excerpts_for_path(
+            PathKey::sorted(2),
+            first.clone(),
+            [Point::zero()..first.read(cx).max_point()],
+            0,
+            cx,
+        );
+    });
+    let reordered = multibuffer.read(cx).snapshot(cx);
+    assert!(anchor.is_valid(&reordered));
+    let canonical = reordered.anchor_after(anchor.to_point(&reordered));
+    assert_eq!(
+        anchor.cmp(&canonical, &reordered),
+        std::cmp::Ordering::Equal
+    );
+    assert!(
+        reordered
+            .anchor_range_to_buffer_anchor_range(anchor..anchor)
+            .is_some()
+    );
+    assert!(anchor.to_point(&reordered) > Point::new(0, 2));
+    let (buffer, text_anchor) = multibuffer
+        .read(cx)
+        .text_anchor_for_position(anchor, cx)
+        .expect("same buffer");
+    assert_eq!(buffer, first);
+    assert_eq!(
+        text_anchor.to_point(&first.read(cx).snapshot()),
+        Point::new(0, 2)
+    );
+    assert_eq!(anchor.to_point(&original), Point::new(0, 2));
+    multibuffer.update(cx, |multibuffer, cx| {
+        multibuffer.update_excerpts_for_path(
+            PathKey::sorted(0),
+            first.clone(),
+            [Point::zero()..first.read(cx).max_point()],
+            0,
+            cx,
+        );
+    });
+    assert_eq!(
+        anchor.to_point(&multibuffer.read(cx).snapshot(cx)),
+        Point::new(0, 2)
+    );
+}
+
+#[gpui::test]
 fn test_empty_singleton(cx: &mut App) {
     let buffer = cx.new(|cx| Buffer::local("", cx));
     let buffer_id = buffer.read(cx).remote_id();

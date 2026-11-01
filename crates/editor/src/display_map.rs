@@ -428,7 +428,6 @@ impl DisplayMap {
             let Some((_, companion)) = self.companion.take() else {
                 return;
             };
-            assert_eq!(self.entity_id, companion.read(cx).rhs_display_map_id);
             let (snapshot, _edits) = self.sync_through_wrap(cx);
             let edits = Patch::new(vec![text::Edit {
                 old: WrapRow(0)
@@ -437,13 +436,13 @@ impl DisplayMap {
             }]);
             self.block_map.deferred_edits.set(edits);
             self.block_map.retain_blocks_raw(&mut |block| {
-                if companion
-                    .read(cx)
-                    .lhs_custom_block_to_balancing_block
-                    .borrow()
-                    .values()
-                    .any(|id| *id == block.id)
-                {
+                let companion = companion.read(cx);
+                let balancing_blocks = if companion.is_rhs(self.entity_id) {
+                    &companion.lhs_custom_block_to_balancing_block
+                } else {
+                    &companion.rhs_custom_block_to_balancing_block
+                };
+                if balancing_blocks.borrow().values().any(|id| *id == block.id) {
                     return false;
                 }
                 true

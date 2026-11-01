@@ -39,6 +39,7 @@ use crate::{
 pub mod branch_diff;
 pub mod branch_picker;
 mod commit_context_menu;
+mod commit_metadata;
 mod commit_modal;
 pub mod commit_tooltip;
 pub mod commit_view;
@@ -49,6 +50,19 @@ pub mod git_panel;
 mod git_panel_settings;
 pub mod git_picker;
 mod git_runtime_diagnostics;
+mod kk_blame;
+mod kk_classification;
+mod kk_comparison;
+mod kk_conflict;
+mod kk_diff;
+mod kk_diff_controls;
+mod kk_file_order;
+mod kk_multi_diff;
+mod kk_output;
+pub mod kk_panel;
+mod kk_revision_picker;
+mod kk_search;
+mod kk_settings;
 pub mod multi_diff_view;
 pub mod picker_prompt;
 pub mod project_diff;
@@ -62,8 +76,14 @@ pub mod unstaged_diff;
 
 pub use blame_ui::GitBlameStatus;
 pub use conflict_view::MergeConflictIndicator;
+pub use kk_blame::KkBlameStatus;
 
 pub fn init(cx: &mut App) {
+    kk_blame::init(cx);
+    kk_panel::init(cx);
+    kk_conflict::init(cx);
+    kk_diff::init(cx);
+    kk_search::init(cx);
     editor::set_blame_renderer(blame_ui::GitBlameRenderer, cx);
     commit_view::init(cx);
     git_graph::init(cx);

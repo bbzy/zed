@@ -664,7 +664,7 @@ pub fn asset_str<A: rust_embed::RustEmbed>(path: &str) -> Cow<'static, str> {
 
 /// The checkout that produced this binary, resolved at runtime by walking up to
 /// the first ancestor that contains a `.git` entry (a directory in a normal
-/// clone, a file in a git worktree or submodule). Cargo and corgi both place
+/// clone, a file in a git worktree or submodule) or `.kk` metadata. Cargo and corgi both place
 /// built binaries under `<repo>/target/<profile>/`, so the repository root is
 /// always an ancestor of the executable.
 ///
@@ -676,7 +676,7 @@ pub fn asset_str<A: rust_embed::RustEmbed>(path: &str) -> Cow<'static, str> {
 /// The executable's launch path is tried first, then its canonical form, then
 /// the working directory. In CI, `target/` (or the checkout root) can be a
 /// symlink onto another volume, so canonicalizing the executable alone can walk
-/// off the checkout and miss `.git`; the launch path and the test runner's cwd
+/// off the checkout and miss its metadata; the launch path and the test runner's cwd
 /// (a crate dir under the checkout) stay inside it.
 pub fn dev_repo_root() -> Option<&'static std::path::Path> {
     use std::path::PathBuf;
@@ -692,7 +692,7 @@ pub fn dev_repo_root() -> Option<&'static std::path::Path> {
             Some(
                 start
                     .ancestors()
-                    .find(|dir| dir.join(".git").exists())?
+                    .find(|dir| dir.join(".git").exists() || dir.join(".kk").is_dir())?
                     .to_path_buf(),
             )
         })

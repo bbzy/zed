@@ -210,6 +210,13 @@ impl Editor {
         }
     }
 
+    pub fn git_diff_scrollbar_markers_enabled(&self, cx: &App) -> bool {
+        EditorSettings::get_global(cx).scrollbar.git_diff
+            && (self.allow_git_diff_scrollbar_markers
+                || (self.buffer_kind(cx) == ItemBufferKind::Singleton
+                    && ProjectSettings::get_global(cx).git.enabled.diff))
+    }
+
     pub fn set_show_code_actions(&mut self, show_code_actions: bool, cx: &mut Context<Self>) {
         self.show_code_actions = Some(show_code_actions);
         cx.notify();
@@ -392,5 +399,42 @@ impl Editor {
 
     pub(super) fn set_suppress_selection_callback(&mut self, suppress: bool) {
         self.suppress_selection_callback = suppress;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test::editor_test_context::EditorTestContext;
+
+    #[gpui::test]
+    async fn explicit_diff_scrollbar_markers_respect_git_and_marker_settings(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        crate::editor_tests::init_test(cx, |_| {});
+        let mut cx = EditorTestContext::new(cx).await;
+        for (settings, ordinary, explicit) in [
+            (r#"{"git":{"disable_git":true}}"#, false, true),
+            (
+                r#"{"git":{"disable_git":true},"scrollbar":{"git_diff":false}}"#,
+                false,
+                false,
+            ),
+            (r#"{"git":{"disable_git":false}}"#, true, true),
+        ] {
+            cx.update(|_, cx| {
+                let mut store = SettingsStore::test(cx);
+                store
+                    .set_user_settings(settings, cx)
+                    .expect("scrollbar settings");
+                cx.set_global(store);
+            });
+            cx.update_editor(|editor, _, cx| {
+                editor.set_allow_git_diff_scrollbar_markers(false, cx);
+                assert_eq!(editor.git_diff_scrollbar_markers_enabled(cx), ordinary);
+                editor.set_allow_git_diff_scrollbar_markers(true, cx);
+                assert_eq!(editor.git_diff_scrollbar_markers_enabled(cx), explicit);
+            });
+        }
     }
 }
