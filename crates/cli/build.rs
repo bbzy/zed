@@ -6,7 +6,7 @@ fn main() {
         println!(r#"cargo:rustc-cfg=feature="no-bundled-uninstall""#);
     }
 
-    if cfg!(target_os = "macos") {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo:rustc-env=MACOSX_DEPLOYMENT_TARGET=12.0");
     }
 

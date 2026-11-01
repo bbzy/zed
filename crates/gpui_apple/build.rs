@@ -1,11 +1,14 @@
 #![allow(clippy::disallowed_methods, reason = "build scripts are exempt")]
 
 fn main() {
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    apple_build::run();
+    if matches!(
+        std::env::var("CARGO_CFG_TARGET_OS").as_deref(),
+        Ok("macos" | "ios")
+    ) {
+        apple_build::run();
+    }
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
 mod apple_build {
     #[cfg(not(feature = "runtime_shaders"))]
     use std::ffi::OsString;

@@ -75,7 +75,7 @@ pathfinder_geometry = { workspace = true, optional = true }
 smallvec.workspace = true
 thiserror.workspace = true
 
-[target.'cfg(any(target_os = "macos", target_os = "ios"))'.build-dependencies]
+[build-dependencies]
 cbindgen.workspace = true
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dev-dependencies]
