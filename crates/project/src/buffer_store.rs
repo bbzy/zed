@@ -411,12 +411,20 @@ impl LocalBufferStore {
                 .as_ref()
                 .is_some_and(|file| file.disk_state() == DiskState::New);
 
+        let saved_write = match kk_workbench::SavedFileWrite::begin(
+            &worktree.read(cx).abs_path().join(path.as_std_path()),
+        ) {
+            Ok(write) => write,
+            Err(error) => return Task::ready(Err(error)),
+        };
         let save = worktree.update(cx, |worktree, cx| {
             worktree.write_file(path, text, line_ending, encoding, has_bom, cx)
         });
 
         cx.spawn(async move |this, cx| {
             let new_file = save.await?;
+            // Capture failures reject classification, while this file save has already succeeded.
+            saved_write.finish().log_err();
             let mtime = new_file.disk_state().mtime();
             this.update(cx, |this, cx| {
                 if let Some((downstream_client, project_id)) = this.downstream_client.clone() {

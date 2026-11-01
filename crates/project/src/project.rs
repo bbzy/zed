@@ -9,6 +9,7 @@ pub mod debounced_delay;
 pub mod debugger;
 pub mod git_store;
 pub mod image_store;
+mod kk_workbench_transport;
 pub mod lsp_command;
 pub mod lsp_store;
 pub mod manifest_tree;
@@ -238,6 +239,7 @@ pub struct Project {
     user_store: Entity<UserStore>,
     fs: Arc<dyn Fs>,
     remote_client: Option<Entity<RemoteClient>>,
+    kk_workbench_client: std::sync::OnceLock<kk_workbench::remote::Client>,
     // todo lw explain the client_state x remote_client matrix, its super confusing
     client_state: ProjectClientState,
     git_store: Entity<GitStore>,
@@ -1468,6 +1470,7 @@ impl Project {
                 settings_observer,
                 fs,
                 remote_client: None,
+                kk_workbench_client: std::sync::OnceLock::new(),
                 bookmark_store,
                 breakpoint_store,
                 dap_store,
@@ -1716,6 +1719,7 @@ impl Project {
                 settings_observer,
                 fs,
                 remote_client: Some(remote.clone()),
+                kk_workbench_client: std::sync::OnceLock::new(),
                 buffers_needing_diff: Default::default(),
                 git_diff_debouncer: DebouncedDelay::new(),
                 terminals: Terminals {
@@ -1994,6 +1998,7 @@ impl Project {
                 snippets,
                 fs,
                 remote_client: None,
+                kk_workbench_client: std::sync::OnceLock::new(),
                 settings_observer: settings_observer.clone(),
                 client_subscriptions: Default::default(),
                 _subscriptions: vec![cx.on_release(Self::release)],
@@ -2344,6 +2349,20 @@ impl Project {
     #[inline]
     pub fn remote_client(&self) -> Option<Entity<RemoteClient>> {
         self.remote_client.clone()
+    }
+
+    pub fn kk_workbench_client(&self, cx: &App) -> Option<kk_workbench::remote::Client> {
+        let remote = self.remote_client.as_ref()?;
+        Some(
+            self.kk_workbench_client
+                .get_or_init(|| {
+                    kk_workbench_transport::client(
+                        remote.read(cx).proto_client(),
+                        cx.background_executor().clone(),
+                    )
+                })
+                .clone(),
+        )
     }
 
     #[inline]

@@ -1,0 +1,30 @@
+[package]
+name = "kk_workbench"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/kk_workbench.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+bincode.workspace = true
+chrono = { workspace = true, features = ["clock"] }
+diffy.workspace = true
+rquickjs.workspace = true
+futures.workspace = true
+log.workspace = true
+regex.workspace = true
+serde = { workspace = true, features = ["derive", "rc"] }
+serde_json.workspace = true
+sha2.workspace = true
+smol.workspace = true
+tempfile.workspace = true
+time.workspace = true
+uuid = { workspace = true, features = ["v4"] }
