@@ -1050,6 +1050,22 @@ impl SshRemoteConnection {
             .await
             .is_ok();
 
+        #[cfg(target_os = "macos")]
+        if !binary_exists_on_server
+            && let Some(server) = super::bundled_remote_server(&self.ssh_platform, cx)
+        {
+            let temporary = paths::remote_server_dir_relative().join(RelPath::from_unix_str(
+                &format!("bundled-server-{}.gz", std::process::id()),
+            )?);
+            self.upload_local_server_binary(&server, &temporary, delegate, cx)
+                .await
+                .context("uploading bundled remote server")?;
+            self.extract_server_binary(&dst_path, &temporary, delegate, cx)
+                .await
+                .context("extracting bundled remote server")?;
+            return Ok(dst_path.into());
+        }
+
         #[cfg(any(debug_assertions, feature = "build-remote-server-binary"))]
         if let Some(remote_server_path) = super::build_remote_server_from_source(
             &self.ssh_platform,
