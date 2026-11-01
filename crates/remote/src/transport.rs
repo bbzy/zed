@@ -258,6 +258,19 @@ fn handle_rpc_messages_over_child_process_stdio(
     })
 }
 
+#[cfg(target_os = "macos")]
+fn bundled_remote_server(
+    platform: &crate::RemotePlatform,
+    cx: &mut AsyncApp,
+) -> Option<std::path::PathBuf> {
+    let bundle = cx.update(|cx| cx.app_path().ok())?;
+    let server = bundle.join("Contents/Resources").join(format!(
+        "zed-remote-server-{}-{}.gz",
+        platform.os, platform.arch
+    ));
+    server.is_file().then_some(server)
+}
+
 #[cfg(any(debug_assertions, feature = "build-remote-server-binary"))]
 async fn build_remote_server_from_source(
     platform: &crate::RemotePlatform,
@@ -278,6 +291,11 @@ async fn build_remote_server_from_source(
                 path.display()
             );
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    if let Some(server) = bundled_remote_server(platform, cx) {
+        return Ok(Some(server));
     }
 
     // By default, we make building remote server from source opt-out and we do not force artifact compression
