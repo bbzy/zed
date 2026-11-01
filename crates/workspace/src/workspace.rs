@@ -10268,7 +10268,15 @@ impl Render for Workspace {
                                 Some(match self.zoomed_position {
                                     Some(DockPosition::Left) => overlay.right_2().border_r_1(),
                                     Some(DockPosition::Right) => overlay.left_2().border_l_1(),
-                                    Some(DockPosition::Bottom) => overlay.top_2().border_t_1(),
+                                    Some(DockPosition::Bottom) => {
+                                        if self.bottom_dock.read(cx).active_panel().is_some_and(
+                                            |panel| panel.persistent_name() == "TerminalPanel",
+                                        ) {
+                                            overlay
+                                        } else {
+                                            overlay.top_2().border_t_1()
+                                        }
+                                    }
                                     None => {
                                         overlay.top_2().bottom_2().left_2().right_2().border_1()
                                     }
