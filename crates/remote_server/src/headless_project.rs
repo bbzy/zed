@@ -54,6 +54,10 @@ use terminal::terminal_settings::TerminalSettings;
 use util::{ResultExt, paths::PathStyle, rel_path::RelPath};
 use worktree::Worktree;
 
+#[cfg(test)]
+#[path = "kk_workbench_tests.rs"]
+mod kk_workbench_tests;
+
 pub struct HeadlessProject {
     pub fs: Arc<dyn Fs>,
     pub session: AnyProtoClient,
@@ -76,6 +80,7 @@ pub struct HeadlessProject {
     // Local variant is used within LSP store, but that's a separate entity.
     pub _toolchain_store: Entity<ToolchainStore>,
     pub kernels: HashMap<String, Child>,
+    kk_workbench: kk_workbench::remote::Service,
     search_buffer_batches: async_channel::Sender<SearchBufferBatch>,
     _search_buffer_sender: Task<()>,
 }
@@ -88,6 +93,12 @@ pub struct HeadlessAppState {
     pub languages: Arc<LanguageRegistry>,
     pub extension_host_proxy: Arc<ExtensionHostProxy>,
     pub startup_time: Instant,
+}
+
+impl Drop for HeadlessProject {
+    fn drop(&mut self) {
+        self.kk_workbench.close().log_err();
+    }
 }
 
 const MAX_SEARCH_CANDIDATES_PER_BATCH: usize = 64;
@@ -309,6 +320,7 @@ impl HeadlessProject {
 
         session.add_request_handler(cx.weak_entity(), Self::handle_list_remote_directory);
         session.add_request_handler(cx.weak_entity(), Self::handle_get_path_metadata);
+        session.add_request_handler(cx.weak_entity(), Self::handle_kk_workbench);
         session.add_request_handler(cx.weak_entity(), Self::handle_shutdown_remote_server);
         session.add_request_handler(cx.weak_entity(), Self::handle_ping);
         session.add_request_handler(cx.weak_entity(), Self::handle_get_processes);
@@ -431,6 +443,7 @@ impl HeadlessProject {
             profiling_collector: gpui::ProfilingCollector::new(startup_time),
             _toolchain_store: toolchain_store,
             kernels: Default::default(),
+            kk_workbench: Default::default(),
             search_buffer_batches,
             _search_buffer_sender: search_buffer_sender,
         }
@@ -442,6 +455,15 @@ impl HeadlessProject {
         event: &BufferEvent,
         cx: &mut Context<Self>,
     ) {
+        if matches!(event, BufferEvent::Saved)
+            && let Some(path) = buffer
+                .read(cx)
+                .file()
+                .and_then(|file| file.file_system_abs_path(cx))
+        {
+            self.kk_workbench.record_saved_file(&path).log_err();
+        }
+
         if let BufferEvent::Operation {
             operation,
             is_local: true,
@@ -1320,6 +1342,23 @@ impl HeadlessProject {
             entries,
             entry_info,
         })
+    }
+
+    fn handle_kk_workbench(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::KkWorkbenchRequest>,
+        cx: AsyncApp,
+    ) -> impl Future<Output = Result<proto::KkWorkbenchResponse>> {
+        let service = cx.read_entity(&this, |this, _| this.kk_workbench.clone());
+        // Capture before dispatching later save requests, even if their tasks run first.
+        let request = kk_workbench::remote::decode(&envelope.payload.payload)
+            .map(|request| service.execute(request));
+        async move {
+            let result = cx.background_spawn(request?).await;
+            Ok(proto::KkWorkbenchResponse {
+                payload: kk_workbench::remote::encode(&result)?,
+            })
+        }
     }
 
     async fn handle_get_path_metadata(

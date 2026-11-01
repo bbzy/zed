@@ -64,6 +64,7 @@ http_client.workspace = true
 image.workspace = true
 indexmap.workspace = true
 itertools.workspace = true
+kk_workbench.workspace = true
 language.workspace = true
 log.workspace = true
 lsp.workspace = true
