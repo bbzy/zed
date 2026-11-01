@@ -6488,7 +6488,14 @@ pub async fn init_test(
     cx: &mut TestAppContext,
     server_cx: &mut TestAppContext,
 ) -> (Entity<Project>, Entity<HeadlessProject>) {
-    let server_fs = server_fs.clone();
+    init_test_with_fs(server_fs.clone(), cx, server_cx).await
+}
+
+pub(crate) async fn init_test_with_fs(
+    server_fs: Arc<dyn Fs>,
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) -> (Entity<Project>, Entity<HeadlessProject>) {
     cx.update(|cx| {
         release_channel::init(semver::Version::new(0, 0, 0), cx);
     });
