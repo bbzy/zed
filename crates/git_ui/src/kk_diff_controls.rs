@@ -734,6 +734,7 @@ impl Render for KkDiffControls {
                         author_email: revision.author_email.clone().into(),
                         timestamp: revision.commit_timestamp,
                         description: revision.full_description,
+                        change_id_prefix: Some(revision.change_id_prefix),
                         identifiers: vec![
                             ("Change ID", revision.full_change_id.into()),
                             ("Commit SHA", sha.clone()),

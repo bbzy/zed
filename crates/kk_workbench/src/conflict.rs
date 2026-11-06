@@ -19,6 +19,10 @@ pub enum ConflictRole {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ConflictSource {
     pub change_id: String,
+    #[serde(default)]
+    pub display_change_id: Option<String>,
+    #[serde(default)]
+    pub change_id_prefix: String,
     pub commit_id: String,
     pub description: String,
     pub bookmarks: Vec<String>,
@@ -90,7 +94,11 @@ impl ConflictInput {
             return "Unknown source".into();
         };
         let mut title = if source.bookmarks.is_empty() {
-            let mut title: String = source.change_id.chars().take(8).collect();
+            let mut title: String = source
+                .display_change_id
+                .as_ref()
+                .unwrap_or(&source.change_id)
+                .clone();
             let description = source
                 .description
                 .split_whitespace()
@@ -384,6 +392,8 @@ impl Snapshot {
             .map(str::to_owned);
             let mut source = ConflictSource {
                 change_id: change_id.into(),
+                display_change_id: None,
+                change_id_prefix: String::new(),
                 commit_id: commit_id.into(),
                 description: String::new(),
                 bookmarks: Vec::new(),
@@ -396,6 +406,8 @@ impl Snapshot {
                     revision.full_change_id.starts_with(change_id),
                     "Conflict source label does not match its snapshot"
                 );
+                source.display_change_id = Some(revision.change_id.clone());
+                source.change_id_prefix = revision.change_id_prefix.clone();
                 source.change_id = revision.full_change_id.clone();
                 source.commit_id = revision.full_commit_id.clone();
                 source.description = revision.full_description.clone();

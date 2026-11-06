@@ -202,8 +202,9 @@ impl PickerDelegate for RevisionDelegate {
                             h_flex()
                                 .gap_1()
                                 .min_w_0()
-                                .child(super::commit_metadata::identifier(
+                                .child(super::commit_metadata::change_identifier(
                                     revision.change_id.clone(),
+                                    &revision.change_id_prefix,
                                 ))
                                 .child(
                                     super::commit_metadata::description(
