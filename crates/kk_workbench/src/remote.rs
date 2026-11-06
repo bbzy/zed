@@ -43,7 +43,7 @@ pub struct DiagnosticOutput {
     pub text: String,
 }
 
-const PROTOCOL_VERSION: u32 = 4;
+const PROTOCOL_VERSION: u32 = 5;
 
 pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     Ok(bincode::DefaultOptions::new().serialize(&(PROTOCOL_VERSION, value))?)
@@ -1410,11 +1410,11 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("protocol version 2 (expected 4)"),
+                .contains("protocol version 2 (expected 5)"),
             "{error:#}"
         );
         let revision: Revision = serde_json::from_value(serde_json::json!({
-            "changeId":"change", "fullChangeId":"change", "commitId":"commit", "fullCommitId":"commit",
+            "changeId":"change", "changeIdPrefix":"cha", "fullChangeId":"change", "commitId":"commit", "fullCommitId":"commit",
             "description":"subject", "fullDescription":"subject\nbody", "authorName":"Author", "authorEmail":"author@example.com",
             "committerName":"Committer", "committerEmail":"committer@example.com", "commitTimestamp":42,
             "bookmarks":[], "remoteBookmarkNames":[], "remoteBookmarkRemotes":[], "tags":[],
@@ -1423,6 +1423,7 @@ mod tests {
         let mut bytes = encode(&vec![revision]).expect("encode current history");
         let decoded: Vec<Revision> = decode(&bytes).expect("decode current history");
         let revision = decoded.first().expect("decoded revision");
+        assert_eq!(revision.change_id_prefix, "cha");
         assert_eq!(revision.commit_timestamp, Some(42));
         assert_eq!(revision.full_description, "subject\nbody");
         bytes.push(0);

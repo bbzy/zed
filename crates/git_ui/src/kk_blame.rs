@@ -356,7 +356,10 @@ impl GutterAnnotations for BlameColumn {
             Vec::new()
         } else {
             [
-                (0..identifier_end, Color::Accent),
+                (
+                    0..line.change_id_prefix.len().min(line.change_id.len()),
+                    Color::Accent,
+                ),
                 (identifier_end..author_end, Color::Info),
             ]
             .into_iter()
@@ -383,7 +386,10 @@ impl GutterAnnotations for BlameColumn {
                 .text_size(style.font_size)
                 .text_color(cx.theme().colors().text_muted)
                 .child(gpui::StyledText::new(label).with_highlights(highlights))
-                .tooltip(super::commit_metadata::tooltip(tooltip))
+                .tooltip(super::commit_metadata::tooltip_with_prefix(
+                    tooltip,
+                    Some(line.change_id_prefix.clone()),
+                ))
                 .into_any_element(),
         )
     }
@@ -1062,6 +1068,7 @@ impl Render for KkBlameStatus {
         let mut text: Option<SharedString> = None;
         let mut tooltip = String::new();
         let mut metadata = None;
+        let mut change_id_prefix = None;
         if KkWorkbenchSettings::get_global(cx).blame.show_status_bar
             && let Some(editor) = self.editor(cx)
             && let Some(addon) = editor.read(cx).addon::<BlameAddon>()
@@ -1077,6 +1084,7 @@ impl Render for KkBlameStatus {
                     text = Some("Save to refresh blame".into());
                     tooltip = "Blame annotations are hidden until the file is saved.".into();
                 } else if let Some((_, line)) = self.current_line(cx) {
+                    change_id_prefix = Some(line.change_id_prefix.clone());
                     text = Some(format!("{}, {}", line.author, relative_date(&line.date)).into());
                     metadata = Some(vec![
                         (
@@ -1146,8 +1154,9 @@ impl Render for KkBlameStatus {
                                 )
                             }),
                     )
-                    .tooltip(super::commit_metadata::tooltip(
+                    .tooltip(super::commit_metadata::tooltip_with_prefix(
                         metadata.unwrap_or_else(|| vec![(String::new(), tooltip, Color::Muted)]),
+                        change_id_prefix,
                     ))
                     .on_click(cx.listener(|this, _, window, cx| this.toggle(window, cx))),
             )
@@ -1236,6 +1245,7 @@ mod tests {
     fn kk_blame_column_preserves_unicode_width_and_compact_padding() {
         let mut line = kk_workbench::BlameLine {
             change_id: "abcdefgh".into(),
+            change_id_prefix: "abc".into(),
             full_change_id: "abcdefgh".into(),
             commit_id: "12345678".into(),
             author: "张三🙂Long author".into(),

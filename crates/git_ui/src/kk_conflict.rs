@@ -4,7 +4,7 @@ use buffer_diff::BufferDiff;
 use db::kvp::KeyValueStore;
 use editor::items::SerializedEditorState;
 use editor::{
-    Addon, Editor, EditorEvent, EditorMode, RowHighlightOptions, SplittableEditor,
+    Addon, Editor, EditorEvent, EditorMode, RowHighlightOptions,
     display_map::{BlockPlacement, BlockProperties, BlockStyle, CustomBlockId},
     scroll::Autoscroll,
 };
@@ -17,7 +17,7 @@ use kk_workbench::{
     ConflictChoice, ConflictDraft, ConflictEditReason, ConflictInput, ConflictRole, FileConflict,
     Snapshot,
 };
-use language::{Buffer, Capability, Point};
+use language::{Buffer, Capability};
 use multi_buffer::{MultiBuffer, MultiBufferOffset, ToOffset as _};
 use picker::{Picker, PickerDelegate};
 use project::{
@@ -762,6 +762,17 @@ impl KkConflict {
                         "Keep the current code in this block as the resolution.".into()
                     }
                 };
+                let change_id_prefix = if let ConflictChoice::Input(role, index) = choice {
+                    self.draft
+                        .conflict
+                        .inputs
+                        .iter()
+                        .find(|input| input.role == role && input.index == index)
+                        .and_then(|input| input.source.as_ref())
+                        .map(|source| source.change_id_prefix.clone())
+                } else {
+                    None
+                };
                 let metadata = if let ConflictChoice::Input(role, index) = choice {
                     self.draft
                         .conflict
@@ -808,7 +819,7 @@ impl KkConflict {
                             .child(
                                 Button::new(("accept-conflict", offset), label)
                                     .disabled(disabled)
-                                    .tooltip(super::commit_metadata::tooltip(metadata.clone().unwrap_or_else(|| vec![(String::new(), detail.clone(), Color::Muted)])))
+                                    .tooltip(super::commit_metadata::tooltip_with_prefix(metadata.clone().unwrap_or_else(|| vec![(String::new(), detail.clone(), Color::Muted)]), change_id_prefix.clone()))
                                     .on_click(move |_, window, cx| {
                                         weak.update(cx, |view, cx| {
                                             if view.buffer.read(cx).version() != version {
@@ -1726,8 +1737,13 @@ impl PickerDelegate for VersionDelegate {
                                 h_flex()
                                     .gap_1()
                                     .child(
-                                        super::commit_metadata::identifier(
-                                            source.change_id.clone(),
+                                        super::commit_metadata::change_identifier(
+                                            source
+                                                .display_change_id
+                                                .as_ref()
+                                                .unwrap_or(&source.change_id)
+                                                .clone(),
+                                            &source.change_id_prefix,
                                         )
                                         .size(LabelSize::Small),
                                     )
@@ -1774,7 +1790,9 @@ impl PickerDelegate for VersionDelegate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use editor::SplittableEditor;
     use gpui::{TestAppContext, VisualContext, VisualTestContext};
+    use language::Point;
     use project::FakeFs;
     use settings::SettingsStore;
     use std::path::Path;

@@ -15,6 +15,8 @@ pub enum HistoryMode {
 pub struct Revision {
     pub change_id: String,
     pub full_change_id: String,
+    #[serde(default)]
+    pub change_id_prefix: String,
     pub commit_id: String,
     pub full_commit_id: String,
     pub description: String,

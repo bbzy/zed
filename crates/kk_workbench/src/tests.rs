@@ -423,8 +423,23 @@ fn annotations_keep_line_origins_and_fixed_revision_with_literal_paths() -> Resu
             vec![true, false, true]
         );
         assert!(lines.iter().all(|line| {
-            line.author == "KK Workbench Test" && line.change_id.len() == 8 && !line.date.is_empty()
+            line.author == "KK Workbench Test"
+                && line.change_id.len() >= 8
+                && !line.change_id_prefix.is_empty()
+                && line.change_id.starts_with(&line.change_id_prefix)
+                && !line.date.is_empty()
         }));
+        for line in &lines {
+            let expected = fixture.run(&[
+                "log",
+                "--no-graph",
+                "-r",
+                &line.commit_id,
+                "-T",
+                "change_id.shortest(8).prefix()",
+            ])?;
+            assert_eq!(line.change_id_prefix, expected);
+        }
         fs::write(fixture.root().join(path), "new contents\n")?;
         repository.snapshot(true).await?;
         assert_eq!(snapshot.annotate("@", path).await?, lines);
@@ -608,6 +623,10 @@ fn history_pagination_loads_one_extra_revision_without_losing_order() -> Result<
         assert!(first.has_more);
         let second = snapshot.history(HistoryMode::Lineage, 100).await?;
         assert_eq!(second.revisions.len(), 53);
+        for (first, second) in first.revisions.iter().zip(&second.revisions) {
+            assert!(!first.change_id_prefix.is_empty());
+            assert_eq!(first.change_id_prefix, second.change_id_prefix);
+        }
         assert!(!second.has_more);
         let target = second.revisions.last().context("root missing")?;
         let (located_history, outside) = snapshot
@@ -773,4 +792,56 @@ fn revision_search_ranks_exact_matches_and_keeps_queries_literal_and_scoped() ->
 
         Ok(())
     })
+}
+
+#[test]
+fn change_id_prefixes_match_kk_across_history_and_search() -> Result<()> {
+    smol::block_on(async {
+        let fixture = Fixture::create()?;
+        fixture.run(&["new", "-m", "prefix metadata"])?;
+        let repository = fixture.repository().await?;
+        let snapshot = repository.snapshot(true).await?;
+        let page = snapshot.history(HistoryMode::Log, 50).await?;
+        let revision = page.revisions.first().context("revision")?;
+        let expected = fixture.run(&[
+            "log",
+            "--no-graph",
+            "-r",
+            &revision.full_commit_id,
+            "-T",
+            "change_id.shortest(8).prefix()",
+        ])?;
+        assert!(!expected.is_empty());
+        assert_eq!(revision.change_id_prefix, expected);
+        assert!(revision.change_id.starts_with(&expected));
+        let found = snapshot
+            .search_revisions(&revision.full_change_id, None, true, 20)
+            .await?;
+        let found = found
+            .iter()
+            .find(|item| item.full_commit_id == revision.full_commit_id)
+            .context("search result")?;
+        assert_eq!(found.change_id_prefix, expected);
+        let mut old = serde_json::to_value(revision)?;
+        old.as_object_mut()
+            .context("revision object")?
+            .remove("changeIdPrefix");
+        let restored: Revision = serde_json::from_value(old)?;
+        assert!(restored.change_id_prefix.is_empty());
+        Ok(())
+    })
+}
+
+#[test]
+fn conflict_titles_preserve_long_and_unverified_change_ids() -> Result<()> {
+    let mut input: ConflictInput = serde_json::from_value(serde_json::json!({
+        "role":"Side", "index":0, "id":null, "executable":false, "bytes":[],
+        "source":{"change_id":"kkkkkkkkklmnopqrstuvwxyz", "display_change_id":"kkkkkkkkkl", "change_id_prefix":"kkkkkkkkk", "commit_id":"abcdef", "description":"", "bookmarks":[], "role":null, "details_incomplete":false}
+    }))?;
+    assert_eq!(input.title(0), "kkkkkkkkkl");
+    let source = input.source.as_mut().context("source")?;
+    source.display_change_id = None;
+    source.details_incomplete = true;
+    assert_eq!(input.title(0), "kkkkkkkkklmnopqrstuvwxyz");
+    Ok(())
 }

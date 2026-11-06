@@ -19,6 +19,8 @@ pub enum SparseCheckout {
 pub struct BlameLine {
     pub change_id: String,
     pub full_change_id: String,
+    #[serde(default)]
+    pub change_id_prefix: String,
     pub commit_id: String,
     pub author: String,
     pub date: String,
@@ -251,7 +253,7 @@ impl Snapshot {
         }
 
         validate_path(path)?;
-        let template = r#""{\"change_id\":" ++ json(commit.change_id().short(8)) ++ ",\"full_change_id\":" ++ json(commit.change_id()) ++ ",\"commit_id\":" ++ json(commit.commit_id()) ++ ",\"author\":" ++ json(commit.author().name()) ++ ",\"date\":" ++ json(commit.author().timestamp()) ++ ",\"summary\":" ++ json(commit.description().first_line()) ++ ",\"first\":" ++ json(first_line_in_hunk) ++ "}\n""#;
+        let template = r#""{\"change_id\":" ++ json(stringify(commit.change_id().shortest(8))) ++ ",\"change_id_prefix\":" ++ json(commit.change_id().shortest(8).prefix()) ++ ",\"full_change_id\":" ++ json(commit.change_id()) ++ ",\"commit_id\":" ++ json(commit.commit_id()) ++ ",\"author\":" ++ json(commit.author().name()) ++ ",\"date\":" ++ json(commit.author().timestamp()) ++ ",\"summary\":" ++ json(commit.description().first_line()) ++ ",\"first\":" ++ json(first_line_in_hunk) ++ "}\n""#;
         parse_records(
             &self
                 .read(&[

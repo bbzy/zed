@@ -12,6 +12,8 @@ pub struct ComparisonIntent {
     pub target_revset: String,
     pub target_label: String,
     pub range_start_change_id: Option<String>,
+    #[serde(default)]
+    pub range_start_display_id: Option<String>,
 }
 
 impl ComparisonIntent {
@@ -25,6 +27,7 @@ impl ComparisonIntent {
             target_revset,
             target_label,
             range_start_change_id: range_start.map(str::to_owned),
+            range_start_display_id: None,
         }
     }
 
@@ -59,6 +62,7 @@ impl Comparison {
             target_revset: revision.revset(),
             target_label: format!("{} {}", revision.change_id, revision.subject()),
             range_start_change_id: None,
+            range_start_display_id: None,
         })
     }
 
@@ -95,6 +99,10 @@ impl Comparison {
                 .iter()
                 .map(|category| category.revision.full_commit_id.clone()),
         );
+        intent.range_start_display_id = boundary
+            .range_start
+            .as_ref()
+            .map(|revision| revision.change_id.clone());
         intent.range_start_change_id = boundary.range_start.map(|revision| revision.full_change_id);
         let mut comparison = Self {
             intent,
@@ -115,12 +123,14 @@ impl Comparison {
     }
 
     pub fn diff_target(&self) -> super::kk_diff::DiffTarget {
-        super::kk_diff::DiffTarget::comparison(
+        let mut target = super::kk_diff::DiffTarget::comparison(
             self.intent.target_revset.clone(),
             self.base_revset.clone(),
             self.intent.target_label.clone(),
             self.intent.range_start_change_id.as_deref(),
-        )
+        );
+        target.comparison = Some(self.intent.clone());
+        target
     }
 }
 
@@ -224,6 +234,7 @@ mod tests {
             target_revset: "change_id(kkkk)".into(),
             target_label: "first comparison".into(),
             range_start_change_id: Some("llll".into()),
+            range_start_display_id: None,
         };
         let second = ComparisonIntent {
             target_label: "newer comparison".into(),

@@ -128,30 +128,21 @@ pub(super) struct DiffTarget {
 
 impl DiffTarget {
     pub(super) fn tab_label(&self) -> String {
-        let label = if let Some(comparison) = &self.comparison
+        if let Some(comparison) = &self.comparison
             && matches!(self.scope, DiffScope::Comparison { .. })
         {
             comparison.range_start_change_id.as_ref().map_or_else(
                 || format!("@ vs {}", comparison.target_revset),
-                |start| format!("{}::@", start.chars().take(8).collect::<String>()),
+                |start| {
+                    format!(
+                        "{}::@",
+                        comparison.range_start_display_id.as_ref().unwrap_or(start)
+                    )
+                },
             )
         } else {
             self.label.clone()
-        };
-        label
-            .split_inclusive(|character: char| !character.is_alphanumeric() && character != '_')
-            .fold(String::new(), |mut result, part| {
-                let word = part.trim_end_matches(|character: char| {
-                    !character.is_alphanumeric() && character != '_'
-                });
-                if word.len() > 8 && word.bytes().all(|byte| (b'k'..=b'z').contains(&byte)) {
-                    result.extend(word.chars().take(8));
-                    result.push_str(&part[word.len()..]);
-                } else {
-                    result.push_str(part);
-                }
-                result
-            })
+        }
     }
 
     pub async fn resolve(&self, snapshot: &Snapshot) -> Result<(Self, bool)> {
@@ -179,7 +170,7 @@ impl DiffTarget {
             scope: DiffScope::Change(revision.full_commit_id.clone()),
             identity: revision.revset(),
             label: revision.change_id.clone(),
-            reference: revision.full_change_id.chars().take(8).collect(),
+            reference: revision.change_id.clone(),
             comparison: None,
             category: Category::from_revision(revision),
             revision: Some(revision.clone()),
@@ -201,7 +192,7 @@ impl DiffTarget {
             category: None,
             revision: None,
             reference: range_start
-                .map(|identifier| format!("{}::@", identifier.chars().take(8).collect::<String>()))
+                .map(|identifier| format!("{identifier}::@"))
                 .unwrap_or_else(|| format!("({base})..@")),
             scope: DiffScope::Comparison {
                 base,
@@ -1525,7 +1516,19 @@ impl KkDiff {
         } else {
             &self.identity.path
         };
-        let reference = format!("{path}{lines} ({})", self.target.reference);
+        let target_reference = if let Some(revision) = &self.target.revision {
+            revision.change_id.clone()
+        } else if let Some(comparison) = &self.target.comparison
+            && let Some(start) = &comparison.range_start_change_id
+        {
+            format!(
+                "{}::@",
+                comparison.range_start_display_id.as_ref().unwrap_or(start)
+            )
+        } else {
+            self.target.reference.clone()
+        };
+        let reference = format!("{path}{lines} ({target_reference})");
         if let Some(snapshot) = &self.snapshot {
             snapshot.repository().diagnostics().debug("copydiff", || {
                 format!(
@@ -2743,7 +2746,7 @@ mod tests {
         };
         assert_eq!(
             identity.title(&target, &file).as_ref(),
-            "foo.rs (qrstuvwx::@)"
+            "foo.rs (qrstuvwxyzkl::@)"
         );
         target
             .comparison
@@ -2752,25 +2755,44 @@ mod tests {
             .range_start_change_id = None;
         assert_eq!(
             identity.title(&target, &file).as_ref(),
-            "foo.rs (@ vs klmnopqr)"
+            "foo.rs (@ vs klmnopqrstuv)"
         );
         target.comparison = None;
         target.scope = DiffScope::Change("commit".into());
         target.label = "klmnopqrstuv".into();
-        assert_eq!(identity.title(&target, &file).as_ref(), "foo.rs (klmnopqr)");
+        assert_eq!(
+            identity.title(&target, &file).as_ref(),
+            "foo.rs (klmnopqrstuv)"
+        );
         file.change_type = ChangeKind::Added;
         assert_eq!(
             identity.title(&target, &file).as_ref(),
-            "foo.rs (added in klmnopqr)"
+            "foo.rs (added in klmnopqrstuv)"
         );
         file.change_type = ChangeKind::Deleted;
         assert_eq!(
             identity.title(&target, &file).as_ref(),
-            "foo.rs (removed in klmnopqr)"
+            "foo.rs (removed in klmnopqrstuv)"
         );
         target.label = "abc123".into();
         file.change_type = ChangeKind::Renamed;
         assert_eq!(identity.title(&target, &file).as_ref(), "foo.rs (abc123)");
+        let revision: Revision = serde_json::from_value(serde_json::json!({
+            "changeId":"kkkkkkkkkl", "changeIdPrefix":"kkkkkkkkk", "fullChangeId":"kkkkkkkkklmnopqrstuvwxyz", "commitId":"abcdef12", "fullCommitId":"abcdef123456",
+            "description":"subject", "fullDescription":"subject", "authorName":"Author", "authorEmail":"author@example.com", "committerName":"Author", "committerEmail":"author@example.com",
+            "bookmarks":[], "remoteBookmarkNames":[], "remoteBookmarkRemotes":[], "tags":[], "parentChangeIds":[], "parentCommitIds":[], "hasMultipleChildren":false, "hasConflict":false, "isWorkingCopy":false, "isRoot":false
+        })).expect("revision");
+        let change = DiffTarget::change(&revision);
+        assert_eq!(change.reference, "kkkkkkkkkl");
+        assert_eq!(change.tab_label(), "kkkkkkkkkl");
+        let comparison = DiffTarget::comparison(
+            "target".into(),
+            "base".into(),
+            "label".into(),
+            Some("kkkkkkkkkl"),
+        );
+        assert_eq!(comparison.reference, "kkkkkkkkkl::@");
+        assert_eq!(comparison.tab_label(), "kkkkkkkkkl::@");
         target.label = "prefix_klmnopqrstuv".into();
         assert_eq!(target.tab_label(), "prefix_klmnopqrstuv");
     }

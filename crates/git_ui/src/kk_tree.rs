@@ -1654,7 +1654,10 @@ impl KkPanel {
                             .when(self.mode == HistoryMode::Lineage, |view| {
                                 view.child(Label::new(graph.prefix.clone()).color(Color::Accent))
                             })
-                            .child(Label::new(revision.change_id.clone()).color(Color::Accent))
+                            .child(crate::commit_metadata::change_identifier(
+                                revision.change_id.clone(),
+                                &revision.change_id_prefix,
+                            ))
                             .child(
                                 Label::new(if revision.author_name.is_empty() {
                                     revision
