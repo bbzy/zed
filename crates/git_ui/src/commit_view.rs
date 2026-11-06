@@ -81,6 +81,7 @@ pub(super) struct CommitHeader {
     pub author_email: gpui::SharedString,
     pub timestamp: Option<i64>,
     pub description: String,
+    pub change_id_prefix: Option<String>,
     pub identifiers: Vec<(&'static str, gpui::SharedString)>,
     pub avatar: AnyElement,
     pub editor: Entity<SplittableEditor>,
@@ -196,11 +197,16 @@ impl CommitHeader {
                                     ),
                             ),
                     )
-                    .child(h_flex().gap_1().children(
-                        self.identifiers.into_iter().map(|(label, identifier)| {
-                            copy_commit_identifier(label, identifier, cx)
-                        }),
-                    )),
+                    .child(h_flex().gap_1().children(self.identifiers.into_iter().map(
+                        |(label, identifier)| {
+                            copy_commit_identifier(
+                                label,
+                                identifier,
+                                self.change_id_prefix.clone(),
+                                cx,
+                            )
+                        },
+                    ))),
             )
             .children(message)
     }
@@ -257,7 +263,12 @@ impl CommitHeader {
     }
 }
 
-fn copy_commit_identifier(label: &'static str, identifier: gpui::SharedString, cx: &App) -> Button {
+fn copy_commit_identifier(
+    label: &'static str,
+    identifier: gpui::SharedString,
+    change_id_prefix: Option<String>,
+    cx: &App,
+) -> Button {
     let copied = cx
         .read_from_clipboard()
         .and_then(|item| item.text())
@@ -274,11 +285,14 @@ fn copy_commit_identifier(label: &'static str, identifier: gpui::SharedString, c
             .color(if copied { Color::Success } else { Color::Muted }),
         )
         .tooltip({
-            super::commit_metadata::tooltip(vec![(
-                format!("Copy {label}"),
-                identifier.to_string(),
-                Color::Accent,
-            )])
+            super::commit_metadata::tooltip_with_prefix(
+                vec![(
+                    format!("Copy {label}"),
+                    identifier.to_string(),
+                    Color::Accent,
+                )],
+                change_id_prefix,
+            )
         })
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
@@ -1069,6 +1083,7 @@ impl CommitView {
                     .unix_timestamp(),
             ),
             description: self.commit.message.to_string(),
+            change_id_prefix: None,
             identifiers: if self.stash.is_none() {
                 vec![("Commit SHA", self.commit.sha.clone())]
             } else {
