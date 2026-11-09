@@ -1451,7 +1451,11 @@ impl GitPanel {
         let app_state = workspace.app_state().clone();
         let fs = app_state.fs.clone();
         let git_store = project.read(cx).git_store().clone();
-        let active_repository = project.read(cx).active_repository(cx);
+        let active_repository = if ProjectSettings::get_global(cx).git.enabled.disabled {
+            None
+        } else {
+            project.read(cx).active_repository(cx)
+        };
         let signoff_enabled = serialized_panel
             .as_ref()
             .is_some_and(|panel| panel.signoff_enabled);
@@ -1508,6 +1512,7 @@ impl GitPanel {
             })
             .detach();
 
+            let mut was_git_disabled = ProjectSettings::get_global(cx).git.enabled.disabled;
             let mut was_sort_by = GitPanelSettings::get_global(cx).sort_by;
             let mut was_group_by = GitPanelSettings::get_global(cx).group_by;
             let mut was_tree_view = GitPanelSettings::get_global(cx).tree_view;
@@ -1518,6 +1523,11 @@ impl GitPanel {
             let mut was_date_style = GitPanelSettings::get_global(cx).date_style;
             let mut was_date_format = ProjectSettings::get_global(cx).git.date_format.clone();
             cx.observe_global_in::<SettingsStore>(window, move |this, window, cx| {
+                let git_disabled = ProjectSettings::get_global(cx).git.enabled.disabled;
+                if git_disabled != was_git_disabled {
+                    was_git_disabled = git_disabled;
+                    this.schedule_update(window, cx);
+                }
                 let settings = GitPanelSettings::get_global(cx);
                 let sort_by = settings.sort_by;
                 let group_by = settings.group_by;
@@ -5787,6 +5797,11 @@ impl GitPanel {
     }
 
     fn schedule_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if ProjectSettings::get_global(cx).git.enabled.disabled {
+            self.update_visible_entries_task = Task::ready(());
+            self.update_visible_entries(window, cx);
+            return;
+        }
         let new_active_repository = self.project.read(cx).active_repository(cx);
         let active_repository_changed = self.active_repository.as_ref().map(Entity::entity_id)
             != new_active_repository.as_ref().map(Entity::entity_id);
@@ -5954,7 +5969,11 @@ impl GitPanel {
             .as_ref()
             .and_then(|op| self.entry_by_path(&op.anchor));
 
-        let active_repository = self.project.read(cx).active_repository(cx);
+        let active_repository = if ProjectSettings::get_global(cx).git.enabled.disabled {
+            None
+        } else {
+            self.project.read(cx).active_repository(cx)
+        };
         if active_repository != self.active_repository {
             self.active_repository = active_repository;
             self.git_access = None;
@@ -16541,6 +16560,72 @@ mod tests {
             })
             .unwrap();
         (worktree, index)
+    }
+
+    #[gpui::test]
+    async fn test_disable_git_stops_panel_updates_and_restores_them_when_enabled(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let (_fs, panel, mut cx) = setup_git_panel_with_index_contents(
+            cx,
+            &[("file.txt", "head\n")],
+            &[("file.txt", "head\n")],
+            json!({".git": {}, "file.txt": "changed\n"}),
+        )
+        .await;
+        panel.update_in(&mut cx, |panel, window, cx| {
+            assert!(!panel.entries.is_empty());
+            panel.schedule_visible_entries_update(window, cx);
+        });
+        cx.update(|_, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings
+                        .git
+                        .get_or_insert_default()
+                        .enabled
+                        .get_or_insert_default()
+                        .disable_git = Some(true);
+                });
+            })
+        });
+        cx.run_until_parked();
+        panel.update_in(&mut cx, |panel, window, cx| {
+            assert!(ProjectSettings::get_global(cx).git.enabled.disabled);
+            panel.schedule_update(window, cx);
+            panel.update_visible_entries(window, cx);
+            assert!(panel.entries.is_empty());
+            assert!(panel.active_repository.is_none());
+            assert!(panel.update_visible_entries_task.is_ready());
+        });
+        let workspace = panel.read_with(&cx, |panel, _| {
+            panel.workspace.upgrade().expect("workspace")
+        });
+        let disabled_panel = workspace.update_in(&mut cx, GitPanel::new);
+        cx.run_until_parked();
+        disabled_panel.read_with(&cx, |panel, _| {
+            assert!(panel.entries.is_empty());
+            assert!(panel.active_repository.is_none());
+            assert!(panel.update_visible_entries_task.is_ready());
+        });
+        cx.update(|_, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings
+                        .git
+                        .get_or_insert_default()
+                        .enabled
+                        .get_or_insert_default()
+                        .disable_git = Some(false);
+                });
+            })
+        });
+        await_git_panel_entries(&panel, &mut cx).await;
+        panel.read_with(&cx, |panel, _| {
+            assert!(panel.active_repository.is_some());
+            assert!(!panel.entries.is_empty());
+        });
     }
 
     #[gpui::test]

@@ -528,6 +528,8 @@ pub struct AutoFetchSettings {
 
 #[derive(Clone, Copy, Debug)]
 pub struct GitEnabledSettings {
+    /// Whether all Git integration features are disabled.
+    pub disabled: bool,
     /// Whether git integration is enabled for showing git status.
     ///
     /// Default: true
@@ -759,6 +761,11 @@ impl Settings for ProjectSettings {
         let git = content.git.as_ref().unwrap();
         let git_enabled = {
             GitEnabledSettings {
+                disabled: git
+                    .enabled
+                    .as_ref()
+                    .and_then(|enabled| enabled.disable_git)
+                    .unwrap_or(false),
                 status: git.enabled.as_ref().unwrap().is_git_status_enabled(),
                 diff: git.enabled.as_ref().unwrap().is_git_diff_enabled(),
             }
