@@ -16,7 +16,11 @@ use language::Capability;
 use multi_buffer::MultiBuffer;
 use serde::{Deserialize, Serialize};
 use settings::Settings;
-use std::{any::TypeId, collections::HashSet, path::PathBuf};
+use std::{
+    any::TypeId,
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 use ui::{CommonAnimationExt as _, ContextMenu, prelude::*};
 use util::ResultExt as _;
 use workspace::{
@@ -826,6 +830,11 @@ impl KkMultiDiff {
                         }
                     })
                     .await?;
+                let previous_by_path = cx.update(|cx| {
+                    previous.iter().map(|entry| {
+                        (entry.read(cx).file.path.clone(), entry.clone())
+                    }).collect::<HashMap<_, _>>()
+                });
                 if retarget {
                     let extras = cx.update(|cx| previous.iter().filter_map(|entry| {
                         let entry = entry.read(cx);
@@ -850,7 +859,7 @@ impl KkMultiDiff {
                         .filter(|file| {
                             working_copy
                                 && file.change_type != kk_workbench::ChangeKind::Deleted
-                                && !previous.iter().any(|entry| entry.read(cx).file == **file)
+                                && !previous_by_path.get(&file.path).is_some_and(|entry| entry.read(cx).file == **file)
                         })
                         .map(|file| file.path.clone())
                         .collect::<Vec<_>>()
@@ -876,13 +885,11 @@ impl KkMultiDiff {
                     snapshot
                 };
                 let mut entries = Vec::with_capacity(files.len());
-                for file in files.iter().cloned() {
-                    let existing = cx.update(|cx| {
-                        previous
-                            .iter()
-                            .find(|entry| entry.read(cx).file.path == file.path)
-                            .cloned()
-                    });
+                for (index, file) in files.iter().cloned().enumerate() {
+                    if index % 32 == 0 {
+                        futures_lite::future::yield_now().await;
+                    }
+                    let existing = previous_by_path.get(&file.path).cloned();
                     let retain = cx.update(|cx| {
                         !retarget
                             && existing.as_ref().is_some_and(|entry| {

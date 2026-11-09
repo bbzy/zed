@@ -18,7 +18,7 @@ pub(super) struct KkOutput {
     editor: Entity<Editor>,
     focus: FocusHandle,
     position: DockPosition,
-    cursor: usize,
+    cursor: (usize, usize),
     remote: Option<kk_workbench::remote::Client>,
     configuration: Shared<Task<()>>,
     remote_updates: Task<()>,
@@ -49,14 +49,18 @@ impl KkOutput {
             editor,
             focus: cx.focus_handle(),
             position: DockPosition::Bottom,
-            cursor: 0,
+            cursor: (0, 0),
             remote: None,
             configuration: Task::ready(()).shared(),
             remote_updates: Task::ready(()),
             _updates: cx.spawn(async move |this, cx| {
                 while updates.recv().await.is_ok() {
-                    if this.update(cx, |this, cx| this.synchronize(cx)).is_err() {
-                        break;
+                    loop {
+                        match this.update(cx, |this, cx| this.synchronize(cx)) {
+                            Ok(true) => futures_lite::future::yield_now().await,
+                            Ok(false) => break,
+                            Err(_) => return,
+                        }
                     }
                 }
             }),
@@ -76,24 +80,34 @@ impl KkOutput {
         self.remote = Some(remote.clone());
         self.configure(categories, cx);
         let configured = self.configuration.clone();
+        let diagnostics = self.diagnostics.clone();
         self.remote_updates = cx.spawn(async move |this, cx| {
             configured.await;
             let mut cursor = None;
             let mut previous_error = None;
             loop {
-                let output = remote.diagnostics(cursor, true).await;
+                let output = cx
+                    .background_spawn({
+                        let remote = remote.clone();
+                        let diagnostics = diagnostics.clone();
+                        async move {
+                            let output = remote.diagnostics(cursor, true).await?;
+                            diagnostics.append_output(&output.text);
+                            anyhow::Ok(output.cursor)
+                        }
+                    })
+                    .await;
                 let failed = output.is_err();
                 if this
                     .update(cx, |this, cx| match output {
-                        Ok(output) => {
-                            if cursor.is_some_and(|previous| !output.cursor.same_stream(previous)) {
+                        Ok(next_cursor) => {
+                            if cursor.is_some_and(|previous| !next_cursor.same_stream(previous)) {
                                 let categories = this.categories.clone();
                                 this.configure(&categories, cx);
                             }
 
-                            cursor = Some(output.cursor);
+                            cursor = Some(next_cursor);
                             previous_error = None;
-                            this.diagnostics.append_output(&output.text);
                         }
                         Err(error) => {
                             let error = format!("Could not read remote KK output: {error:#}");
@@ -136,8 +150,8 @@ impl KkOutput {
             .shared();
     }
 
-    fn synchronize(&mut self, cx: &mut App) {
-        let (cursor, text) = self.diagnostics.read_since(self.cursor);
+    fn synchronize(&mut self, cx: &mut App) -> bool {
+        let (cursor, text, more) = self.diagnostics.read_batch(self.cursor, 64 * 1024);
         if !text.is_empty() {
             self.buffer.update(cx, |buffer, cx| {
                 buffer.append(text, cx);
@@ -145,6 +159,7 @@ impl KkOutput {
         }
 
         self.cursor = cursor;
+        more
     }
 }
 
@@ -295,7 +310,7 @@ mod tests {
             assert_eq!(text.matches("before opening").count(), 1);
             assert_eq!(text.matches("while open").count(), 1);
             assert_eq!(text.matches("while closed").count(), 1);
-            assert_eq!(output.cursor, 3);
+            assert_eq!(output.cursor, (3, 0));
             assert!(!buffer.read(cx).is_dirty());
             assert_eq!(pane.read(cx).items_len(), 1);
             assert_eq!(
@@ -305,6 +320,16 @@ mod tests {
                     .and_then(|item| item.downcast::<Editor>()),
                 Some(active_editor.clone())
             );
+        });
+        let large_output = "三🙂\n".repeat(40_000);
+        diagnostics.append_output(&large_output);
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(buffer.read(cx).text().ends_with(&large_output));
+            assert_eq!(output.read(cx).cursor, (4, 0));
+            assert!(!buffer.read(cx).is_dirty());
+            assert!(editor.read(cx).read_only(cx));
+            assert!(focus.is_focused(window));
         });
     }
 }

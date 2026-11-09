@@ -64,13 +64,48 @@ impl Diagnostics {
         )
     }
 
+    pub fn read_batch(
+        &self,
+        cursor: (usize, usize),
+        maximum_bytes: usize,
+    ) -> ((usize, usize), String, bool) {
+        let state = self.state();
+        let mut text = String::new();
+        let (mut line_index, mut offset) = cursor;
+        let maximum_bytes = maximum_bytes.max(4);
+        while let Some(line) = state.lines.get(line_index) {
+            let Some(remaining) = line.get(offset..) else {
+                offset = 0;
+                continue;
+            };
+            let available = maximum_bytes.saturating_sub(text.len());
+            let mut length = available.min(remaining.len());
+            while !remaining.is_char_boundary(length) {
+                length -= 1;
+            }
+            text.push_str(&remaining[..length]);
+            offset += length;
+            if offset == line.len() {
+                line_index += 1;
+                offset = 0;
+            } else {
+                break;
+            }
+            if text.len() >= maximum_bytes {
+                break;
+            }
+        }
+        ((line_index, offset), text, line_index < state.lines.len())
+    }
+
     pub fn log(&self, message: impl AsRef<str>) {
         self.state().append(message.as_ref());
     }
 
     pub fn append_output(&self, text: &str) {
         if !text.is_empty() {
-            self.state().append_output(text);
+            let text = text.to_owned();
+            self.state().append_owned(text);
         }
     }
 
@@ -130,7 +165,11 @@ impl DiagnosticState {
     }
 
     fn append_output(&mut self, text: &str) {
-        self.lines.push(text.to_owned());
+        self.append_owned(text.to_owned());
+    }
+
+    fn append_owned(&mut self, text: String) {
+        self.lines.push(text);
         self.subscribers.retain(|sender| match sender.try_send(()) {
             Ok(()) | Err(smol::channel::TrySendError::Full(())) => true,
             Err(smol::channel::TrySendError::Closed(())) => false,
@@ -213,6 +252,32 @@ mod tests {
                     .map(|(_, record)| serde_json::from_str(record).expect("performance record"))
             })
             .collect()
+    }
+
+    #[test]
+    fn diagnostic_batches_preserve_order_and_make_progress() {
+        let diagnostics = Diagnostics::default();
+        diagnostics.append_output("first");
+        diagnostics.append_output("second");
+        diagnostics.append_output("三🙂four");
+        let expected = diagnostics.read_since(0).1;
+        let mut actual = String::new();
+        let mut cursor = (0, 0);
+        loop {
+            let (next, text, more) = diagnostics.read_batch(cursor, 5);
+            assert!(text.len() <= 5);
+            assert_ne!(cursor, next);
+            actual.push_str(&text);
+            cursor = next;
+            if !more {
+                break;
+            }
+        }
+        assert_eq!(actual, expected);
+        assert_eq!(
+            diagnostics.read_batch(cursor, 5),
+            (cursor, String::new(), false)
+        );
     }
 
     #[test]

@@ -137,6 +137,9 @@ pub struct KkPanel {
     file_order: FileOrdering,
     pub(super) commit_information: Entity<CommitInformation>,
     tree_selection: TreeSelectionState,
+    tree_revision: u64,
+    tree_requested: Option<u64>,
+    tree_task: Task<()>,
     visible_files: Vec<FileRow>,
     file_batches: HashMap<FileBatchKey, Task<()>>,
     classification_batch_sequence: u64,
@@ -349,6 +352,9 @@ impl KkPanel {
                         file_order,
                         commit_information,
                         tree_selection: TreeSelectionState::default(),
+                        tree_revision: 0,
+                        tree_requested: None,
+                        tree_task: Task::ready(()),
                         visible_files: Vec::new(),
                         file_batches: HashMap::new(),
                         classification_batch_sequence: 0,
@@ -379,6 +385,9 @@ impl KkPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self._subscriptions.push(cx.observe_self(|this, _| {
+            this.tree_revision = this.tree_revision.wrapping_add(1);
+        }));
         let store = project.read(cx).buffer_store().clone();
         if let Some(remote) = project.read(cx).remote_client() {
             let mut connected = remote.read(cx).connection().is_some();
@@ -2953,7 +2962,7 @@ impl Render for KkPanel {
             });
         }
 
-        let row_count = self.update_tree(cx);
+        let row_count = self.request_tree(window, cx);
 
         v_flex()
             .id("kk-workbench")
