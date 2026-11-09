@@ -4,12 +4,13 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct MutationPreviews {
     next_id: u64,
     intents: Vec<MutationIntent>,
 }
 
+#[derive(Clone)]
 struct MutationIntent {
     id: u64,
     snapshot: Snapshot,
@@ -19,6 +20,7 @@ struct MutationIntent {
     succeeded: WriteDependency,
 }
 
+#[derive(Clone)]
 struct MutationEffect {
     target: super::super::kk_diff::DiffTarget,
     file: ChangedFile,
@@ -337,12 +339,13 @@ impl MutationPreviews {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct ListPreviews {
     next_id: u64,
     intents: Vec<ListIntent>,
 }
 
+#[derive(Clone)]
 struct ListIntent {
     id: u64,
     snapshot: Snapshot,
@@ -356,7 +359,7 @@ struct ListIntent {
     capture_saved: bool,
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 enum IntentState {
     Pending,
     Confirmed,

@@ -18,15 +18,37 @@ pub enum FileOrder {
     FileName,
 }
 
+#[derive(Clone)]
+pub(super) struct FileSort {
+    order: FileOrder,
+    collator: Arc<CollatorBorrowed<'static>>,
+}
+
+impl FileSort {
+    pub fn order(&self) -> FileOrder {
+        self.order
+    }
+    pub fn compare(&self, left: &str, right: &str) -> std::cmp::Ordering {
+        compare_paths(&self.collator, left, right)
+    }
+}
+
 pub struct FileOrdering {
     order: FileOrder,
-    collator: CollatorBorrowed<'static>,
+    collator: Arc<CollatorBorrowed<'static>>,
     store: Arc<KeyValueStore>,
     key: Option<String>,
     writes: Shared<Task<()>>,
 }
 
 impl FileOrdering {
+    pub(super) fn snapshot(&self) -> FileSort {
+        FileSort {
+            order: self.order,
+            collator: self.collator.clone(),
+        }
+    }
+
     pub fn new(workspace_id: Option<String>, cx: &App) -> anyhow::Result<Self> {
         let locale = sys_locale::get_locale()
             .and_then(|locale| locale.parse::<Locale>().log_err())
@@ -46,12 +68,12 @@ impl FileOrdering {
         })
     }
 
-    fn collator(locale: Locale) -> anyhow::Result<CollatorBorrowed<'static>> {
+    fn collator(locale: Locale) -> anyhow::Result<Arc<CollatorBorrowed<'static>>> {
         let mut preferences: CollatorPreferences = locale.into();
         preferences.numeric_ordering = Some(CollationNumericOrdering::True);
         let mut options = CollatorOptions::default();
         options.strength = Some(Strength::Primary);
-        Ok(Collator::try_new(preferences, options)?)
+        Ok(Arc::new(Collator::try_new(preferences, options)?))
     }
 
     pub fn order(&self) -> FileOrder {
@@ -68,12 +90,7 @@ impl FileOrdering {
     }
 
     pub fn compare(&self, left: &str, right: &str) -> std::cmp::Ordering {
-        self.collator
-            .compare(
-                left.rsplit('/').next().unwrap_or(left),
-                right.rsplit('/').next().unwrap_or(right),
-            )
-            .then_with(|| left.split('/').cmp(right.split('/')))
+        compare_paths(&self.collator, left, right)
     }
 
     pub fn set<T: 'static>(
@@ -116,6 +133,15 @@ impl FileOrdering {
         // Closing the panel must retain the last selected order, including queued switches.
         cx.spawn(async move |_, _| write.await).detach();
     }
+}
+
+fn compare_paths(collator: &CollatorBorrowed<'_>, left: &str, right: &str) -> std::cmp::Ordering {
+    collator
+        .compare(
+            left.rsplit('/').next().unwrap_or(left),
+            right.rsplit('/').next().unwrap_or(right),
+        )
+        .then_with(|| left.split('/').cmp(right.split('/')))
 }
 
 #[cfg(test)]

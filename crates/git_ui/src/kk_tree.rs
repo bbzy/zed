@@ -59,6 +59,7 @@ pub(super) struct TreeSelectionState {
     rows: Vec<TreeRow>,
     rendered: Vec<TreeRenderRow>,
     empty_commits: HashMap<PathBuf, HashMap<String, bool>>,
+    graph_widths: HashMap<PathBuf, usize>,
 }
 
 #[derive(Clone)]
@@ -183,19 +184,29 @@ impl TreeSelectionState {
         self.anchor = Some(id.clone());
     }
 
-    fn reconcile(&mut self, rows: Vec<TreeRow>) {
+    fn reconcile(&mut self, rows: Vec<TreeRow>) -> Vec<TreeRow> {
+        let rows_by_id = rows
+            .iter()
+            .map(|row| (&row.id, row))
+            .collect::<HashMap<_, _>>();
+        let mut files_by_identity = HashMap::new();
+        for row in &rows {
+            if let TreeRowKind::File(file) = &row.kind {
+                let key = (&file.id.root, &file.id.section, &file.file.path);
+                files_by_identity
+                    .entry(key)
+                    .and_modify(|entry| *entry = None)
+                    .or_insert(Some(row));
+            }
+        }
         for previous in &self.rows {
             if let TreeRowKind::File(file) = &previous.kind
                 && file.pending
-                && let Some(current) = rows.iter().find(|row| row.id == previous.id).or_else(|| {
-                    let mut matching = rows.iter().filter(|row| {
-                        matches!(&row.kind, TreeRowKind::File(current)
-                            if current.id.root == file.id.root
-                                && current.id.section == file.id.section
-                                && current.file.path == file.file.path)
-                    });
-                    let first = matching.next()?;
-                    matching.next().is_none().then_some(first)
+                && let Some(current) = rows_by_id.get(&previous.id).copied().or_else(|| {
+                    files_by_identity
+                        .get(&(&file.id.root, &file.id.section, &file.file.path))
+                        .copied()
+                        .flatten()
                 })
             {
                 if self.selected.remove(&previous.id) {
@@ -260,7 +271,7 @@ impl TreeSelectionState {
             self.anchor = self.cursor.clone();
         }
 
-        self.rows = rows;
+        std::mem::replace(&mut self.rows, rows)
     }
 }
 
@@ -453,7 +464,6 @@ impl KkPanel {
 
         self.load_tasks.retain(|key, _| !key.starts_with("commit:"));
         self.model_generation += 1;
-        self.update_tree(cx);
         cx.notify();
     }
 
@@ -472,251 +482,53 @@ impl KkPanel {
         cx.notify();
     }
 
-    fn tree_rows(&self) -> Vec<TreeRow> {
-        let mut rows = Vec::new();
-        let depth = usize::from(self.tree_selection.grouped);
-        for repository in &self.repositories {
-            let root = repository.snapshot.repository().root().to_owned();
-            let repository_id = TreeRowId::Repository(root.clone());
-            let expanded = self.tree_selection.is_expanded(&repository_id);
-            if self.tree_selection.grouped {
-                let label = self
-                    .repository_paths
-                    .get(&root)
-                    .and_then(|paths| {
-                        paths.iter().find_map(|(_, path)| {
-                            root.strip_prefix(path)
-                                .ok()
-                                .filter(|relative| !relative.as_os_str().is_empty())
-                        })
-                    })
-                    .map(|relative| relative.display().to_string())
-                    .unwrap_or_else(|| {
-                        root.file_name()
-                            .unwrap_or(root.as_os_str())
-                            .to_string_lossy()
-                            .into_owned()
-                    });
-                rows.push(TreeRow {
-                    id: repository_id.clone(),
-                    parent: None,
-                    fallback: None,
-                    depth: 0,
-                    expanded: (!repository.stale).then_some(expanded),
-                    kind: if repository.stale {
-                        TreeRowKind::Recovery(label)
-                    } else {
-                        TreeRowKind::Group(label)
-                    },
-                    render_index: 0,
-                });
-                if !expanded || repository.stale {
-                    continue;
-                }
-            }
-
-            let parent = self.tree_selection.grouped.then_some(repository_id);
-            let comparison_id = TreeRowId::Comparison(root.clone());
-            if let Some(comparison) = &repository.comparison {
-                let mut projected = self
-                    .list_previews
-                    .files_with_mutations(repository, &self.mutation_previews);
-                if self.file_order.order() == FileOrder::FileName {
-                    projected.sort_by(|left, right| {
-                        self.file_order.compare(&left.file.path, &right.file.path)
-                    });
-                }
-
-                let expanded = self.tree_selection.is_expanded(&comparison_id);
-                rows.push(TreeRow {
-                    id: comparison_id.clone(),
-                    parent: parent.clone(),
-                    fallback: None,
-                    depth,
-                    expanded: Some(expanded),
-                    kind: TreeRowKind::Group(format!(
-                        "Comparison: {} ({})",
-                        comparison.intent.target_label,
-                        projected
-                            .iter()
-                            .filter(|file| file.category.is_none())
-                            .count()
-                    )),
-                    render_index: 0,
-                });
-                if expanded && !repository.stale {
-                    for file in projected
-                        .iter()
-                        .filter(|file| file.category.is_none())
-                        .cloned()
-                    {
-                        rows.push(TreeRow {
-                            id: TreeRowId::File(file.id.clone()),
-                            parent: Some(comparison_id.clone()),
-                            fallback: None,
-                            depth: depth + 1,
-                            expanded: None,
-                            kind: TreeRowKind::File(file),
-                            render_index: 0,
-                        });
-                    }
-                }
-
-                for category in [
-                    Category::Rejected,
-                    Category::Debug,
-                    Category::Pending,
-                    Category::Reviewed,
-                ] {
-                    let files = projected
-                        .iter()
-                        .filter(|file| file.category == Some(category))
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if files.is_empty() {
-                        continue;
-                    }
-
-                    let id = TreeRowId::Category(root.clone(), category.label());
-                    let expanded = self.tree_selection.is_expanded(&id);
-                    rows.push(TreeRow {
-                        id: id.clone(),
-                        parent: parent.clone(),
-                        fallback: Some(comparison_id.clone()),
-                        depth,
-                        expanded: Some(expanded),
-                        kind: TreeRowKind::Group(format!("{} ({})", category.label(), files.len())),
-                        render_index: 0,
-                    });
-                    if expanded && !repository.stale {
-                        for file in files {
-                            rows.push(TreeRow {
-                                id: TreeRowId::File(file.id.clone()),
-                                parent: Some(id.clone()),
-                                fallback: None,
-                                depth: depth + 1,
-                                expanded: None,
-                                kind: TreeRowKind::File(file),
-                                render_index: 0,
-                            });
-                        }
-                    }
-                }
-            }
-
-            let history_id = TreeRowId::History(root.clone());
-            let expanded = self.tree_selection.is_expanded(&history_id);
-            rows.push(TreeRow {
-                id: history_id.clone(),
-                parent,
-                fallback: None,
-                depth,
-                expanded: (!repository.stale).then_some(expanded),
-                kind: if repository.stale {
-                    TreeRowKind::Recovery("Commits".into())
-                } else {
-                    TreeRowKind::Group("Commits".into())
-                },
-                render_index: 0,
-            });
-            if !expanded || repository.stale {
-                continue;
-            }
-
-            let graph = history_graph(&repository.history.revisions, self.mode);
-            let revisions = repository
-                .located
-                .iter()
-                .chain(repository.history.revisions.iter());
-            let prefixes = repository
-                .located
-                .iter()
-                .map(|revision| kk_workbench::GraphRow {
-                    prefix: "◇".to_owned(),
-                    column: 0,
-                    incoming: Vec::new(),
-                    outgoing: Vec::new(),
-                    parents: Vec::new(),
-                    is_fork: revision.has_multiple_children,
-                    is_merge: revision.parent_commit_ids.len() > 1,
-                    omitted_parents: 0,
-                })
-                .chain(graph);
-            for (revision, prefix) in revisions.zip(prefixes) {
-                let identity = if repository
-                    .history
-                    .revisions
-                    .iter()
-                    .chain(repository.located.iter())
-                    .filter(|candidate| candidate.full_change_id == revision.full_change_id)
-                    .count()
-                    > 1
-                {
-                    format!("{}:{}", revision.full_change_id, revision.full_commit_id)
-                } else {
-                    revision.full_change_id.clone()
-                };
-                let id = TreeRowId::Revision(root.clone(), identity);
-                let expanded = repository.expanded.get(&revision.full_commit_id);
-                rows.push(TreeRow {
-                    id: id.clone(),
-                    parent: Some(history_id.clone()),
-                    fallback: None,
-                    depth: depth + 1,
-                    expanded: Some(expanded.is_some()),
-                    kind: TreeRowKind::Revision(revision.clone(), prefix),
-                    render_index: 0,
-                });
-                if let Some(RevisionFiles::Loaded(files)) = expanded {
-                    let target = super::super::kk_diff::DiffTarget::change(revision);
-                    let mut projected = Vec::new();
-                    for file in files {
-                        projected.push(FileRow::new(
-                            repository,
-                            super::super::kk_diff::DiffTarget::change(revision),
-                            file.clone(),
-                            "commit",
-                            revision.is_working_copy,
-                        ));
-                    }
-                    self.mutation_previews
-                        .project(repository, Some(&target), &mut projected);
-                    projected
-                        .retain(|row| !self.list_previews.hides(repository, revision, &row.file));
-                    if self.file_order.order() == FileOrder::FileName {
-                        projected.sort_by(|left, right| {
-                            self.file_order.compare(&left.file.path, &right.file.path)
-                        });
-                    }
-
-                    for file in projected {
-                        rows.push(TreeRow {
-                            id: TreeRowId::File(file.id.clone()),
-                            parent: Some(id.clone()),
-                            fallback: None,
-                            depth: depth + 2,
-                            expanded: None,
-                            kind: TreeRowKind::File(file),
-                            render_index: 0,
-                        });
-                    }
-                }
-            }
-
-            if repository.history.has_more {
-                rows.push(TreeRow {
-                    id: TreeRowId::More(root),
-                    parent: Some(history_id),
-                    fallback: None,
-                    depth: depth + 1,
-                    expanded: None,
-                    kind: TreeRowKind::More,
-                    render_index: 0,
-                });
-            }
+    fn tree_projection(&self) -> TreeProjection {
+        TreeProjection {
+            repositories: self.repositories.clone(),
+            repository_paths: self.repository_paths.clone(),
+            tree_selection: TreeSelectionState {
+                grouped: self.tree_selection.grouped,
+                expanded: self.tree_selection.expanded.clone(),
+                ..TreeSelectionState::default()
+            },
+            list_previews: self.list_previews.clone(),
+            mutation_previews: self.mutation_previews.clone(),
+            file_order: self.file_order.snapshot(),
+            mode: self.mode,
         }
+    }
 
-        rows
+    pub(super) fn request_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) -> usize {
+        if self.tree_requested != Some(self.tree_revision) && self.tree_task.is_ready() {
+            self.tree_selection.update_roots(&self.repositories);
+            if self.reveal_selected
+                && let Some((root, _, _)) = &self.selected_change
+            {
+                self.tree_selection
+                    .expanded
+                    .insert(TreeRowId::Repository(root.clone()), true);
+                self.tree_selection
+                    .expanded
+                    .insert(TreeRowId::History(root.clone()), true);
+            }
+            let projection = self.tree_projection();
+            let revision = self.tree_revision;
+            self.tree_requested = Some(revision);
+            self.tree_task = cx.spawn_in(window, async move |this, cx| {
+                let rows = cx.background_spawn(async move { projection.build() }).await;
+                this.update_in(cx, |this, window, cx| {
+                    if this.tree_revision == revision {
+                        this.apply_tree(rows, cx);
+                    } else {
+                        this.tree_requested = None;
+                    }
+                    // Publishing presentation must not invalidate its own input revision.
+                    window.refresh();
+                })
+                .log_err();
+            });
+        }
+        self.tree_selection.rendered.len()
     }
 
     fn select_tree_row(
@@ -908,6 +720,7 @@ impl KkPanel {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn update_tree(&mut self, cx: &mut Context<Self>) -> usize {
         self.tree_selection.update_roots(&self.repositories);
         if self.reveal_selected
@@ -921,51 +734,31 @@ impl KkPanel {
                 .insert(TreeRowId::History(root.clone()), true);
         }
 
-        let mut tree_rows = self.tree_rows();
-        let mut rendered = Vec::new();
-        let mut visible_files = Vec::new();
-        for (index, row) in tree_rows.iter_mut().enumerate() {
-            row.render_index = rendered.len();
-            rendered.push(TreeRenderRow::Entry(index));
-            if let TreeRowKind::Revision(revision, _) = &row.kind
-                && let Some(repository) = self
-                    .repositories
-                    .iter()
-                    .find(|repository| repository.snapshot.repository().root() == row.id.root())
-            {
-                match repository.expanded.get(&revision.full_commit_id) {
-                    Some(RevisionFiles::Failed(error)) => {
-                        rendered.push(TreeRenderRow::Error {
-                            root: row.id.root().to_owned(),
-                            revision: revision.clone(),
-                            depth: row.depth + 1,
-                            error: error.clone(),
-                        });
-                    }
-                    Some(RevisionFiles::Loading) => {
-                        rendered.push(TreeRenderRow::Message {
-                            depth: row.depth + 1,
-                            text: "Loading…",
-                        });
-                    }
-                    Some(RevisionFiles::Loaded(files)) if files.is_empty() => {
-                        rendered.push(TreeRenderRow::Message {
-                            depth: row.depth + 1,
-                            text: "No file changes",
-                        });
-                    }
-                    _ => {}
-                }
-            }
+        let presentation = self.tree_projection().build();
+        self.apply_tree(presentation, cx)
+    }
 
-            if let TreeRowKind::File(file) = &row.kind {
-                visible_files.push(file.clone());
-            }
-        }
-
-        self.tree_selection.reconcile(tree_rows);
-        self.tree_selection.rendered = rendered;
-        self.visible_files = visible_files;
+    fn apply_tree(&mut self, presentation: TreePresentation, cx: &mut Context<Self>) -> usize {
+        let TreePresentation {
+            tree_rows,
+            rendered,
+            visible_files,
+            graph_widths,
+        } = presentation;
+        let previous_rows = self.tree_selection.reconcile(tree_rows);
+        let previous_rendered = std::mem::replace(&mut self.tree_selection.rendered, rendered);
+        let previous_files = std::mem::replace(&mut self.visible_files, visible_files);
+        let previous_widths =
+            std::mem::replace(&mut self.tree_selection.graph_widths, graph_widths);
+        cx.background_spawn(async move {
+            drop((
+                previous_rows,
+                previous_rendered,
+                previous_files,
+                previous_widths,
+            ));
+        })
+        .detach();
         if self.reveal_selected && !self.loading {
             let id = self.selected_change.as_ref().and_then(|(root, change, commit)| {
                 let candidates = self.tree_selection.rows.iter().filter(|row| {
@@ -1104,27 +897,9 @@ impl KkPanel {
         }
         let width = self
             .tree_selection
-            .rows
-            .iter()
-            .filter(|row| row.id.root() == previous.id.root())
-            .filter_map(|row| {
-                if let TreeRowKind::Revision(_, graph) = &row.kind {
-                    Some(
-                        graph
-                            .incoming
-                            .iter()
-                            .chain(&graph.outgoing)
-                            .copied()
-                            .chain([graph.column])
-                            .max()
-                            .unwrap_or(0)
-                            + 1,
-                    )
-                } else {
-                    None
-                }
-            })
-            .max()
+            .graph_widths
+            .get(previous.id.root())
+            .copied()
             .unwrap_or(1);
         let graph = graph.clone();
         let conflict = revision.has_conflict;
@@ -3771,6 +3546,82 @@ mod tests {
         drop(directory);
     }
 
+    #[gpui::test]
+    async fn kk_tree_refresh_keeps_previous_rows_and_discards_superseded_results(
+        cx: &mut TestAppContext,
+    ) {
+        cx.background_executor.allow_parking();
+        let (directory, repository) = cx
+            .background_spawn(async { futures_lite::future::block_on(category_repository()) })
+            .await
+            .expect("category repository");
+        let root = repository.snapshot.repository().root().to_owned();
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            init(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(&root, serde_json::json!({"a.txt": "first category\n"}))
+            .await;
+        let project = Project::test(fs, [root.as_path()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |view, _| view.workspace().clone());
+        let panel = cx
+            .update(|window, cx| KkPanel::load(workspace.downgrade(), window.to_async(cx)))
+            .await
+            .expect("panel");
+        let previous = panel.update(cx, |panel, cx| {
+            panel.repositories = vec![repository];
+            panel.update_tree(cx);
+            panel
+                .tree_selection
+                .rows
+                .iter()
+                .map(|row| row.id.clone())
+                .collect::<Vec<_>>()
+        });
+        let task = panel.update_in(cx, |panel, window, cx| {
+            panel.request_tree(window, cx);
+            assert_eq!(
+                panel
+                    .tree_selection
+                    .rows
+                    .iter()
+                    .map(|row| row.id.clone())
+                    .collect::<Vec<_>>(),
+                previous
+            );
+            panel.repositories.clear();
+            panel.tree_revision += 1;
+            std::mem::replace(&mut panel.tree_task, Task::ready(()))
+        });
+        task.await;
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(
+                panel
+                    .tree_selection
+                    .rows
+                    .iter()
+                    .map(|row| row.id.clone())
+                    .collect::<Vec<_>>(),
+                previous
+            );
+            assert_eq!(panel.tree_requested, None);
+        });
+        let task = panel.update_in(cx, |panel, window, cx| {
+            panel.request_tree(window, cx);
+            std::mem::replace(&mut panel.tree_task, Task::ready(()))
+        });
+        task.await;
+        panel.read_with(cx, |panel, _| {
+            assert!(panel.tree_selection.rows.is_empty());
+        });
+        drop(directory);
+    }
+
     #[gpui::test(iterations = 3)]
     async fn tree_navigation_groups_categories_and_preserves_selection_without_stealing_focus(
         cx: &mut TestAppContext,
@@ -4135,6 +3986,7 @@ mod tests {
         });
         panel.update(cx, |panel, cx| {
             panel.collapse_tree(cx);
+            panel.update_tree(cx);
             assert_eq!(panel.tree_selection.rows.len(), 2);
             assert!(panel.tree_selection.rows.iter().all(|row| row.depth == 0));
             assert_eq!(
@@ -4620,5 +4472,346 @@ mod tests {
         }
 
         Ok(())
+    }
+}
+
+struct TreeProjection {
+    repositories: Vec<RepositoryView>,
+    repository_paths: HashMap<PathBuf, Vec<(EntityId, PathBuf)>>,
+    tree_selection: TreeSelectionState,
+    list_previews: ListPreviews,
+    mutation_previews: MutationPreviews,
+    file_order: super::super::kk_file_order::FileSort,
+    mode: HistoryMode,
+}
+
+struct TreePresentation {
+    tree_rows: Vec<TreeRow>,
+    rendered: Vec<TreeRenderRow>,
+    visible_files: Vec<FileRow>,
+    graph_widths: HashMap<PathBuf, usize>,
+}
+
+impl TreeProjection {
+    fn build(&self) -> TreePresentation {
+        let mut tree_rows = self.tree_rows();
+        let mut rendered = Vec::new();
+        let mut visible_files = Vec::new();
+        let mut graph_widths = HashMap::new();
+        for (index, row) in tree_rows.iter_mut().enumerate() {
+            row.render_index = rendered.len();
+            rendered.push(TreeRenderRow::Entry(index));
+            if let TreeRowKind::Revision(_, graph) = &row.kind {
+                let width = graph
+                    .incoming
+                    .iter()
+                    .chain(&graph.outgoing)
+                    .copied()
+                    .chain([graph.column])
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                let previous = graph_widths
+                    .entry(row.id.root().to_owned())
+                    .or_insert(1usize);
+                *previous = (*previous).max(width);
+            }
+            if let TreeRowKind::Revision(revision, _) = &row.kind
+                && let Some(repository) = self
+                    .repositories
+                    .iter()
+                    .find(|repository| repository.snapshot.repository().root() == row.id.root())
+            {
+                match repository.expanded.get(&revision.full_commit_id) {
+                    Some(RevisionFiles::Failed(error)) => {
+                        rendered.push(TreeRenderRow::Error {
+                            root: row.id.root().to_owned(),
+                            revision: revision.clone(),
+                            depth: row.depth + 1,
+                            error: error.clone(),
+                        });
+                    }
+                    Some(RevisionFiles::Loading) => {
+                        rendered.push(TreeRenderRow::Message {
+                            depth: row.depth + 1,
+                            text: "Loading…",
+                        });
+                    }
+                    Some(RevisionFiles::Loaded(files)) if files.is_empty() => {
+                        rendered.push(TreeRenderRow::Message {
+                            depth: row.depth + 1,
+                            text: "No file changes",
+                        });
+                    }
+                    _ => {}
+                }
+            }
+
+            if let TreeRowKind::File(file) = &row.kind {
+                visible_files.push(file.clone());
+            }
+        }
+
+        TreePresentation {
+            tree_rows,
+            rendered,
+            visible_files,
+            graph_widths,
+        }
+    }
+
+    fn tree_rows(&self) -> Vec<TreeRow> {
+        let mut rows = Vec::new();
+        let depth = usize::from(self.tree_selection.grouped);
+        for repository in &self.repositories {
+            let root = repository.snapshot.repository().root().to_owned();
+            let repository_id = TreeRowId::Repository(root.clone());
+            let expanded = self.tree_selection.is_expanded(&repository_id);
+            if self.tree_selection.grouped {
+                let label = self
+                    .repository_paths
+                    .get(&root)
+                    .and_then(|paths| {
+                        paths.iter().find_map(|(_, path)| {
+                            root.strip_prefix(path)
+                                .ok()
+                                .filter(|relative| !relative.as_os_str().is_empty())
+                        })
+                    })
+                    .map(|relative| relative.display().to_string())
+                    .unwrap_or_else(|| {
+                        root.file_name()
+                            .unwrap_or(root.as_os_str())
+                            .to_string_lossy()
+                            .into_owned()
+                    });
+                rows.push(TreeRow {
+                    id: repository_id.clone(),
+                    parent: None,
+                    fallback: None,
+                    depth: 0,
+                    expanded: (!repository.stale).then_some(expanded),
+                    kind: if repository.stale {
+                        TreeRowKind::Recovery(label)
+                    } else {
+                        TreeRowKind::Group(label)
+                    },
+                    render_index: 0,
+                });
+                if !expanded || repository.stale {
+                    continue;
+                }
+            }
+
+            let parent = self.tree_selection.grouped.then_some(repository_id);
+            let comparison_id = TreeRowId::Comparison(root.clone());
+            if let Some(comparison) = &repository.comparison {
+                let mut projected = self
+                    .list_previews
+                    .files_with_mutations(repository, &self.mutation_previews);
+                if self.file_order.order() == FileOrder::FileName {
+                    projected.sort_by(|left, right| {
+                        self.file_order.compare(&left.file.path, &right.file.path)
+                    });
+                }
+
+                let expanded = self.tree_selection.is_expanded(&comparison_id);
+                rows.push(TreeRow {
+                    id: comparison_id.clone(),
+                    parent: parent.clone(),
+                    fallback: None,
+                    depth,
+                    expanded: Some(expanded),
+                    kind: TreeRowKind::Group(format!(
+                        "Comparison: {} ({})",
+                        comparison.intent.target_label,
+                        projected
+                            .iter()
+                            .filter(|file| file.category.is_none())
+                            .count()
+                    )),
+                    render_index: 0,
+                });
+                if expanded && !repository.stale {
+                    for file in projected
+                        .iter()
+                        .filter(|file| file.category.is_none())
+                        .cloned()
+                    {
+                        rows.push(TreeRow {
+                            id: TreeRowId::File(file.id.clone()),
+                            parent: Some(comparison_id.clone()),
+                            fallback: None,
+                            depth: depth + 1,
+                            expanded: None,
+                            kind: TreeRowKind::File(file),
+                            render_index: 0,
+                        });
+                    }
+                }
+
+                for category in [
+                    Category::Rejected,
+                    Category::Debug,
+                    Category::Pending,
+                    Category::Reviewed,
+                ] {
+                    let files = projected
+                        .iter()
+                        .filter(|file| file.category == Some(category))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if files.is_empty() {
+                        continue;
+                    }
+
+                    let id = TreeRowId::Category(root.clone(), category.label());
+                    let expanded = self.tree_selection.is_expanded(&id);
+                    rows.push(TreeRow {
+                        id: id.clone(),
+                        parent: parent.clone(),
+                        fallback: Some(comparison_id.clone()),
+                        depth,
+                        expanded: Some(expanded),
+                        kind: TreeRowKind::Group(format!("{} ({})", category.label(), files.len())),
+                        render_index: 0,
+                    });
+                    if expanded && !repository.stale {
+                        for file in files {
+                            rows.push(TreeRow {
+                                id: TreeRowId::File(file.id.clone()),
+                                parent: Some(id.clone()),
+                                fallback: None,
+                                depth: depth + 1,
+                                expanded: None,
+                                kind: TreeRowKind::File(file),
+                                render_index: 0,
+                            });
+                        }
+                    }
+                }
+            }
+
+            let history_id = TreeRowId::History(root.clone());
+            let expanded = self.tree_selection.is_expanded(&history_id);
+            rows.push(TreeRow {
+                id: history_id.clone(),
+                parent,
+                fallback: None,
+                depth,
+                expanded: (!repository.stale).then_some(expanded),
+                kind: if repository.stale {
+                    TreeRowKind::Recovery("Commits".into())
+                } else {
+                    TreeRowKind::Group("Commits".into())
+                },
+                render_index: 0,
+            });
+            if !expanded || repository.stale {
+                continue;
+            }
+
+            let graph = history_graph(&repository.history.revisions, self.mode);
+            let revisions = repository
+                .located
+                .iter()
+                .chain(repository.history.revisions.iter());
+            let prefixes = repository
+                .located
+                .iter()
+                .map(|revision| kk_workbench::GraphRow {
+                    prefix: "◇".to_owned(),
+                    column: 0,
+                    incoming: Vec::new(),
+                    outgoing: Vec::new(),
+                    parents: Vec::new(),
+                    is_fork: revision.has_multiple_children,
+                    is_merge: revision.parent_commit_ids.len() > 1,
+                    omitted_parents: 0,
+                })
+                .chain(graph);
+            let mut change_counts = HashMap::new();
+            for revision in repository
+                .history
+                .revisions
+                .iter()
+                .chain(repository.located.iter())
+            {
+                *change_counts
+                    .entry(&revision.full_change_id)
+                    .or_insert(0usize) += 1;
+            }
+            for (revision, prefix) in revisions.zip(prefixes) {
+                let identity = if change_counts
+                    .get(&revision.full_change_id)
+                    .copied()
+                    .unwrap_or(0)
+                    > 1
+                {
+                    format!("{}:{}", revision.full_change_id, revision.full_commit_id)
+                } else {
+                    revision.full_change_id.clone()
+                };
+                let id = TreeRowId::Revision(root.clone(), identity);
+                let expanded = repository.expanded.get(&revision.full_commit_id);
+                rows.push(TreeRow {
+                    id: id.clone(),
+                    parent: Some(history_id.clone()),
+                    fallback: None,
+                    depth: depth + 1,
+                    expanded: Some(expanded.is_some()),
+                    kind: TreeRowKind::Revision(revision.clone(), prefix),
+                    render_index: 0,
+                });
+                if let Some(RevisionFiles::Loaded(files)) = expanded {
+                    let target = super::super::kk_diff::DiffTarget::change(revision);
+                    let mut projected = Vec::new();
+                    for file in files {
+                        projected.push(FileRow::new(
+                            repository,
+                            super::super::kk_diff::DiffTarget::change(revision),
+                            file.clone(),
+                            "commit",
+                            revision.is_working_copy,
+                        ));
+                    }
+                    self.mutation_previews
+                        .project(repository, Some(&target), &mut projected);
+                    projected
+                        .retain(|row| !self.list_previews.hides(repository, revision, &row.file));
+                    if self.file_order.order() == FileOrder::FileName {
+                        projected.sort_by(|left, right| {
+                            self.file_order.compare(&left.file.path, &right.file.path)
+                        });
+                    }
+
+                    for file in projected {
+                        rows.push(TreeRow {
+                            id: TreeRowId::File(file.id.clone()),
+                            parent: Some(id.clone()),
+                            fallback: None,
+                            depth: depth + 2,
+                            expanded: None,
+                            kind: TreeRowKind::File(file),
+                            render_index: 0,
+                        });
+                    }
+                }
+            }
+
+            if repository.history.has_more {
+                rows.push(TreeRow {
+                    id: TreeRowId::More(root),
+                    parent: Some(history_id),
+                    fallback: None,
+                    depth: depth + 1,
+                    expanded: None,
+                    kind: TreeRowKind::More,
+                    render_index: 0,
+                });
+            }
+        }
+
+        rows
     }
 }
