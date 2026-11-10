@@ -575,6 +575,51 @@ impl KkBlameStatus {
         }
     }
 
+    pub fn toolbar_state(editor: &Entity<Editor>, cx: &App) -> (bool, bool) {
+        editor
+            .read(cx)
+            .addon::<BlameAddon>()
+            .map_or((false, false), |addon| {
+                let state = addon.state.read(cx);
+                (state.enabled, state.loading)
+            })
+    }
+
+    pub fn toolbar_available(
+        editor: &Entity<Editor>,
+        workspace: &Workspace,
+        cx: &App,
+    ) -> Task<bool> {
+        let path = editor.read(cx).active_buffer(cx).and_then(|buffer| {
+            buffer
+                .read(cx)
+                .file()
+                .and_then(|file| file.file_system_abs_path(cx))
+        });
+        let remote = workspace.project().read(cx).kk_workbench_client(cx);
+        let executable = KkWorkbenchSettings::get_global(cx).executable_path.clone();
+        cx.background_spawn(async move {
+            let Some(directory) = path.as_deref().and_then(|path| path.parent()) else {
+                return false;
+            };
+            if let Some(remote) = remote {
+                remote
+                    .open(directory, &executable, Diagnostics::default())
+                    .await
+                    .is_ok()
+            } else {
+                Repository::open_with_diagnostics(
+                    directory,
+                    &executable,
+                    Diagnostics::default(),
+                    None,
+                )
+                .await
+                .is_ok()
+            }
+        })
+    }
+
     fn editor(&self, cx: &App) -> Option<Entity<Editor>> {
         self.active_split
             .as_ref()
@@ -668,6 +713,15 @@ impl KkBlameStatus {
             }
         }
 
+        self.toggle_editor(editor, window, cx);
+    }
+
+    pub fn toggle_editor(
+        &mut self,
+        editor: Entity<Editor>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let existing = editor
             .read(cx)
             .addon::<BlameAddon>()
@@ -1657,6 +1711,28 @@ mod tests {
                 std::mem::replace(&mut state.task, Task::ready(()))
             })
             .await;
+        assert!(!opened_state.read_with(cx, |state, _| state.enabled));
+        status.update_in(cx, |status, window, cx| {
+            status.toggle_editor(editor.clone(), window, cx);
+        });
+        assert_eq!(
+            cx.update(|_, cx| KkBlameStatus::toolbar_state(&editor, cx)),
+            (false, false)
+        );
+        assert!(!opened_state.read_with(cx, |state, _| state.enabled));
+        state.update(cx, |state, cx| {
+            state.enabled = true;
+            state.load(cx);
+        });
+        state
+            .update(cx, |state, _| {
+                std::mem::replace(&mut state.task, Task::ready(()))
+            })
+            .await;
+        assert_eq!(
+            cx.update(|_, cx| KkBlameStatus::toolbar_state(&editor, cx)),
+            (true, false)
+        );
         assert!(!opened_state.read_with(cx, |state, _| state.enabled));
         assert_eq!(
             opened.read_with(cx, |editor, cx| editor.text(cx)),
