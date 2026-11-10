@@ -12,7 +12,7 @@ use editor::code_context_menus::{CodeContextMenu, ContextMenuOrigin};
 use editor::{Editor, EditorSettings};
 use gpui::{
     Action, Anchor, AnchoredPositionMode, ClickEvent, Context, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement, ParentElement, Render, Styled, Subscription,
+    FocusHandle, Focusable, InteractiveElement, ParentElement, Render, Styled, Subscription, Task,
     WeakEntity, Window, anchored, deferred, point,
 };
 use project::{
@@ -25,6 +25,7 @@ use ui::{
     ButtonStyle, ContextMenu, ContextMenuEntry, DocumentationSide, IconButton, IconName, IconSize,
     PopoverMenu, PopoverMenuHandle, Tooltip, prelude::*,
 };
+use util::ResultExt as _;
 use vim_mode_setting::{HelixModeSetting, VimModeSetting};
 use workspace::item::ItemBufferKind;
 use workspace::{
@@ -43,6 +44,8 @@ pub struct QuickActionBar {
     toggle_selections_handle: PopoverMenuHandle<ContextMenu>,
     toggle_settings_handle: PopoverMenuHandle<ContextMenu>,
     workspace: WeakEntity<Workspace>,
+    kk_blame_available: bool,
+    kk_blame_probe: Task<()>,
 }
 
 impl QuickActionBar {
@@ -74,6 +77,8 @@ impl QuickActionBar {
             toggle_selections_handle: Default::default(),
             toggle_settings_handle: Default::default(),
             workspace: workspace.weak_handle(),
+            kk_blame_available: false,
+            kk_blame_probe: Task::ready(()),
         };
         this.apply_settings(cx);
         cx.observe_global::<SettingsStore>(|this, cx| this.apply_settings(cx))
@@ -158,6 +163,35 @@ impl Render for QuickActionBar {
                     }
                 },
             )
+        });
+
+        let kk_blame_button = self.kk_blame_available.then(|| {
+            let (enabled, loading) = git_ui::KkBlameStatus::toolbar_state(&editor, cx);
+            let workspace = self.workspace.clone();
+            let editor = editor.clone();
+            IconButton::new("toggle-kk-blame", IconName::GitCommit)
+                .toggle_state(enabled)
+                .disabled(loading)
+                .tooltip(Tooltip::text(if loading {
+                    "Loading KK Blame…"
+                } else if enabled {
+                    "Hide KK Blame"
+                } else {
+                    "Show KK Blame"
+                }))
+                .on_click(move |_, window, cx| {
+                    if let Some(workspace) = workspace.upgrade()
+                        && let Some(status) = workspace
+                            .read(cx)
+                            .status_bar()
+                            .read(cx)
+                            .item_of_type::<git_ui::KkBlameStatus>()
+                    {
+                        status.update(cx, |status, cx| {
+                            status.toggle_editor(editor.clone(), window, cx);
+                        });
+                    }
+                })
         });
 
         let assistant_button = QuickActionBarButton::new(
@@ -709,6 +743,7 @@ impl Render for QuickActionBar {
             .children(self.render_repl_menu(cx))
             .children(self.render_preview_button(cx))
             .children(search_button)
+            .children(kk_blame_button)
             .when(
                 AgentSettings::get_global(cx).enabled(cx) && AgentSettings::get_global(cx).button,
                 |bar| bar.child(assistant_button),
@@ -778,6 +813,23 @@ impl ToolbarItemView for QuickActionBar {
         cx: &mut Context<Self>,
     ) -> ToolbarItemLocation {
         self.active_item = active_pane_item.map(ItemHandle::boxed_clone);
+        self.kk_blame_available = false;
+        self.kk_blame_probe = Task::ready(());
+        if let Some(editor) = self.active_editor()
+            && editor.buffer_kind(cx) == ItemBufferKind::Singleton
+            && let Some(workspace) = self.workspace.upgrade()
+        {
+            let available =
+                git_ui::KkBlameStatus::toolbar_available(&editor, workspace.read(cx), cx);
+            self.kk_blame_probe = cx.spawn(async move |this, cx| {
+                let available = available.await;
+                this.update(cx, |this, cx| {
+                    this.kk_blame_available = available;
+                    cx.notify();
+                })
+                .log_err();
+            });
+        }
         if let Some(active_item) = active_pane_item {
             self._inlay_hints_enabled_subscription.take();
 
@@ -793,6 +845,7 @@ impl ToolbarItemView for QuickActionBar {
                         editor.supports_semantic_tokens(cx),
                     )
                 });
+                let mut blame_state = git_ui::KkBlameStatus::toolbar_state(&editor, cx);
                 self._inlay_hints_enabled_subscription =
                     Some(cx.observe(&editor, move |_, editor, cx| {
                         let (
@@ -806,9 +859,12 @@ impl ToolbarItemView for QuickActionBar {
                                 editor.supports_semantic_tokens(cx),
                             )
                         });
-                        let should_notify = inlay_hints_enabled != new_inlay_hints_enabled
+                        let new_blame_state = git_ui::KkBlameStatus::toolbar_state(&editor, cx);
+                        let should_notify = blame_state != new_blame_state
+                            || inlay_hints_enabled != new_inlay_hints_enabled
                             || supports_inlay_hints != new_supports_inlay_hints
                             || supports_semantic_tokens != new_supports_semantic_tokens;
+                        blame_state = new_blame_state;
                         inlay_hints_enabled = new_inlay_hints_enabled;
                         supports_inlay_hints = new_supports_inlay_hints;
                         supports_semantic_tokens = new_supports_semantic_tokens;
