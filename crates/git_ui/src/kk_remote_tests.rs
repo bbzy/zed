@@ -160,6 +160,42 @@ async fn run_remote_panel(cx: &mut TestAppContext, server_cx: &mut TestAppContex
     });
     assert!(snapshot.repository().is_remote());
     assert_eq!(snapshot.repository().root(), fixture.root);
+    panel.update(cx, |panel, cx| {
+        panel.operation_error = Some((
+            fixture.root.clone(),
+            "Operation failed\nFull failure details".into(),
+        ));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    panel
+        .update(cx, |panel, cx| panel.refresh_for_test(cx))
+        .await;
+    assert!(panel.read_with(cx, |panel, cx| {
+        panel
+            .output
+            .read(cx)
+            .diagnostics()
+            .read_since(0)
+            .1
+            .contains("Full failure details")
+    }));
+    panel.update(cx, |panel, cx| {
+        panel.operation_error = None;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let layer = cx.update(|_, cx| {
+        let toast = KkStatus::error_toast(panel.downgrade(), "Test failure".into(), cx);
+        assert!(!workspace::ToastView::auto_dismiss(toast.read(cx)));
+        let layer = cx.new(|_| workspace::ToastLayer::new());
+        layer.update(cx, |layer, cx| layer.show_toast(toast.clone(), cx));
+        assert!(layer.read(cx).has_active_toast());
+        toast.update(cx, |_, cx| cx.emit(DismissEvent));
+        layer
+    });
+    cx.run_until_parked();
+    assert!(!layer.read_with(cx, |layer, _| layer.has_active_toast()));
     let parent = snapshot.exact_revision("@-").await?;
     let comparison = Comparison::load(&snapshot, Comparison::new(&parent).intent).await?;
     let file = comparison.files.first().context("changed file")?.clone();

@@ -23,12 +23,13 @@ use kk_workbench::{
     HistoryMode, HistoryPage, OperationReceipt, Publication, PublicationStatus, Revision, Snapshot,
     UncertainPublication, discover_with_diagnostics, history_graph,
 };
+use notifications::status_toast::StatusToast;
 use settings::{Settings, SettingsStore};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
-use ui::{Button, ContextMenu, IconButton, ListItem, PopoverMenu, Tooltip, prelude::*};
+use ui::{ContextMenu, IconButton, ListItem, PopoverMenu, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{
     Workspace,
@@ -105,6 +106,127 @@ pub(super) enum FileOpenKind {
     Current,
     Revision,
     Before,
+}
+
+struct KkStatus {
+    panel: WeakEntity<KkPanel>,
+    _subscription: Subscription,
+}
+
+impl KkStatus {
+    fn new(panel: &Entity<KkPanel>, cx: &mut Context<Self>) -> Self {
+        let mut previous_errors = (None, None);
+        let subscription = cx.observe(panel, move |_, panel, cx| {
+            let state = panel.read(cx);
+            let errors = (state.error.clone(), state.operation_error.clone());
+            let mut messages = Vec::new();
+            if errors.0 != previous_errors.0
+                && let Some(error) = &errors.0
+            {
+                messages.push(error.clone());
+            }
+
+            if errors.1 != previous_errors.1
+                && let Some((_, error)) = &errors.1
+            {
+                state.output.read(cx).diagnostics().error(error);
+                messages.push(error.clone());
+            }
+
+            previous_errors = errors;
+            if !messages.is_empty() {
+                let workspace = state.workspace.clone();
+                let panel = panel.downgrade();
+                let message = messages.join("\n");
+                // Workspace may be updating the panel when this observer runs.
+                cx.defer(move |cx| {
+                    if let Some(workspace) = workspace.upgrade() {
+                        let toast = Self::error_toast(panel, message, cx);
+                        workspace.update(cx, |workspace, cx| {
+                            workspace.toggle_status_toast(toast, cx);
+                        });
+                    }
+                });
+            }
+            cx.notify();
+        });
+        Self {
+            panel: panel.downgrade(),
+            _subscription: subscription,
+        }
+    }
+
+    fn error_toast(
+        panel: WeakEntity<KkPanel>,
+        message: String,
+        cx: &mut App,
+    ) -> Entity<StatusToast> {
+        let summary: String = message
+            .lines()
+            .next()
+            .unwrap_or("KK operation failed")
+            .chars()
+            .take(100)
+            .collect();
+        StatusToast::new(format!("KK: {summary}"), cx, |toast, _| {
+            toast
+                .icon(
+                    Icon::new(IconName::XCircle)
+                        .size(IconSize::Small)
+                        .color(Color::Error),
+                )
+                .dismiss_button(true)
+                .auto_dismiss(false)
+                .action("View Output", move |window, cx| {
+                    if let Some(panel) = panel.upgrade() {
+                        panel.update(cx, |panel, cx| panel.show_output(window, cx));
+                    }
+                })
+        })
+    }
+}
+
+impl Render for KkStatus {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let progress = self.panel.upgrade().and_then(|panel| {
+            let panel = panel.read(cx);
+            if panel.pending_writes > 0 {
+                Some(panel.pending_status.to_owned())
+            } else if let Some((_, label, _)) = &panel.opening_feedback {
+                Some(label.clone())
+            } else if panel.loading {
+                Some("Loading…".to_owned())
+            } else {
+                None
+            }
+        });
+        div().when_some(progress, |view, message| {
+            view.child(
+                h_flex()
+                    .id("kk-progress-status")
+                    .gap_1()
+                    .max_w(rems(24.))
+                    .overflow_hidden()
+                    .child(ui::SpinnerLabel::new())
+                    .child(Label::new(format!("KK: {message}")).truncate())
+                    .tooltip(Tooltip::text(message)),
+            )
+        })
+    }
+}
+
+impl workspace::StatusItemView for KkStatus {
+    fn hide_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
+        None
+    }
+
+    fn set_active_pane_item(
+        &mut self,
+        _: Option<&dyn workspace::item::ItemHandle>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+    }
 }
 
 pub struct KkPanel {
@@ -373,6 +495,10 @@ impl KkPanel {
                     };
                     panel.subscribe(project, window, cx);
                     panel
+                });
+                let status = cx.new(|cx| KkStatus::new(&panel, cx));
+                workspace_view.status_bar().update(cx, |bar, cx| {
+                    bar.add_right_item(status, window, cx);
                 });
                 cx.observe(&panel, |_, _, cx| cx.notify()).detach();
                 Ok(panel)
@@ -3175,29 +3301,6 @@ impl Render for KkPanel {
                             .anchor(gpui::Anchor::TopRight)
                     }),
             )
-            .when(self.loading && self.repositories.is_empty(), |view| {
-                view.child(Label::new("Loading…"))
-            })
-            .when_some(self.opening_feedback.as_ref(), |view, (_, label, _)| {
-                view.child(
-                    h_flex()
-                        .gap_1()
-                        .child(ui::SpinnerLabel::new())
-                        .child(Label::new(label.clone()).truncate()),
-                )
-            })
-            .when(self.pending_writes > 0, |view| {
-                view.child(Label::new(self.pending_status))
-            })
-            .when_some(self.operation_error.clone(), |view, (_, error)| {
-                view.child(Label::new(error).color(Color::Error))
-            })
-            .when_some(self.error.clone(), |view, error| {
-                view.child(Label::new(error).color(Color::Error)).child(
-                    Button::new("show-output", "Show Output")
-                        .on_click(cx.listener(|this, _, window, cx| this.show_output(window, cx))),
-                )
-            })
             .child(
                 uniform_list(
                     "kk-history",
