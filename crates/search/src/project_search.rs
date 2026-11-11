@@ -175,6 +175,8 @@ pub fn init(cx: &mut App) {
                     search_view.update(cx, |search_view, cx| {
                         search_view.toggle_all_search_results(action, window, cx);
                     });
+                } else {
+                    cx.propagate();
                 }
             },
         );
@@ -3478,6 +3480,8 @@ fn register_workspace_action<A: Action>(
                             cx.propagate();
                         }
                     });
+                } else {
+                    cx.propagate();
                 }
             });
         })

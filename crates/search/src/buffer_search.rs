@@ -650,108 +650,129 @@ impl BufferSearchBar {
         self.query_editor_focused
     }
 
+    fn has_active_matches(&self) -> bool {
+        self.active_match_index.is_some_and(|index| {
+            self.active_searchable_item
+                .as_ref()
+                .and_then(|item| self.searchable_items_with_matches.get(&item.downgrade()))
+                .is_some_and(|(matches, _)| index < matches.len())
+        })
+    }
+
     pub fn register(registrar: &mut impl SearchActionsRegistrar) {
         registrar.register_handler(ForDeployed(|this, _: &FocusSearch, window, cx| {
             this.query_editor.focus_handle(cx).focus(window, cx);
             this.select_query(window, cx);
+            true
         }));
         registrar.register_handler(ForDeployed(
             |this, action: &ToggleCaseSensitive, window, cx| {
-                if this.supported_options(cx).case {
-                    this.toggle_case_sensitive(action, window, cx);
+                if !this.supported_options(cx).case {
+                    return false;
                 }
+                this.toggle_case_sensitive(action, window, cx);
+                true
             },
         ));
         registrar.register_handler(ForDeployed(|this, action: &ToggleWholeWord, window, cx| {
-            if this.supported_options(cx).word {
-                this.toggle_whole_word(action, window, cx);
+            if !this.supported_options(cx).word {
+                return false;
             }
+            this.toggle_whole_word(action, window, cx);
+            true
         }));
         registrar.register_handler(ForDeployed(|this, action: &ToggleRegex, window, cx| {
-            if this.supported_options(cx).regex {
-                this.toggle_regex(action, window, cx);
+            if !this.supported_options(cx).regex {
+                return false;
             }
+            this.toggle_regex(action, window, cx);
+            true
         }));
         registrar.register_handler(ForDeployed(|this, action: &ToggleSelection, window, cx| {
-            if this.supported_options(cx).selection {
-                this.toggle_selection(action, window, cx);
-            } else {
-                cx.propagate();
+            if !this.supported_options(cx).selection {
+                return false;
             }
+            this.toggle_selection(action, window, cx);
+            true
         }));
         registrar.register_handler(ForDeployed(|this, action: &ToggleReplace, window, cx| {
-            if this.supported_options(cx).replacement {
-                this.toggle_replace(action, window, cx);
-            } else {
-                cx.propagate();
+            if !this.supported_options(cx).replacement {
+                return false;
             }
+            this.toggle_replace(action, window, cx);
+            true
         }));
         registrar.register_handler(WithResultsOrExternalQuery(
             |this, action: &SelectNextMatch, window, cx| {
                 if this.supported_options(cx).find_in_results {
-                    cx.propagate();
-                } else {
-                    this.select_next_match(action, window, cx);
+                    return false;
                 }
+                this.select_next_match(action, window, cx);
+                true
             },
         ));
         registrar.register_handler(WithResultsOrExternalQuery(
             |this, action: &SelectPreviousMatch, window, cx| {
                 if this.supported_options(cx).find_in_results {
-                    cx.propagate();
-                } else {
-                    this.select_prev_match(action, window, cx);
+                    return false;
                 }
+                this.select_prev_match(action, window, cx);
+                true
             },
         ));
-        registrar.register_handler(WithResultsOrExternalQuery(
+        registrar.register_handler(ForDeployed(
             |this, action: &SelectAllMatches, window, cx| {
-                if this.supported_options(cx).find_in_results {
-                    cx.propagate();
-                } else {
-                    this.select_all_matches(action, window, cx);
+                let options = this.supported_options(cx);
+                if !options.select_all
+                    || options.find_in_results
+                    || this.active_match_index.is_none()
+                {
+                    return false;
                 }
+                this.select_all_matches(action, window, cx);
+                true
             },
         ));
         registrar.register_handler(ForDeployed(
             |this, _: &editor::actions::Cancel, window, cx| {
                 this.dismiss(&Dismiss, window, cx);
+                true
             },
         ));
         registrar.register_handler(ForDeployed(|this, _: &Dismiss, window, cx| {
             this.dismiss(&Dismiss, window, cx);
+            true
         }));
-
-        // register deploy buffer search for both search bar states, since we want to focus into the search bar
-        // when the deploy action is triggered in the buffer.
         registrar.register_handler(ForDeployed(|this, deploy, window, cx| {
-            this.deploy(deploy, None, window, cx);
+            this.deploy(deploy, None, window, cx)
         }));
         registrar.register_handler(ForDismissed(|this, deploy, window, cx| {
-            this.deploy(deploy, None, window, cx);
+            this.deploy(deploy, None, window, cx)
         }));
         registrar.register_handler(ForDeployed(|this, _: &DeployReplace, window, cx| {
-            if this.supported_options(cx).find_in_results {
-                cx.propagate();
-            } else {
-                this.deploy(&Deploy::replace(), None, window, cx);
+            if !this.supported_options(cx).replacement || this.supported_options(cx).find_in_results
+            {
+                return false;
             }
+            this.deploy(&Deploy::replace(), None, window, cx)
         }));
         registrar.register_handler(ForDismissed(|this, _: &DeployReplace, window, cx| {
-            if this.supported_options(cx).find_in_results {
-                cx.propagate();
-            } else {
-                this.deploy(&Deploy::replace(), None, window, cx);
+            if !this.supported_options(cx).replacement || this.supported_options(cx).find_in_results
+            {
+                return false;
             }
+            this.deploy(&Deploy::replace(), None, window, cx)
         }));
         registrar.register_handler(ForDeployed(
             |this, action: &UseSelectionForFind, window, cx| {
                 this.use_selection_for_find(action, window, cx);
+                true
             },
         ));
         registrar.register_handler(ForDismissed(
             |this, action: &UseSelectionForFind, window, cx| {
                 this.use_selection_for_find(action, window, cx);
+                true
             },
         ));
     }

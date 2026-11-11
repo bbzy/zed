@@ -2787,6 +2787,93 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn unsupported_search_actions_preserve_terminal_input(cx: &mut TestAppContext) {
+        cx.update(search::init);
+        let (project, workspace, window_handle) = init_test_with_window(cx).await;
+        cx.update(|cx| {
+            load_default_keymap(cx);
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.terminal.get_or_insert_default().option_as_meta = Some(true);
+                });
+            });
+            cx.bind_keys([
+                gpui::KeyBinding::new("alt-c", search::ToggleCaseSensitive, Some("Terminal")),
+                gpui::KeyBinding::new("alt-w", search::ToggleWholeWord, Some("Terminal")),
+                gpui::KeyBinding::new("alt-s", search::ToggleSelection, Some("Terminal")),
+                gpui::KeyBinding::new("alt-u", search::ToggleReplace, Some("Terminal")),
+            ]);
+        });
+        let search_bar = window_handle
+            .update(cx, |_, window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    let search_bar = cx.new(|cx| search::BufferSearchBar::new(None, window, cx));
+                    workspace
+                        .active_pane()
+                        .read(cx)
+                        .toolbar()
+                        .clone()
+                        .update(cx, |toolbar, cx| {
+                            toolbar.add_item(search_bar.clone(), window, cx);
+                        });
+                    search_bar
+                })
+            })
+            .expect("install search toolbar");
+        let (_, terminal, terminal_view) =
+            add_display_only_terminal(&project, window_handle, true, false, cx);
+        let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
+        cx.update(|window, cx| {
+            terminal.update(cx, |terminal, cx| {
+                terminal.write_output(b"needle\r\nneedle\r\n", cx);
+                terminal.sync(window, cx);
+            });
+        });
+        for visible in [false, true] {
+            search_bar
+                .update_in(&mut cx, |bar, window, cx| {
+                    bar.show(window, cx);
+                    bar.search("needle", None, true, window, cx)
+                })
+                .await
+                .expect("search terminal output");
+            assert!(
+                terminal.read_with(&cx, |terminal, _| !terminal.matches.is_empty()),
+                "the regression must exercise existing search results",
+            );
+            if !visible {
+                search_bar.update_in(&mut cx, |bar, window, cx| {
+                    bar.dismiss(&search::buffer_search::Dismiss, window, cx);
+                });
+            }
+            terminal_view.update_in(&mut cx, |view, window, cx| {
+                view.focus_handle(cx).focus(window, cx);
+            });
+            cx.run_until_parked();
+            terminal.update(&mut cx, |terminal, _| terminal.take_input_log());
+            cx.simulate_keystrokes("alt-enter");
+            assert_eq!(
+                terminal.update(&mut cx, |terminal, _| terminal.take_input_log()),
+                vec![b"\x1b\r".to_vec()],
+                "unsupported SelectAllMatches must reach the terminal even with search results, visible={visible}",
+            );
+            for (key, byte) in [
+                ("alt-c", b'c'),
+                ("alt-w", b'w'),
+                ("alt-s", b's'),
+                ("alt-u", b'u'),
+            ] {
+                cx.simulate_keystrokes(key);
+                assert_eq!(
+                    terminal.update(&mut cx, |terminal, _| terminal.take_input_log()),
+                    vec![vec![0x1b, byte]],
+                    "unsupported search action must propagate: {key}, visible={visible}",
+                );
+            }
+        }
+    }
+
+    #[gpui::test]
     async fn altgr_character_input_is_not_swallowed_as_meta_sequence(cx: &mut TestAppContext) {
         let (project, _workspace, window_handle) = init_test_with_window(cx).await;
         cx.update(|cx| {
