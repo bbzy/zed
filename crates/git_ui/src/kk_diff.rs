@@ -1217,7 +1217,6 @@ impl KkDiff {
         });
         controls.update(cx, |controls, cx| {
             controls.status = Some(file_status(&file));
-            controls.generic_style_controls = !identity.working_copy;
             controls.set_buffers(
                 vec![(
                     buffer.clone(),
@@ -2710,7 +2709,6 @@ mod tests {
                     }
                 });
                 view.controls.update(cx, |controls, cx| {
-                    assert!(controls.generic_style_controls);
                     controls.set_full_file(true, cx);
                 });
                 view.editor.update(cx, |editor, cx| {
@@ -3133,6 +3131,7 @@ mod tests {
             json!({"a.txt":modified,"binary.rs":"binary\0content"}),
         )
         .await;
+        cx.update(|cx| <dyn Fs>::set_global(fs.clone(), cx));
         let project = Project::test(fs, [root.as_path()], cx).await;
         project
             .read_with(cx, |project, _| project.languages().clone())
@@ -3172,6 +3171,28 @@ mod tests {
             cx.debug_bounds("multibuffer-collapse-expand-empty")
                 .is_none()
         );
+        assert!(cx.debug_bounds("solo-diff-style-controls").is_some());
+        for (style, selector) in [
+            (DiffViewStyle::Unified, "ICON-DiffUnified"),
+            (DiffViewStyle::Split, "ICON-DiffSplit"),
+        ] {
+            let button = cx.debug_bounds(selector).expect("native diff mode button");
+            cx.simulate_click(button.center(), gpui::Modifiers::none());
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+            view.read_with(cx, |view, cx| {
+                assert_eq!(view.editor.read(cx).diff_view_style(), style);
+                assert_eq!(view.buffer.read(cx).text(), modified);
+                assert_eq!(view.buffer.read(cx).capability(), Capability::ReadOnly);
+                assert_eq!(view.diff.read(cx).changed_row_counts(), (1, 1));
+                assert!(view.controls.read(cx).showing_full_file);
+                assert!(!view.can_save(cx));
+                assert!(!view.is_dirty(cx));
+            });
+        }
         assert!(cx.debug_bounds("ICON-Eye").is_some());
         let toggle = cx
             .debug_bounds("ICON-Eye")
