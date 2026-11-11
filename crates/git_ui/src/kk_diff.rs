@@ -1850,6 +1850,10 @@ impl KkDiff {
             )?;
             anchors.extend(selection.anchors.unwrap_or_default());
         }
+        ensure!(
+            !anchors.is_empty(),
+            "The selection does not contain any changed lines"
+        );
 
         self.classification_sequence += 1;
         let id = self.classification_sequence;
@@ -5004,6 +5008,177 @@ mod tests {
             b"\0\xffbinary"
         );
         drop(directory);
+    }
+
+    #[gpui::test]
+    async fn kk_split_deleted_lines_unified_selection(cx: &mut TestAppContext) {
+        cx.background_executor.allow_parking();
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.editor.diff_view_style = Some(DiffViewStyle::Unified);
+                });
+            });
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let original = "keep\nremove one\nremove two\nend\n";
+        let modified = "keep\nend\n";
+        let mut failures = Vec::new();
+        for (name, start, end) in [
+            ("inside deleted lines", Point::new(1, 2), Point::new(2, 5)),
+            ("whole deleted lines", Point::new(1, 0), Point::new(3, 0)),
+            ("reversed deleted lines", Point::new(2, 5), Point::new(1, 2)),
+            ("preceding newline", Point::new(0, 4), Point::new(3, 0)),
+            ("unchanged text only", Point::new(0, 0), Point::new(0, 4)),
+            (
+                "separated deleted hunks",
+                Point::new(1, 0),
+                Point::new(4, 0),
+            ),
+        ] {
+            let (original, modified) = if name == "separated deleted hunks" {
+                (
+                    "keep\nremove one\nmiddle\nremove two\nend\n",
+                    "keep\nmiddle\nend\n",
+                )
+            } else {
+                (original, modified)
+            };
+            let fs = FakeFs::new(cx.executor());
+            fs.insert_tree("/project", json!({"file.txt": modified}))
+                .await;
+            let project = Project::test(fs, [Path::new("/project")], cx).await;
+            let buffer = project
+                .update(cx, |project, cx| {
+                    project.open_local_buffer("/project/file.txt", cx)
+                })
+                .await
+                .expect("open deletion fixture");
+            let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+                MultiWorkspace::test_new(project.clone(), window, cx)
+            });
+            let workspace = multi_workspace.read_with(cx, |view, _| view.workspace().clone());
+            let base = Some(Arc::<str>::from(original));
+            let diff =
+                cx.new(|cx| BufferDiff::new(&buffer.read(cx).snapshot().text, None, None, cx));
+            diff.update(cx, |diff, cx| {
+                diff.set_base_text(base.clone(), buffer.read(cx).snapshot().text, cx)
+            })
+            .await;
+            let view = cx.new_window_entity(|window, cx| {
+                KkDiff::new(
+                    DiffIdentity {
+                        root: "/project".into(),
+                        scope: "change".into(),
+                        path: "file.txt".into(),
+                        working_copy: true,
+                        presentation: DiffPresentation::Text,
+                    },
+                    DiffTarget {
+                        scope: DiffScope::Change("change".into()),
+                        identity: "change".into(),
+                        label: "change".into(),
+                        reference: "kkkkkkkk".into(),
+                        comparison: None,
+                        revision: None,
+                        category: None,
+                    },
+                    ChangedFile {
+                        path: "file.txt".into(),
+                        change_type: ChangeKind::Modified,
+                        renamed_from: None,
+                        has_conflict: false,
+                    },
+                    buffer,
+                    diff,
+                    base,
+                    project,
+                    workspace.clone(),
+                    window,
+                    cx,
+                )
+            });
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
+            });
+            view.update(cx, |view, cx| {
+                view.controls
+                    .update(cx, |controls, cx| controls.set_full_file(true, cx));
+            });
+            cx.run_until_parked();
+            let editor = view.read_with(cx, |view, cx| view.editor.read(cx).rhs_editor().clone());
+            editor.update_in(cx, |editor, window, cx| {
+                let snapshot = editor.snapshot(window, cx);
+                assert_eq!(
+                    snapshot
+                        .buffer_snapshot()
+                        .diff_hunks()
+                        .next()
+                        .expect("deleted hunk")
+                        .row_range
+                        .start
+                        .0,
+                    1,
+                    "{name}: deleted hunk position"
+                );
+            });
+            editor.update_in(cx, |editor, window, cx| {
+                window.focus(&editor.focus_handle(cx), cx);
+                editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+                    selections.select_ranges([start..end]);
+                });
+            });
+            let result = view.update(cx, |view, cx| {
+                let ranges = view.classification_ranges(cx)?;
+                eprintln!("{name}: classification ranges {ranges:?}");
+                view.preview_classification(&ranges, TransferDirection::Backward, cx)
+            });
+            match result {
+                Ok((_, ranges)) => {
+                    assert_ne!(
+                        name, "unchanged text only",
+                        "unchanged text must not classify a hunk"
+                    );
+                    eprintln!("{name}: native ranges {ranges:?}");
+                    let expected = if name == "separated deleted hunks" {
+                        vec![
+                            LineRange {
+                                side: SelectionSide::Original,
+                                begin: 2,
+                                end: 2,
+                            },
+                            LineRange {
+                                side: SelectionSide::Original,
+                                begin: 4,
+                                end: 4,
+                            },
+                        ]
+                    } else {
+                        vec![LineRange {
+                            side: SelectionSide::Original,
+                            begin: 2,
+                            end: 3,
+                        }]
+                    };
+                    assert_eq!(ranges, expected, "{name}");
+                }
+                Err(error) => {
+                    if name == "unchanged text only" {
+                        assert_eq!(
+                            error.to_string(),
+                            "The selection does not contain any changed lines"
+                        );
+                        assert!(!view.read_with(cx, |view, _| view.has_pending_classification()));
+                        continue;
+                    }
+                    eprintln!("{name}: {error:#}");
+                    failures.push(format!("{name}: {error:#}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[gpui::test]

@@ -725,6 +725,133 @@ fn classification_batches_are_private_and_preserve_history() -> Result<()> {
 }
 
 #[test]
+fn kk_split_deleted_lines_native_and_classification() -> Result<()> {
+    smol::block_on(async {
+        for (native, include_context) in
+            [(true, false), (false, false), (true, true), (false, true)]
+        {
+            let fixture = Fixture::create()?;
+            fs::write(
+                fixture.root().join("file.txt"),
+                "keep\nremove one\nremove two\nend\n",
+            )?;
+            fixture.run(&["new", "-m", "deletion source"])?;
+            fs::write(fixture.root().join("file.txt"), "keep\nend\n")?;
+            let repository = fixture.repository().await?;
+            let before = repository.snapshot(true).await?;
+            let mut ranges = vec![LineRange {
+                side: SelectionSide::Original,
+                begin: 2,
+                end: 3,
+            }];
+            if include_context {
+                ranges.insert(
+                    0,
+                    LineRange {
+                        side: SelectionSide::Modified,
+                        begin: 1,
+                        end: 1,
+                    },
+                );
+            }
+            if native {
+                if include_context {
+                    let input = tempfile::NamedTempFile::new()?;
+                    fs::write(
+                        input.path(),
+                        serde_json::to_vec(&serde_json::json!({
+                            "from": "@", "into": "@-", "files": [{"path": "file.txt", "ranges": [
+                                {"side": "modified", "begin": 1, "end": 1},
+                                {"side": "original", "begin": 2, "end": 3}
+                            ]}]
+                        }))?,
+                    )?;
+                    let error = fixture
+                        .run(&[
+                            "squash-range",
+                            "--json-file",
+                            input.path().to_str().context("input path")?,
+                        ])
+                        .expect_err("native ranges must each contain a changed line");
+                    eprintln!("native rejects unchanged context range: {error:#}");
+                    assert!(error.to_string().contains("does not contain changed lines"));
+                    assert_eq!(
+                        repository.snapshot(false).await?.operation(),
+                        before.operation()
+                    );
+                }
+                fixture.run(&[
+                    "squash-range",
+                    "--from",
+                    "@",
+                    "--into",
+                    "@-",
+                    "file.txt",
+                    "--side",
+                    "original",
+                    "--begin",
+                    "2",
+                    "--end",
+                    "3",
+                ])?;
+                let after = repository.snapshot(false).await?;
+                assert_eq!(after.file_content("@-", "file.txt").await?, b"keep\nend\n");
+                assert_eq!(after.file_content("@", "file.txt").await?, b"keep\nend\n");
+            } else {
+                let mut request = ClassificationRequest {
+                    comparison: "@-".into(),
+                    range_start: None,
+                    source: None,
+                    target: ClassificationTarget::Category(Category::Reviewed),
+                    files: vec![
+                        selection(
+                            &before,
+                            DiffScope::Comparison {
+                                base: "@-".into(),
+                                target: "@".into(),
+                            },
+                            "file.txt",
+                            Some(ranges),
+                        )
+                        .await?,
+                    ],
+                };
+                if include_context {
+                    match before.prepare_classification(&request).await {
+                        Ok(_) => anyhow::bail!("unchanged context range unexpectedly accepted"),
+                        Err(error) => {
+                            eprintln!("classification rejects unchanged context range: {error:#}");
+                        }
+                    }
+                    assert_eq!(
+                        repository.snapshot(false).await?.operation(),
+                        before.operation()
+                    );
+                    request.files[0].ranges = Some(vec![LineRange {
+                        side: SelectionSide::Original,
+                        begin: 2,
+                        end: 3,
+                    }]);
+                }
+                let prepared = before.prepare_classification(&request).await?;
+                assert_eq!(
+                    prepared
+                        .snapshot()
+                        .file_content(&prepared.destination().revset(), "file.txt")
+                        .await?,
+                    b"keep\nend\n"
+                );
+                let result = prepared.publish().await?;
+                assert_single_publication(&result.publication).await?;
+            }
+            assert_eq!(fs::read(fixture.root().join("file.txt"))?, b"keep\nend\n");
+            eprintln!("pure deletion: native={native}, include_context={include_context} passed");
+        }
+        Ok(())
+    })
+}
+
+#[test]
 fn line_classification_projects_each_source_on_both_sides() -> Result<()> {
     smol::block_on(async {
         for side in [SelectionSide::Original, SelectionSide::Modified] {
