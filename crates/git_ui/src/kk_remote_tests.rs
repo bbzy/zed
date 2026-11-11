@@ -160,6 +160,48 @@ async fn run_remote_panel(cx: &mut TestAppContext, server_cx: &mut TestAppContex
     });
     assert!(snapshot.repository().is_remote());
     assert_eq!(snapshot.repository().root(), fixture.root);
+    let error_status = workspace.read_with(cx, |workspace, cx| {
+        workspace
+            .status_bar()
+            .read(cx)
+            .item_of_type::<KkErrorStatus>()
+            .expect("KK error status")
+    });
+    panel.update(cx, |panel, cx| {
+        panel.operation_error = Some((
+            fixture.root.clone(),
+            "Operation failed\nFull failure details".into(),
+        ));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    panel
+        .update(cx, |panel, cx| panel.refresh_for_test(cx))
+        .await;
+    assert_eq!(
+        error_status
+            .read_with(cx, |status, cx| status.message(cx))
+            .as_deref(),
+        Some("Operation failed\nFull failure details")
+    );
+    assert!(panel.read_with(cx, |panel, cx| {
+        panel
+            .output
+            .read(cx)
+            .diagnostics()
+            .read_since(0)
+            .1
+            .contains("Full failure details")
+    }));
+    panel.update(cx, |panel, cx| {
+        panel.operation_error = None;
+        cx.notify();
+    });
+    assert!(
+        error_status
+            .read_with(cx, |status, cx| status.message(cx))
+            .is_none()
+    );
     let parent = snapshot.exact_revision("@-").await?;
     let comparison = Comparison::load(&snapshot, Comparison::new(&parent).intent).await?;
     let file = comparison.files.first().context("changed file")?.clone();

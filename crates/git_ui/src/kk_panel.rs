@@ -107,6 +107,82 @@ pub(super) enum FileOpenKind {
     Before,
 }
 
+struct KkErrorStatus {
+    panel: WeakEntity<KkPanel>,
+    _subscription: Subscription,
+}
+
+impl KkErrorStatus {
+    fn new(panel: &Entity<KkPanel>, cx: &mut Context<Self>) -> Self {
+        let mut previous_operation_error = None;
+        let subscription = cx.observe(panel, move |_, panel, cx| {
+            let panel = panel.read(cx);
+            if panel.operation_error != previous_operation_error {
+                if let Some((_, error)) = &panel.operation_error {
+                    panel.output.read(cx).diagnostics().error(error);
+                }
+                previous_operation_error = panel.operation_error.clone();
+            }
+            cx.notify();
+        });
+        Self {
+            panel: panel.downgrade(),
+            _subscription: subscription,
+        }
+    }
+
+    fn message(&self, cx: &App) -> Option<String> {
+        self.panel.upgrade().and_then(|panel| {
+            let panel = panel.read(cx);
+            panel
+                .operation_error
+                .as_ref()
+                .map(|(_, message)| message.clone())
+                .or_else(|| panel.error.clone())
+        })
+    }
+}
+
+impl Render for KkErrorStatus {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let error = self.message(cx);
+        div().when_some(error, |view, error| {
+            let summary: String = error
+                .lines()
+                .next()
+                .unwrap_or("KK operation failed")
+                .chars()
+                .take(100)
+                .collect();
+            let panel = self.panel.clone();
+            view.child(
+                Button::new("kk-error-status", format!("KK: {summary}"))
+                    .color(Color::Error)
+                    .tooltip(Tooltip::text("Show KK error details in Output"))
+                    .on_click(move |_, window, cx| {
+                        if let Some(panel) = panel.upgrade() {
+                            panel.update(cx, |panel, cx| panel.show_output(window, cx));
+                        }
+                    }),
+            )
+        })
+    }
+}
+
+impl workspace::StatusItemView for KkErrorStatus {
+    fn hide_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
+        None
+    }
+
+    fn set_active_pane_item(
+        &mut self,
+        _: Option<&dyn workspace::item::ItemHandle>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+    }
+}
+
 pub struct KkPanel {
     workspace: WeakEntity<Workspace>,
     output: Entity<KkOutput>,
@@ -373,6 +449,10 @@ impl KkPanel {
                     };
                     panel.subscribe(project, window, cx);
                     panel
+                });
+                let error_status = cx.new(|cx| KkErrorStatus::new(&panel, cx));
+                workspace_view.status_bar().update(cx, |bar, cx| {
+                    bar.add_right_item(error_status, window, cx);
                 });
                 cx.observe(&panel, |_, _, cx| cx.notify()).detach();
                 Ok(panel)
@@ -3188,15 +3268,6 @@ impl Render for KkPanel {
             })
             .when(self.pending_writes > 0, |view| {
                 view.child(Label::new(self.pending_status))
-            })
-            .when_some(self.operation_error.clone(), |view, (_, error)| {
-                view.child(Label::new(error).color(Color::Error))
-            })
-            .when_some(self.error.clone(), |view, error| {
-                view.child(Label::new(error).color(Color::Error)).child(
-                    Button::new("show-output", "Show Output")
-                        .on_click(cx.listener(|this, _, window, cx| this.show_output(window, cx))),
-                )
             })
             .child(
                 uniform_list(

@@ -9,7 +9,7 @@ pub trait SearchActionsRegistrar {
 }
 
 type SearchBarActionCallback<A> =
-    fn(&mut BufferSearchBar, &A, &mut Window, &mut Context<BufferSearchBar>);
+    fn(&mut BufferSearchBar, &A, &mut Window, &mut Context<BufferSearchBar>) -> bool;
 
 type GetSearchBar<T> =
     for<'a, 'b> fn(&'a T, &'a mut Window, &mut Context<'b, T>) -> Option<Entity<BufferSearchBar>>;
@@ -41,14 +41,14 @@ impl<T: 'static> SearchActionsRegistrar for DivRegistrar<'_, '_, T> {
         let getter = self.search_getter;
         self.div = self.div.take().map(|div| {
             div.on_action(self.cx.listener(move |this, action, window, cx| {
-                let should_notify = (getter)(this, window, cx)
+                let handled = (getter)(this, window, cx)
                     .map(|search_bar| {
                         search_bar.update(cx, |search_bar, cx| {
                             callback.execute(search_bar, action, window, cx)
                         })
                     })
                     .unwrap_or(false);
-                if should_notify {
+                if handled {
                     cx.notify();
                 } else {
                     cx.propagate();
@@ -86,14 +86,14 @@ impl SearchActionsRegistrar for PaneDivRegistrar {
                     .toolbar()
                     .read(cx)
                     .item_of_type::<BufferSearchBar>();
-                let should_notify = search_bar
+                let handled = search_bar
                     .map(|search_bar| {
                         search_bar.update(cx, |search_bar, cx| {
                             callback.execute(search_bar, action, window, cx)
                         })
                     })
                     .unwrap_or(false);
-                if should_notify {
+                if handled {
                     pane.update(cx, |_, cx| cx.notify());
                 } else {
                     cx.propagate();
@@ -123,14 +123,16 @@ impl SearchActionsRegistrar for Workspace {
             pane.update(cx, |this, cx| {
                 this.toolbar().update(cx, move |this, cx| {
                     if let Some(search_bar) = this.item_of_type::<BufferSearchBar>() {
-                        let should_notify = search_bar.update(cx, move |search_bar, cx| {
+                        let handled = search_bar.update(cx, move |search_bar, cx| {
                             callback.execute(search_bar, action, window, cx)
                         });
-                        if should_notify {
+                        if handled {
                             cx.notify();
                         } else {
                             cx.propagate();
                         }
+                    } else {
+                        cx.propagate();
                     }
                 })
             });
@@ -166,9 +168,8 @@ impl<A: Action> ActionExecutor<A> for ForDismissed<A> {
         window: &mut Window,
         cx: &mut Context<BufferSearchBar>,
     ) -> DidHandleAction {
-        if search_bar.is_dismissed() {
-            self.0(search_bar, action, window, cx);
-            true
+        if search_bar.is_dismissed() && search_bar.active_searchable_item.is_some() {
+            self.0(search_bar, action, window, cx)
         } else {
             false
         }
@@ -194,8 +195,7 @@ impl<A: Action> ActionExecutor<A> for ForDeployed<A> {
         if search_bar.is_dismissed() || search_bar.active_searchable_item.is_none() {
             false
         } else {
-            self.0(search_bar, action, window, cx);
-            true
+            self.0(search_bar, action, window, cx)
         }
     }
 }
@@ -223,9 +223,10 @@ impl<A: Action> ActionExecutor<A> for WithResultsOrExternalQuery<A> {
         #[cfg(target_os = "macos")]
         let has_external_query = search_bar.pending_external_query.is_some();
 
-        if has_external_query || search_bar.active_match_index.is_some() {
-            self.0(search_bar, action, window, cx);
-            true
+        if search_bar.active_searchable_item.is_some()
+            && (has_external_query || search_bar.has_active_matches())
+        {
+            self.0(search_bar, action, window, cx)
         } else {
             false
         }
