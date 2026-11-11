@@ -137,6 +137,89 @@ impl CommitInformation {
     }
 }
 
+pub(super) struct DiffDisplayPreference {
+    showing_full_file: bool,
+    store: Arc<KeyValueStore>,
+    key: Option<String>,
+    writes: Shared<Task<()>>,
+    pub error: Option<String>,
+}
+
+impl DiffDisplayPreference {
+    pub fn new(workspace_id: Option<String>, cx: &App) -> anyhow::Result<Self> {
+        let store: Arc<KeyValueStore> = KeyValueStore::global(cx).into();
+        Self::load(
+            store,
+            workspace_id,
+            editor::EditorSettings::get_global(cx)
+                .file_diff
+                .show_full_file,
+        )
+    }
+
+    fn load(
+        store: Arc<KeyValueStore>,
+        workspace_id: Option<String>,
+        default: bool,
+    ) -> anyhow::Result<Self> {
+        let key =
+            workspace_id.map(|identifier| format!("KKWorkbenchDiffDisplayPreference:{identifier}"));
+        let showing_full_file = key
+            .as_ref()
+            .map(|key| store.read_kvp(key))
+            .transpose()?
+            .flatten()
+            .map_or(default, |value| value == "full");
+        Ok(Self {
+            showing_full_file,
+            store,
+            key,
+            writes: Task::ready(()).shared(),
+            error: None,
+        })
+    }
+
+    pub fn showing_full_file(&self) -> bool {
+        self.showing_full_file
+    }
+
+    pub fn toggle(&mut self, cx: &mut Context<Self>) {
+        self.showing_full_file = !self.showing_full_file;
+        self.error = None;
+        cx.notify();
+        let Some(key) = self.key.clone() else {
+            return;
+        };
+        let value = if self.showing_full_file {
+            "full"
+        } else {
+            "changes"
+        }
+        .to_owned();
+        let store = self.store.clone();
+        let previous = self.writes.clone();
+        self.writes = cx
+            .spawn(async move |this, cx| {
+                previous.await;
+                let result = cx
+                    .background_spawn(async move { store.write_kvp(key, value).await })
+                    .await;
+                if let Err(error) = result {
+                    log::error!("Failed to save KK diff display preference: {error:#}");
+                    this.update(cx, |this, cx| {
+                        this.error =
+                            Some(format!("Failed to save diff display preference: {error:#}"));
+                        cx.notify();
+                    })
+                    .log_err();
+                }
+            })
+            .shared();
+        let write = self.writes.clone();
+        cx.spawn(async move |_, _| write.await).detach();
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, RegisterSetting)]
 pub struct KkWorkbenchSettings {
     pub dock: workspace::dock::DockPosition,
@@ -244,6 +327,37 @@ mod tests {
                 .expect("transient workspace")
                 .mode,
             HistoryMode::Lineage
+        );
+    }
+
+    #[gpui::test]
+    async fn kk_diff_display_is_persistent_and_workspace_scoped(cx: &mut TestAppContext) {
+        let store = Arc::new(KeyValueStore::open_test_db("kk_diff_display").await);
+        let preference =
+            DiffDisplayPreference::load(store.clone(), Some("first".into()), true).expect("load");
+        let preference = cx.new(|_| preference);
+        let writes = preference.update(cx, |preference, cx| {
+            preference.toggle(cx);
+            preference.toggle(cx);
+            preference.toggle(cx);
+            preference.writes.clone()
+        });
+        drop(preference);
+        writes.await;
+        assert!(
+            !DiffDisplayPreference::load(store.clone(), Some("first".into()), true)
+                .expect("restore")
+                .showing_full_file()
+        );
+        assert!(
+            DiffDisplayPreference::load(store.clone(), Some("second".into()), true)
+                .expect("other workspace")
+                .showing_full_file()
+        );
+        assert!(
+            !DiffDisplayPreference::load(store, None, false)
+                .expect("transient")
+                .showing_full_file()
         );
     }
 

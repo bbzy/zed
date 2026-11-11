@@ -127,6 +127,21 @@ pub(super) struct DiffTarget {
 }
 
 impl DiffTarget {
+    pub(super) fn copy_reference_label(&self) -> String {
+        if let Some(revision) = &self.revision {
+            revision.change_id.clone()
+        } else if let Some(comparison) = &self.comparison
+            && let Some(start) = &comparison.range_start_change_id
+        {
+            format!(
+                "{}::@",
+                comparison.range_start_display_id.as_ref().unwrap_or(start)
+            )
+        } else {
+            self.reference.clone()
+        }
+    }
+
     pub(super) fn tab_label(&self) -> String {
         if let Some(comparison) = &self.comparison
             && matches!(self.scope, DiffScope::Comparison { .. })
@@ -211,6 +226,66 @@ struct DiffContents {
     divergent: bool,
     presentation: DiffPresentation,
     revision: Option<Revision>,
+}
+
+pub(super) fn copy_selected_references(
+    editor: Entity<Editor>,
+    files: &[(language::BufferId, String, String)],
+    cx: &mut App,
+) {
+    let references = editor.update(cx, |editor, cx| {
+        let display = editor.display_snapshot(cx);
+        let snapshot = display.buffer_snapshot();
+        let mut references = Vec::new();
+        let mut append = |identifier, start: Point, end: Point| {
+            if let Some((_, path, revision)) =
+                files.iter().find(|(buffer, _, _)| *buffer == identifier)
+            {
+                let begin = start.row + 1;
+                let end = (end.row + u32::from(end.column > 0)).max(begin);
+                let lines = if begin == end {
+                    format!(":{begin}")
+                } else {
+                    format!(":{begin}~{end}")
+                };
+                let reference = format!("{path}{lines} ({revision})");
+                if !references.contains(&reference) {
+                    references.push(reference);
+                }
+            }
+        };
+        let selections = editor.selections.all_adjusted(&display);
+        let selected = selections
+            .iter()
+            .any(|selection| selection.start != selection.end);
+        for selection in selections
+            .iter()
+            .filter(|selection| selection.start != selection.end)
+        {
+            for (buffer, range, _) in
+                snapshot.range_to_buffer_ranges_with_deleted_hunks(selection.range())
+            {
+                if range.start != range.end {
+                    append(
+                        buffer.remote_id(),
+                        range.start.0.to_point(buffer),
+                        range.end.0.to_point(buffer),
+                    );
+                }
+            }
+        }
+        if !selected {
+            if let Some((buffer, point)) =
+                snapshot.point_to_buffer_point(editor.selections.newest_adjusted(&display).head())
+            {
+                append(buffer.remote_id(), point, point);
+            }
+        }
+        references.join("\n")
+    });
+    if !references.is_empty() {
+        cx.write_to_clipboard(ClipboardItem::new_string(references));
+    }
 }
 
 struct DiffAddon(WeakEntity<KkDiff>);
@@ -1454,97 +1529,40 @@ impl KkDiff {
         });
     }
 
-    fn copy_reference(&self, include_selection: bool, cx: &mut App) {
-        let split = self.editor.read(cx);
-        let editor = split.focused_editor().clone();
-        let mut original =
-            include_selection && split.lhs_editor().is_some_and(|left| left == &editor);
-        let modified_buffer_id = self.buffer.read(cx).remote_id();
-        let lines = if include_selection {
-            editor.update(cx, |editor, cx| {
-                let display = editor.display_snapshot(cx);
-                let selections = editor.selections.all_adjusted(&display);
-                let nonempty: Vec<_> = selections
-                    .iter()
-                    .filter(|selection| selection.start != selection.end)
-                    .collect();
-                let cursor = editor.selections.newest_adjusted(&display).head();
-                if let Some((buffer, _)) = display.buffer_snapshot().point_to_buffer_point(cursor) {
-                    original |= buffer.remote_id() != modified_buffer_id;
-                }
-
-                let selected_lines: Vec<_> = nonempty
-                    .into_iter()
-                    .filter_map(|selection| {
-                        let (_, start) = display
-                            .buffer_snapshot()
-                            .point_to_buffer_point(selection.start)?;
-                        let (_, end) = display
-                            .buffer_snapshot()
-                            .point_to_buffer_point(selection.end)?;
-                        Some((start.row + 1, end.row + u32::from(end.column > 0)))
-                    })
-                    .collect();
-                let cursor_row = display
-                    .buffer_snapshot()
-                    .point_to_buffer_point(cursor)
-                    .map(|(_, point)| point.row + 1)
-                    .unwrap_or(1);
-                let start = selected_lines
-                    .iter()
-                    .map(|(start, _)| *start)
-                    .min()
-                    .unwrap_or(cursor_row);
-                let end = selected_lines
-                    .iter()
-                    .map(|(_, end)| *end)
-                    .max()
-                    .unwrap_or(start)
-                    .max(start);
-                if start == end {
-                    format!(":{start}")
-                } else {
-                    format!(":{start}~{end}")
-                }
-            })
-        } else {
-            String::new()
-        };
-        let path = if original {
-            self.file.renamed_from.as_deref().unwrap_or(&self.file.path)
-        } else {
-            &self.identity.path
-        };
-        let target_reference = if let Some(revision) = &self.target.revision {
-            revision.change_id.clone()
-        } else if let Some(comparison) = &self.target.comparison
-            && let Some(start) = &comparison.range_start_change_id
-        {
-            format!(
-                "{}::@",
-                comparison.range_start_display_id.as_ref().unwrap_or(start)
-            )
-        } else {
-            self.target.reference.clone()
-        };
-        let reference = format!("{path}{lines} ({target_reference})");
-        if let Some(snapshot) = &self.snapshot {
-            snapshot.repository().diagnostics().debug("copydiff", || {
-                format!(
-                    "[COPY_DIFF] {}",
-                    serde_json::json!({
-                        "file": path, "side": if original {
-                            "original"
-                        } else {
-                            "modified"
-                        },
-                        "selection": include_selection, "reference": reference,
-                    })
-                )
-            });
+    pub(super) fn copy_reference(&self, include_selection: bool, cx: &mut App) {
+        if include_selection {
+            let files = self.copy_reference_files(cx);
+            copy_selected_references(self.editor.read(cx).focused_editor().clone(), &files, cx);
+            return;
         }
+        cx.write_to_clipboard(ClipboardItem::new_string(format!(
+            "{} ({})",
+            self.identity.path,
+            self.target.copy_reference_label()
+        )));
+    }
 
-        cx.write_to_clipboard(ClipboardItem::new_string(reference));
+    pub(super) fn copy_reference_files(
+        &self,
+        cx: &App,
+    ) -> Vec<(language::BufferId, String, String)> {
+        let revision = self.target.copy_reference_label();
+        vec![
+            (
+                self.buffer.read(cx).remote_id(),
+                self.file.path.clone(),
+                revision.clone(),
+            ),
+            (
+                self.diff.read(cx).base_text_buffer().read(cx).remote_id(),
+                self.file
+                    .renamed_from
+                    .as_ref()
+                    .unwrap_or(&self.file.path)
+                    .clone(),
+                revision,
+            ),
+        ]
     }
 
     pub(super) fn open_file_in_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3344,6 +3362,21 @@ mod tests {
                     );
                 })
         });
+        for expected in [true, false] {
+            view.update(cx, |view, cx| {
+                view.controls
+                    .update(cx, |controls, cx| controls.toggle_full_file(cx));
+            });
+            cx.run_until_parked();
+            assert_eq!(
+                view.read_with(cx, |view, cx| view.controls.read(cx).showing_full_file),
+                expected
+            );
+            assert_eq!(
+                clone.read_with(cx, |view, cx| view.controls.read(cx).showing_full_file),
+                expected
+            );
+        }
         let binary = snapshot
             .changed_files(&target.scope)
             .await
@@ -3814,6 +3847,71 @@ mod tests {
             assert_eq!(snapshot.all_buffer_ids().count(), 3);
             assert_eq!(snapshot.total_changed_lines(), (4, 3));
         });
+        let second_buffer = project
+            .update(cx, |project, cx| {
+                project.open_local_buffer(directory.path().join("two.txt"), cx)
+            })
+            .await
+            .expect("second file buffer");
+        let references = vec![
+            (
+                buffer.read_with(cx, |buffer, _| buffer.remote_id()),
+                "one.txt".into(),
+                target.copy_reference_label(),
+            ),
+            (
+                second_buffer.read_with(cx, |buffer, _| buffer.remote_id()),
+                "two.txt".into(),
+                target.copy_reference_label(),
+            ),
+        ];
+        for cross_file in [false, true] {
+            editor.update_in(cx, |editor, window, cx| {
+                editor.rhs_editor().update(cx, |right, cx| {
+                    let multibuffer = right.buffer().read(cx);
+                    let first_start = multibuffer
+                        .buffer_point_to_anchor(&buffer, Point::new(70, 0), cx)
+                        .expect("first start");
+                    let first_end = multibuffer
+                        .buffer_point_to_anchor(&buffer, Point::new(71, 0), cx)
+                        .expect("first end");
+                    let second_start = multibuffer
+                        .buffer_point_to_anchor(&second_buffer, Point::new(0, 0), cx)
+                        .expect("second start");
+                    let second_end = multibuffer
+                        .buffer_point_to_anchor(&second_buffer, Point::new(0, 3), cx)
+                        .expect("second end");
+                    let ranges = if cross_file {
+                        vec![first_start..second_end]
+                    } else {
+                        vec![first_start..first_end, second_start..second_end]
+                    };
+                    right.change_selections(
+                        SelectionEffects::no_scroll(),
+                        window,
+                        cx,
+                        |selections| selections.select_ranges(ranges),
+                    );
+                    window.focus(&right.focus_handle(cx), cx);
+                });
+            });
+            cx.update(|_, cx| {
+                copy_selected_references(editor.read(cx).focused_editor().clone(), &references, cx)
+            });
+            let copied = cx
+                .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+                .expect("references");
+            assert!(copied.contains("two.txt:1 ("), "{copied}");
+            assert!(
+                copied.contains(if cross_file {
+                    "one.txt:71~80 ("
+                } else {
+                    "one.txt:71 ("
+                }),
+                "{copied}"
+            );
+            assert_eq!(copied.lines().count(), 2, "{copied}");
+        }
         assert_eq!(
             search_bar.update_in(cx, |search, window, cx| {
                 search.set_active_pane_item(Some(&multi), window, cx)

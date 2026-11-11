@@ -106,6 +106,11 @@ impl editor::Addon for MultiDiffAddon {
         self
     }
 
+    fn extend_context_menu(&self, menu: ContextMenu, _: &mut Window, _: &mut App) -> ContextMenu {
+        menu.separator()
+            .action("KKW: Copy Diff", Box::new(super::kk_diff::CopyDiff))
+    }
+
     fn extend_buffer_header_context_menu(
         &self,
         menu: ContextMenu,
@@ -128,7 +133,13 @@ impl editor::Addon for MultiDiffAddon {
             })
             .cloned();
         menu.when_some(entry, |menu, entry| {
-            menu.entry("KKW: Open File in Project", None, move |window, cx| {
+            menu.entry("KKW: Copy Diff", None, {
+                let entry = entry.clone();
+                move |_, cx| {
+                    entry.update(cx, |entry, cx| entry.copy_reference(false, cx));
+                }
+            })
+            .entry("KKW: Open File in Project", None, move |window, cx| {
                 entry.update(cx, |entry, cx| entry.open_file_in_project(window, cx));
             })
         })
@@ -998,6 +1009,18 @@ impl Render for KkMultiDiff {
             );
         });
         v_flex()
+            .on_action(cx.listener(|this, _: &super::kk_diff::CopyDiff, _, cx| {
+                let files = this
+                    .entries
+                    .iter()
+                    .flat_map(|entry| entry.read(cx).copy_reference_files(cx))
+                    .collect::<Vec<_>>();
+                super::kk_diff::copy_selected_references(
+                    this.editor.read(cx).focused_editor().clone(),
+                    &files,
+                    cx,
+                );
+            }))
             .size_full()
             .when_some(self.error.clone(), |view, error| {
                 view.child(Label::new(error).color(Color::Error))
@@ -1355,9 +1378,7 @@ impl SerializableItem for KkMultiDiff {
                     entry.update(cx, |entry, cx| entry.refresh(view.snapshot.clone(), cx));
                 }
                 view.controls.update(cx, |controls, cx| {
-                    if controls.showing_full_file != saved.full_file {
-                        controls.toggle_full_file(cx);
-                    }
+                    controls.set_full_file(saved.full_file, cx);
                 });
                 view.editor.update(cx, |editor, cx| {
                     if (editor.diff_view_style() == settings::DiffViewStyle::Split) != saved.split {

@@ -809,11 +809,13 @@ impl KkConflict {
                     placement: BlockPlacement::Above(text.anchor_before(MultiBufferOffset(offset))),
                     height: Some(1),
                     priority: 0,
-                    render: Arc::new(move |_| {
+                    render: Arc::new(move |cx| {
                         let weak = weak.clone();
                         let compare = weak.clone();
                         let version = version.clone();
                         h_flex()
+                            .ml(cx.margins.gutter.width)
+                            .h(cx.line_height)
                             .gap_2()
                             .child(Label::new(title.clone()).size(LabelSize::Small))
                             .child(
