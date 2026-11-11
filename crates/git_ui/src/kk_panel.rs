@@ -107,12 +107,12 @@ pub(super) enum FileOpenKind {
     Before,
 }
 
-struct KkErrorStatus {
+struct KkStatus {
     panel: WeakEntity<KkPanel>,
     _subscription: Subscription,
 }
 
-impl KkErrorStatus {
+impl KkStatus {
     fn new(panel: &Entity<KkPanel>, cx: &mut Context<Self>) -> Self {
         let mut previous_operation_error = None;
         let subscription = cx.observe(panel, move |_, panel, cx| {
@@ -143,33 +143,60 @@ impl KkErrorStatus {
     }
 }
 
-impl Render for KkErrorStatus {
+impl Render for KkStatus {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let progress = self.panel.upgrade().and_then(|panel| {
+            let panel = panel.read(cx);
+            if panel.pending_writes > 0 {
+                Some(panel.pending_status.to_owned())
+            } else if let Some((_, label, _)) = &panel.opening_feedback {
+                Some(label.clone())
+            } else if panel.loading {
+                Some("Loading…".to_owned())
+            } else {
+                None
+            }
+        });
         let error = self.message(cx);
-        div().when_some(error, |view, error| {
-            let summary: String = error
-                .lines()
-                .next()
-                .unwrap_or("KK operation failed")
-                .chars()
-                .take(100)
-                .collect();
-            let panel = self.panel.clone();
-            view.child(
-                Button::new("kk-error-status", format!("KK: {summary}"))
-                    .color(Color::Error)
-                    .tooltip(Tooltip::text("Show KK error details in Output"))
-                    .on_click(move |_, window, cx| {
-                        if let Some(panel) = panel.upgrade() {
-                            panel.update(cx, |panel, cx| panel.show_output(window, cx));
-                        }
-                    }),
-            )
-        })
+        div()
+            .when_some(error.clone(), |view, error| {
+                let summary: String = error
+                    .lines()
+                    .next()
+                    .unwrap_or("KK operation failed")
+                    .chars()
+                    .take(100)
+                    .collect();
+                let panel = self.panel.clone();
+                view.child(
+                    Button::new("kk-error-status", format!("KK: {summary}"))
+                        .color(Color::Error)
+                        .tooltip(Tooltip::text("Show KK error details in Output"))
+                        .on_click(move |_, window, cx| {
+                            if let Some(panel) = panel.upgrade() {
+                                panel.update(cx, |panel, cx| panel.show_output(window, cx));
+                            }
+                        }),
+                )
+            })
+            .when(error.is_none(), |view| {
+                view.when_some(progress, |view, message| {
+                    view.child(
+                        h_flex()
+                            .id("kk-progress-status")
+                            .gap_1()
+                            .max_w(rems(24.))
+                            .overflow_hidden()
+                            .child(ui::SpinnerLabel::new())
+                            .child(Label::new(format!("KK: {message}")).truncate())
+                            .tooltip(Tooltip::text(message)),
+                    )
+                })
+            })
     }
 }
 
-impl workspace::StatusItemView for KkErrorStatus {
+impl workspace::StatusItemView for KkStatus {
     fn hide_setting(&self, _: &App) -> Option<workspace::HideStatusItem> {
         None
     }
@@ -450,9 +477,9 @@ impl KkPanel {
                     panel.subscribe(project, window, cx);
                     panel
                 });
-                let error_status = cx.new(|cx| KkErrorStatus::new(&panel, cx));
+                let status = cx.new(|cx| KkStatus::new(&panel, cx));
                 workspace_view.status_bar().update(cx, |bar, cx| {
-                    bar.add_right_item(error_status, window, cx);
+                    bar.add_right_item(status, window, cx);
                 });
                 cx.observe(&panel, |_, _, cx| cx.notify()).detach();
                 Ok(panel)
@@ -3255,20 +3282,6 @@ impl Render for KkPanel {
                             .anchor(gpui::Anchor::TopRight)
                     }),
             )
-            .when(self.loading && self.repositories.is_empty(), |view| {
-                view.child(Label::new("Loading…"))
-            })
-            .when_some(self.opening_feedback.as_ref(), |view, (_, label, _)| {
-                view.child(
-                    h_flex()
-                        .gap_1()
-                        .child(ui::SpinnerLabel::new())
-                        .child(Label::new(label.clone()).truncate()),
-                )
-            })
-            .when(self.pending_writes > 0, |view| {
-                view.child(Label::new(self.pending_status))
-            })
             .child(
                 uniform_list(
                     "kk-history",

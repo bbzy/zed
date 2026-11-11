@@ -164,7 +164,7 @@ async fn run_remote_panel(cx: &mut TestAppContext, server_cx: &mut TestAppContex
         workspace
             .status_bar()
             .read(cx)
-            .item_of_type::<KkErrorStatus>()
+            .item_of_type::<KkStatus>()
             .expect("KK error status")
     });
     panel.update(cx, |panel, cx| {
