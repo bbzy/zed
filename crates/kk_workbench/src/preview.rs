@@ -2,7 +2,7 @@ use crate::{
     LineAnchor, LineSelection, SelectionProjection, SelectionSide,
     selection::{apply_atoms, local_line_edits, positional_atoms, select_atoms, text_lines},
 };
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Context as _, Result};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,10 +119,6 @@ impl ClassificationPreview {
             original_lines.len(),
             modified_lines.len(),
         )?;
-        ensure!(
-            !selected.is_empty(),
-            "The selection does not contain any changed lines"
-        );
         for edit in &edits {
             let (required, extra) = match selection.side {
                 SelectionSide::Original => (
