@@ -55,6 +55,8 @@ pub(super) struct KkDiffControls {
     message: Option<Entity<markdown::Markdown>>,
     message_text: String,
     message_expanded: bool,
+    diff_display: Option<Entity<super::kk_settings::DiffDisplayPreference>>,
+    diff_display_subscription: Option<Subscription>,
     commit_information: Option<Entity<super::kk_settings::CommitInformation>>,
     commit_information_subscription: Option<Subscription>,
     message_scroll: ScrollHandle,
@@ -82,12 +84,18 @@ impl KkDiffControls {
                 let preference = workspace
                     .upgrade()
                     .and_then(|workspace| workspace.read(cx).panel::<super::kk_panel::KkPanel>(cx))
-                    .map(|panel| panel.read(cx).commit_information.clone());
-                if let Some(preference) = preference
+                    .map(|panel| {
+                        (
+                            panel.read(cx).commit_information.clone(),
+                            panel.read(cx).diff_display.clone(),
+                        )
+                    });
+                if let Some((preference, display)) = preference
                     && let Some(controls) = controls.upgrade()
                 {
                     controls.update(cx, |controls: &mut Self, cx| {
                         controls.bind_commit_information(preference, cx);
+                        controls.bind_diff_display(display, cx);
                     });
                 }
             }
@@ -98,11 +106,13 @@ impl KkDiffControls {
                     return;
                 }
                 let preference = panel.commit_information.clone();
+                let display = panel.diff_display.clone();
                 let controls = controls.clone();
                 cx.defer(move |cx| {
                     controls
                         .update(cx, |controls: &mut Self, cx| {
                             controls.bind_commit_information(preference, cx);
+                            controls.bind_diff_display(display, cx);
                         })
                         .log_err();
                 });
@@ -129,6 +139,8 @@ impl KkDiffControls {
             message: None,
             message_text: String::new(),
             message_expanded: false,
+            diff_display: None,
+            diff_display_subscription: None,
             commit_information: None,
             commit_information_subscription: None,
             message_scroll: ScrollHandle::new(),
@@ -317,11 +329,43 @@ impl KkDiffControls {
         }
     }
 
+    fn bind_diff_display(
+        &mut self,
+        preference: Entity<super::kk_settings::DiffDisplayPreference>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.diff_display.as_ref() == Some(&preference) {
+            return;
+        }
+        let value = preference.read(cx).showing_full_file();
+        if self.showing_full_file != value {
+            self.set_full_file(value, cx);
+        }
+        self.diff_display_subscription = Some(cx.observe(&preference, |this, preference, cx| {
+            let value = preference.read(cx).showing_full_file();
+            if this.showing_full_file != value {
+                this.set_full_file(value, cx);
+            }
+            cx.notify();
+        }));
+        self.diff_display = Some(preference);
+    }
+
     pub fn toggle_full_file(&mut self, cx: &mut Context<Self>) {
-        self.set_full_file(!self.showing_full_file, cx);
+        let value = !self.showing_full_file;
+        if let Some(preference) = self.diff_display.clone() {
+            preference.update(cx, |preference, cx| preference.toggle(cx));
+        }
+        self.set_full_file(value, cx);
     }
 
     pub fn set_full_file(&mut self, showing_full_file: bool, cx: &mut Context<Self>) {
+        let showing_full_file = self
+            .diff_display
+            .as_ref()
+            .map_or(showing_full_file, |preference| {
+                preference.read(cx).showing_full_file()
+            });
         self.showing_full_file = showing_full_file;
         self.update_excerpts(true, cx);
         let right = self.editor.read(cx).rhs_editor().clone();
@@ -761,6 +805,12 @@ impl Render for KkDiffControls {
                     .render(window, cx),
                 )
             }))
+            .when_some(
+                self.diff_display
+                    .as_ref()
+                    .and_then(|preference| preference.read(cx).error.clone()),
+                |this, error| this.child(Label::new(error).color(Color::Error)),
+            )
             .when_some(self.review_error.clone(), |this, error| {
                 this.child(Label::new(error).color(Color::Error))
             })

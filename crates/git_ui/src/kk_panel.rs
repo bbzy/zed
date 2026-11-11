@@ -257,6 +257,7 @@ pub struct KkPanel {
     pending_reveal: Option<(PathBuf, Revision)>,
     comparison_state: ComparisonState,
     file_order: FileOrdering,
+    pub(super) diff_display: Entity<super::kk_settings::DiffDisplayPreference>,
     pub(super) commit_information: Entity<CommitInformation>,
     tree_selection: TreeSelectionState,
     tree_revision: u64,
@@ -429,6 +430,9 @@ impl KkPanel {
                     .transpose()?;
                 let file_order = FileOrdering::new(workspace_id.clone(), cx)?;
                 let history_preference = HistoryPreference::new(workspace_id.clone(), cx)?;
+                let diff_display =
+                    super::kk_settings::DiffDisplayPreference::new(workspace_id.clone(), cx)?;
+                let diff_display = cx.new(|_| diff_display);
                 let commit_information = CommitInformation::new(workspace_id, cx)?;
                 let commit_information = cx.new(|_| commit_information);
                 let categories = KkWorkbenchSettings::get_global(cx).debug.clone();
@@ -472,6 +476,7 @@ impl KkPanel {
                         pending_reveal: None,
                         comparison_state: ComparisonState::new(host, cx),
                         file_order,
+                        diff_display,
                         commit_information,
                         tree_selection: TreeSelectionState::default(),
                         tree_revision: 0,
@@ -1356,7 +1361,7 @@ impl KkPanel {
         );
         let panel = cx.weak_entity();
         let menu = ContextMenu::build(window, cx, |menu, _, _| {
-            menu.entry("Open Changes", None, {
+            menu.entry("KKW: Open Changes", None, {
                 let panel = panel.clone();
                 let root = root.clone();
                 let revision = revision.clone();
@@ -1377,7 +1382,7 @@ impl KkPanel {
                 let root = root.clone();
                 let revision = revision.clone();
                 let panel = panel.clone();
-                menu.entry("Compare with Change", None, move |window, cx| {
+                menu.entry("KKW: Compare with Change", None, move |window, cx| {
                     panel
                         .update(cx, |panel, cx| {
                             if let Some(index) = panel.repositories.iter().position(|repository| {
@@ -1391,16 +1396,16 @@ impl KkPanel {
                 })
                 .separator()
             })
-            .entry("Copy Change ID", None, {
+            .entry("KKW: Copy Change ID", None, {
                 let identifier = revision.full_change_id.clone();
                 move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(identifier.clone()))
             })
-            .entry("Copy Commit ID", None, {
+            .entry("KKW: Copy Commit ID", None, {
                 let identifier = revision.full_commit_id.clone();
                 move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(identifier.clone()))
             })
             .when(failed, |menu| {
-                menu.entry("Retry Loading Commit", None, move |_, cx| {
+                menu.entry("KKW: Retry Loading Commit", None, move |_, cx| {
                     panel
                         .update(cx, |panel, cx| {
                             if let Some(index) = panel.repositories.iter().position(|repository| {
@@ -2904,7 +2909,7 @@ impl KkPanel {
                 let target = target.clone();
                 let path = file.path.clone();
                 menu = menu
-                    .entry("Resolve Conflict", None, move |window, cx| {
+                    .entry("KKW: Resolve Conflict", None, move |window, cx| {
                         panel
                             .update(cx, |panel, cx| {
                                 panel.open_conflict(
@@ -2929,7 +2934,7 @@ impl KkPanel {
                 let target = target.clone();
                 let file = file.clone();
                 let panel = panel.clone();
-                menu = menu.entry(label, None, move |window, cx| {
+                menu = menu.entry(format!("KKW: {label}"), None, move |window, cx| {
                     panel
                         .update(cx, |panel, cx| {
                             panel.open_plain_file(
@@ -2953,22 +2958,26 @@ impl KkPanel {
                     let snapshot = snapshot.clone();
                     let target = target.clone();
                     let file = file.clone();
-                    menu = menu.entry(action.label(), None, move |window, cx| {
-                        panel
-                            .update(cx, |panel, cx| {
-                                panel
-                                    .mutate_file(
-                                        snapshot.clone(),
-                                        target.clone(),
-                                        file.clone(),
-                                        action,
-                                        window,
-                                        cx,
-                                    )
-                                    .detach()
-                            })
-                            .log_err();
-                    });
+                    menu = menu.entry(
+                        format!("KKW: {}", action.label()),
+                        None,
+                        move |window, cx| {
+                            panel
+                                .update(cx, |panel, cx| {
+                                    panel
+                                        .mutate_file(
+                                            snapshot.clone(),
+                                            target.clone(),
+                                            file.clone(),
+                                            action,
+                                            window,
+                                            cx,
+                                        )
+                                        .detach()
+                                })
+                                .log_err();
+                        },
+                    );
                 }
             }
 
@@ -2994,7 +3003,7 @@ impl KkPanel {
                     let target = target.clone();
                     let intent = intent.clone();
                     let file = file.clone();
-                    menu = menu.entry(label, None, move |_, cx| {
+                    menu = menu.entry(format!("KKW: {label}"), None, move |_, cx| {
                         panel
                             .update(cx, |panel, cx| {
                                 panel
@@ -3284,7 +3293,7 @@ impl Render for KkPanel {
                                     } else {
                                         ("Use Repository Order", FileOrder::Repository)
                                     };
-                                    menu.entry(label, None, move |_, cx| {
+                                    menu.entry(format!("KKW: {label}"), None, move |_, cx| {
                                         panel
                                             .update(cx, |panel, cx| {
                                                 panel.set_file_order(order, cx);

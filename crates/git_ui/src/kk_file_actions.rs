@@ -217,13 +217,17 @@ impl KkPanel {
             for action in actions {
                 let panel = panel.clone();
                 let rows = rows.clone();
-                menu = menu.entry(action.label(), None, move |window, cx| {
-                    panel
-                        .update(cx, |panel, cx| {
-                            panel.run_file_batch(action, rows.clone(), window, cx)
-                        })
-                        .log_err();
-                });
+                menu = menu.entry(
+                    format!("KKW: {}", action.label()),
+                    None,
+                    move |window, cx| {
+                        panel
+                            .update(cx, |panel, cx| {
+                                panel.run_file_batch(action, rows.clone(), window, cx)
+                            })
+                            .log_err();
+                    },
+                );
             }
 
             menu

@@ -3193,8 +3193,11 @@ mod tests {
         panel.update_in(cx, |panel, window, cx| window.focus(&panel.focus, cx));
         click_icon("ICON-Ellipsis", cx);
         assert!(
-            cx.debug_bounds("MENU_ITEM-Sort by File Name").is_some()
-                || cx.debug_bounds("MENU_ITEM-Use Repository Order").is_some(),
+            cx.debug_bounds("MENU_ITEM-KKW: Sort by File Name")
+                .is_some()
+                || cx
+                    .debug_bounds("MENU_ITEM-KKW: Use Repository Order")
+                    .is_some(),
             "More Actions must open before Escape"
         );
         cx.simulate_keystrokes("escape");
@@ -3211,14 +3214,17 @@ mod tests {
         });
         click_icon("ICON-Ellipsis", cx);
         let sort = cx
-            .debug_bounds("MENU_ITEM-Sort by File Name")
+            .debug_bounds("MENU_ITEM-KKW: Sort by File Name")
             .expect("sorting in More Actions");
-        assert!(cx.debug_bounds("MENU_ITEM-Use Repository Order").is_none());
+        assert!(
+            cx.debug_bounds("MENU_ITEM-KKW: Use Repository Order")
+                .is_none()
+        );
         cx.simulate_click(sort.center(), Modifiers::none());
         assert!(panel.read_with(cx, |panel, _| panel.file_order.order()) == FileOrder::FileName);
         click_icon("ICON-Ellipsis", cx);
         let sort = cx
-            .debug_bounds("MENU_ITEM-Use Repository Order")
+            .debug_bounds("MENU_ITEM-KKW: Use Repository Order")
             .expect("opposite sorting action");
         cx.simulate_click(sort.center(), Modifiers::none());
         assert!(panel.read_with(cx, |panel, _| panel.file_order.order()) == FileOrder::Repository);
@@ -3322,7 +3328,7 @@ mod tests {
         cx.simulate_mouse_up(error_position, gpui::MouseButton::Right, Modifiers::none());
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let retry = cx
-            .debug_bounds("MENU_ITEM-Retry Loading Commit")
+            .debug_bounds("MENU_ITEM-KKW: Retry Loading Commit")
             .expect("error row retains Retry in its context menu");
         cx.simulate_click(retry.center(), Modifiers::none());
         cx.condition(&panel, |panel, _| {
@@ -4189,7 +4195,7 @@ mod tests {
         });
         right_click_revision(&panel, &second_root, &compared, cx);
         let compare_entry = cx
-            .debug_bounds("MENU_ITEM-Compare with Change")
+            .debug_bounds("MENU_ITEM-KKW: Compare with Change")
             .expect("historical revision menu offers Compare With");
         cx.simulate_click(compare_entry.center(), Modifiers::none());
         let comparison = panel.update(cx, |panel, _| {
@@ -4236,9 +4242,12 @@ mod tests {
             comparison.intent.target_revset.clone()
         });
         right_click_revision(&panel, &second_root, &working_copy, cx);
-        assert!(cx.debug_bounds("MENU_ITEM-Compare with Change").is_none());
+        assert!(
+            cx.debug_bounds("MENU_ITEM-KKW: Compare with Change")
+                .is_none()
+        );
         let copy_entry = cx
-            .debug_bounds("MENU_ITEM-Copy Change ID")
+            .debug_bounds("MENU_ITEM-KKW: Copy Change ID")
             .expect("working-copy copy entry");
         cx.simulate_click(copy_entry.center(), Modifiers::none());
         panel.read_with(cx, |panel, cx| {
