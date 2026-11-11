@@ -1256,7 +1256,7 @@ impl KkPanel {
             TreeRowKind::Revision(revision, _) => revision.has_conflict,
             _ => false,
         };
-        let warning = conflict || matches!(row.kind, TreeRowKind::Recovery(_));
+        let warning = matches!(row.kind, TreeRowKind::Recovery(_));
         let disclosure_row = row.clone();
         let click_row = row.clone();
         let menu_row = row.clone();
@@ -1460,7 +1460,11 @@ impl KkPanel {
                             .child(
                                 div().min_w_0().flex_shrink_1().child(
                                     Label::new(revision.subject().to_owned())
-                                        .color(Color::Default)
+                                        .color(if conflict {
+                                            Color::Error
+                                        } else {
+                                            Color::Default
+                                        })
                                         .truncate(),
                                 ),
                             )
@@ -1476,7 +1480,9 @@ impl KkPanel {
                             }),
                     )
                 } else {
-                    content.child(Label::new(label).truncate().color(if warning {
+                    content.child(Label::new(label).truncate().color(if conflict {
+                        Color::Error
+                    } else if warning {
                         Color::Warning
                     } else {
                         badge.map_or(Color::Default, |(_, color)| color)
@@ -1521,7 +1527,9 @@ impl KkPanel {
                 })
             })
             .when_some(icon, |item, icon| {
-                item.start_slot(Icon::new(icon).color(if warning {
+                item.start_slot(Icon::new(icon).color(if conflict {
+                    Color::Error
+                } else if warning {
                     Color::Warning
                 } else {
                     Color::Muted
@@ -1533,7 +1541,7 @@ impl KkPanel {
                         FileIcons::get_icon(Path::new(&file.file.path), cx)
                             .map(Icon::from_path)
                             .unwrap_or_else(|| Icon::new(IconName::File))
-                            .color(Color::Muted),
+                            .color(if conflict { Color::Error } else { Color::Muted }),
                     )
                 } else {
                     item
@@ -1568,7 +1576,7 @@ impl KkPanel {
                 item.child(
                     div()
                         .flex_shrink_0()
-                        .child(Icon::new(IconName::Warning).color(Color::Warning)),
+                        .child(Icon::new(IconName::Warning).color(Color::Error)),
                 )
             })
             .when_some(badge, |item, (badge, color)| {
