@@ -819,9 +819,10 @@ impl ToolbarItemView for QuickActionBar {
             && editor.buffer_kind(cx) == ItemBufferKind::Singleton
             && let Some(workspace) = self.workspace.upgrade()
         {
-            let available =
-                git_ui::KkBlameStatus::toolbar_available(&editor, workspace.read(cx), cx);
             self.kk_blame_probe = cx.spawn(async move |this, cx| {
+                let available = workspace.read_with(cx, |workspace, cx| {
+                    git_ui::KkBlameStatus::toolbar_available(&editor, workspace, cx)
+                });
                 let available = available.await;
                 this.update(cx, |this, cx| {
                     this.kk_blame_available = available;
