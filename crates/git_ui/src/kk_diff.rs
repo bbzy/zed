@@ -1,5 +1,5 @@
 use anyhow::{Context as _, Result, ensure};
-use buffer_diff::{BufferDiff, RestoreDiffOperations};
+use buffer_diff::{BufferDiff, BufferDiffSnapshot, RestoreDiffOperations};
 use db::kvp::KeyValueStore;
 use editor::items::{SerializedBufferContents, SerializedEditorState};
 use editor::{
@@ -33,6 +33,10 @@ use workspace::{
 pub(super) fn init(cx: &mut App) {
     workspace::register_serializable_item::<KkDiff>(cx);
     workspace::register_serializable_item::<super::kk_multi_diff::KkMultiDiff>(cx);
+
+    cx.on_action(|action: &CopyTabDiff, cx| {
+        cx.write_to_clipboard(ClipboardItem::new_string(action.text.clone()));
+    });
 }
 
 fn session_namespace(workspace_id: WorkspaceId) -> String {
@@ -114,6 +118,12 @@ actions!(
     ]
 );
 
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = kk_workbench, no_json, no_register)]
+pub(super) struct CopyTabDiff {
+    pub text: String,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 pub(super) struct DiffTarget {
     pub scope: DiffScope,
@@ -127,6 +137,10 @@ pub(super) struct DiffTarget {
 }
 
 impl DiffTarget {
+    pub(super) fn file_reference(&self, path: &str) -> String {
+        format!("{} ({})", path, self.copy_reference_label())
+    }
+
     pub(super) fn copy_reference_label(&self) -> String {
         if let Some(revision) = &self.revision {
             revision.change_id.clone()
@@ -228,32 +242,83 @@ struct DiffContents {
     revision: Option<Revision>,
 }
 
+pub(super) struct CopyReferenceFile {
+    buffer: language::BufferSnapshot,
+    diff: BufferDiffSnapshot,
+    path: String,
+    revision: String,
+}
+
+impl CopyReferenceFile {
+    fn contains_buffer(&self, identifier: language::BufferId) -> bool {
+        self.buffer.remote_id() == identifier || self.diff.base_text().remote_id() == identifier
+    }
+
+    fn target_lines(
+        &self,
+        identifier: language::BufferId,
+        mut range: std::ops::Range<Point>,
+    ) -> Option<(u32, u32)> {
+        let is_cursor = range.start == range.end;
+        let mut is_deleted_cursor = false;
+        if identifier != self.buffer.remote_id() {
+            let patch = self
+                .diff
+                .patch_for_base_text_range(range.start..=range.end, &self.buffer.text);
+            let mut end = patch.old_to_new(range.end);
+            let edit = patch.edit_for_old_position(range.end);
+            is_deleted_cursor =
+                is_cursor && edit.old.contains(&range.start) && edit.new.start == edit.new.end;
+            if !is_cursor {
+                // Selection ends are exclusive, even when an insertion has an empty base range.
+                if range.end == edit.old.start {
+                    end = edit.new.start;
+                } else if range.end < edit.old.end {
+                    end = edit.new.end;
+                }
+            }
+
+            range = patch.old_to_new(range.start)..end;
+        }
+
+        let maximum = self.buffer.max_point();
+        let line_count = maximum.row + u32::from(maximum.column > 0);
+        if line_count == 0 {
+            return None;
+        }
+
+        if is_cursor && !is_deleted_cursor {
+            // Keep the target's trailing empty line addressable for an ordinary cursor.
+            let line = (range.start.row + 1).min(maximum.row + 1);
+            return Some((line, line));
+        }
+
+        let begin = (range.start.row + 1).min(line_count);
+        let end = (range.end.row + u32::from(range.end.column > 0))
+            .max(begin)
+            .min(line_count);
+        Some((begin, end))
+    }
+
+    fn reference(&self, lines: Option<(u32, u32)>) -> String {
+        let lines = match lines {
+            Some((begin, end)) if begin == end => format!(":{begin}"),
+            Some((begin, end)) => format!(":{begin}~{end}"),
+            None => String::new(),
+        };
+        format!("{}{lines} ({})", self.path, self.revision)
+    }
+}
+
 pub(super) fn copy_selected_references(
     editor: Entity<Editor>,
-    files: &[(language::BufferId, String, String)],
+    files: &[CopyReferenceFile],
     cx: &mut App,
 ) {
     let references = editor.update(cx, |editor, cx| {
         let display = editor.display_snapshot(cx);
         let snapshot = display.buffer_snapshot();
         let mut references = Vec::new();
-        let mut append = |identifier, start: Point, end: Point| {
-            if let Some((_, path, revision)) =
-                files.iter().find(|(buffer, _, _)| *buffer == identifier)
-            {
-                let begin = start.row + 1;
-                let end = (end.row + u32::from(end.column > 0)).max(begin);
-                let lines = if begin == end {
-                    format!(":{begin}")
-                } else {
-                    format!(":{begin}~{end}")
-                };
-                let reference = format!("{path}{lines} ({revision})");
-                if !references.contains(&reference) {
-                    references.push(reference);
-                }
-            }
-        };
         let selections = editor.selections.all_adjusted(&display);
         let selected = selections
             .iter()
@@ -262,25 +327,58 @@ pub(super) fn copy_selected_references(
             .iter()
             .filter(|selection| selection.start != selection.end)
         {
+            let mut selected_files: Vec<(&CopyReferenceFile, Option<(u32, u32)>)> = Vec::new();
             for (buffer, range, _) in
                 snapshot.range_to_buffer_ranges_with_deleted_hunks(selection.range())
             {
                 if range.start != range.end {
-                    append(
-                        buffer.remote_id(),
-                        range.start.0.to_point(buffer),
-                        range.end.0.to_point(buffer),
+                    let identifier = buffer.remote_id();
+                    let Some(file) = files.iter().find(|file| file.contains_buffer(identifier))
+                    else {
+                        continue;
+                    };
+                    let lines = file.target_lines(
+                        identifier,
+                        range.start.0.to_point(buffer)..range.end.0.to_point(buffer),
                     );
+                    if let Some((_, previous)) = selected_files.iter_mut().find(|(previous, _)| {
+                        previous.buffer.remote_id() == file.buffer.remote_id()
+                    }) {
+                        if let (Some((begin, end)), Some((next_begin, next_end))) =
+                            (previous, lines)
+                        {
+                            *begin = (*begin).min(next_begin);
+                            *end = (*end).max(next_end);
+                        }
+                    } else {
+                        selected_files.push((file, lines));
+                    }
+                }
+            }
+
+            for (file, lines) in selected_files {
+                references.push(file.reference(lines));
+            }
+        }
+
+        if !selected {
+            let point = editor.selections.newest_adjusted(&display).head();
+            let position = snapshot.point_to_buffer_point(point).or_else(|| {
+                snapshot
+                    .anchor_to_buffer_anchor(snapshot.anchor_before(point))
+                    .map(|(anchor, buffer)| (buffer, anchor.to_point(buffer)))
+            });
+            if let Some((buffer, point)) = position {
+                if let Some(file) = files
+                    .iter()
+                    .find(|file| file.contains_buffer(buffer.remote_id()))
+                {
+                    references
+                        .push(file.reference(file.target_lines(buffer.remote_id(), point..point)));
                 }
             }
         }
-        if !selected {
-            if let Some((buffer, point)) =
-                snapshot.point_to_buffer_point(editor.selections.newest_adjusted(&display).head())
-            {
-                append(buffer.remote_id(), point, point);
-            }
-        }
+
         references.join("\n")
     });
     if !references.is_empty() {
@@ -1531,38 +1629,22 @@ impl KkDiff {
 
     pub(super) fn copy_reference(&self, include_selection: bool, cx: &mut App) {
         if include_selection {
-            let files = self.copy_reference_files(cx);
-            copy_selected_references(self.editor.read(cx).focused_editor().clone(), &files, cx);
+            let file = self.copy_reference_file(cx);
+            copy_selected_references(self.editor.read(cx).focused_editor().clone(), &[file], cx);
             return;
         }
-        cx.write_to_clipboard(ClipboardItem::new_string(format!(
-            "{} ({})",
-            self.identity.path,
-            self.target.copy_reference_label()
-        )));
+        cx.write_to_clipboard(ClipboardItem::new_string(
+            self.target.file_reference(&self.identity.path),
+        ));
     }
 
-    pub(super) fn copy_reference_files(
-        &self,
-        cx: &App,
-    ) -> Vec<(language::BufferId, String, String)> {
-        let revision = self.target.copy_reference_label();
-        vec![
-            (
-                self.buffer.read(cx).remote_id(),
-                self.file.path.clone(),
-                revision.clone(),
-            ),
-            (
-                self.diff.read(cx).base_text_buffer().read(cx).remote_id(),
-                self.file
-                    .renamed_from
-                    .as_ref()
-                    .unwrap_or(&self.file.path)
-                    .clone(),
-                revision,
-            ),
-        ]
+    pub(super) fn copy_reference_file(&self, cx: &App) -> CopyReferenceFile {
+        CopyReferenceFile {
+            buffer: self.buffer.read(cx).snapshot(),
+            diff: self.diff.read(cx).snapshot(cx),
+            path: self.file.path.clone(),
+            revision: self.target.copy_reference_label(),
+        }
     }
 
     pub(super) fn open_file_in_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2181,6 +2263,19 @@ impl Render for KkDiff {
 impl Item for KkDiff {
     type Event = EditorEvent;
 
+    fn tab_extra_context_menu_actions(
+        &self,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Vec<(SharedString, Box<dyn gpui::Action>)> {
+        vec![(
+            "KKW: Copy Diff".into(),
+            Box::new(CopyTabDiff {
+                text: self.target.file_reference(&self.identity.path),
+            }),
+        )]
+    }
+
     fn can_split(&self) -> bool {
         !self.identity.working_copy && !self.has_pending_classification()
     }
@@ -2787,6 +2882,253 @@ mod tests {
             workspace.update(cx, |workspace, cx| {
                 workspace.dismiss_notification(&notifications[0], cx)
             });
+        }
+    }
+
+    #[gpui::test]
+    async fn kk_copy_diff_uses_continuous_target_ranges(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/project", json!({})).await;
+        let project = Project::test(fs, [Path::new("/project")], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |view, _| view.workspace().clone());
+
+        for style in [DiffViewStyle::Unified, DiffViewStyle::Split] {
+            cx.update(|_, cx| {
+                cx.update_global::<SettingsStore, _>(|store, cx| {
+                    store.update_user_settings(cx, |settings| {
+                        settings.editor.diff_view_style = Some(style);
+                    });
+                });
+            });
+            for (original, modified, cases) in [
+                (
+                    "head\nold one\nold two\nmiddle\nremove\nend\n",
+                    "head\nnew\nmiddle\nend\n",
+                    vec![
+                        (vec![(0, 7)], vec![(0, 6)], ":1~4"),
+                        (vec![(1, 3)], vec![(1, 3)], ":2"),
+                        (vec![(3, 1)], vec![(3, 1)], ":2"),
+                        (vec![(5, 6)], vec![(4, 5)], ":4"),
+                        (vec![(5, 5)], vec![(4, 4)], ":4"),
+                        (vec![(0, 1)], vec![(0, 1)], ":1"),
+                        (vec![(0, 1), (6, 7)], vec![(0, 1), (5, 6)], ":1\n:4"),
+                    ],
+                ),
+                (
+                    "keep\nremoved\n",
+                    "keep\n",
+                    vec![
+                        (vec![(1, 2)], vec![(1, 2)], ":1"),
+                        (vec![(1, 1)], vec![(1, 1)], ":1"),
+                        (vec![(2, 2)], vec![(2, 2)], ":2"),
+                    ],
+                ),
+                (
+                    "one\ntwo\n",
+                    "one\ninserted\ntwo\n",
+                    vec![
+                        (vec![(0, 1)], vec![(0, 1)], ":1"),
+                        (vec![(2, 3)], vec![(1, 2)], ":3"),
+                        (vec![(0, 3)], vec![(0, 2)], ":1~3"),
+                        (vec![(2, 2)], vec![(1, 1)], ":3"),
+                        (vec![(3, 3)], vec![(2, 2)], ":4"),
+                    ],
+                ),
+                (
+                    "one\n",
+                    "one\ninserted\n",
+                    vec![(vec![(0, 1)], vec![(0, 1)], ":1")],
+                ),
+                (
+                    "two\n",
+                    "inserted\ntwo\n",
+                    vec![
+                        (vec![(1, 2)], vec![(0, 1)], ":2"),
+                        (vec![(1, 1)], vec![(0, 0)], ":2"),
+                    ],
+                ),
+                (
+                    "old\n",
+                    "first\nsecond\nthird\n",
+                    vec![(vec![(0, 1)], vec![(0, 1)], ":1~3")],
+                ),
+                (
+                    "old",
+                    "first\nsecond",
+                    vec![(vec![(0, 1)], vec![(0, 1)], ":1~2")],
+                ),
+                (
+                    "removed one\nremoved two\nkeep\nafter\n",
+                    "keep\nafter\n",
+                    vec![
+                        (vec![(0, 2)], vec![(0, 2)], ":1"),
+                        (vec![(2, 3)], vec![(2, 3)], ":1"),
+                    ],
+                ),
+                (
+                    "removed\n",
+                    "",
+                    vec![
+                        (vec![(0, 1)], vec![(0, 1)], ""),
+                        (vec![(0, 0)], vec![(0, 0)], ""),
+                    ],
+                ),
+            ] {
+                let buffer = cx.new(|cx| Buffer::local(modified, cx));
+                let base = Some(Arc::<str>::from(original));
+                let diff =
+                    cx.new(|cx| BufferDiff::new(&buffer.read(cx).snapshot().text, None, None, cx));
+                diff.update(cx, |diff, cx| {
+                    diff.set_base_text(base.clone(), buffer.read(cx).snapshot().text, cx)
+                })
+                .await;
+                let view = cx.new_window_entity(|window, cx| {
+                    KkDiff::new(
+                        DiffIdentity {
+                            root: "/project".into(),
+                            scope: "comparison".into(),
+                            path: "new.txt".into(),
+                            working_copy: false,
+                            presentation: DiffPresentation::Text,
+                        },
+                        DiffTarget {
+                            scope: DiffScope::Comparison {
+                                base: "a".into(),
+                                target: "b".into(),
+                            },
+                            identity: "comparison".into(),
+                            label: "a..b".into(),
+                            reference: "a..b".into(),
+                            comparison: None,
+                            revision: None,
+                            category: None,
+                        },
+                        ChangedFile {
+                            path: "new.txt".into(),
+                            change_type: if modified.is_empty() {
+                                ChangeKind::Deleted
+                            } else {
+                                ChangeKind::Renamed
+                            },
+                            renamed_from: Some("old.txt".into()),
+                            has_conflict: false,
+                        },
+                        buffer.clone(),
+                        diff,
+                        base,
+                        project.clone(),
+                        workspace.clone(),
+                        window,
+                        cx,
+                    )
+                });
+                workspace.update_in(cx, |workspace, window, cx| {
+                    workspace.add_item_to_active_pane(
+                        Box::new(view.clone()),
+                        None,
+                        true,
+                        window,
+                        cx,
+                    );
+                });
+                for full_file in [true, false] {
+                    view.update(cx, |view, cx| {
+                        view.controls.update(cx, |controls, cx| {
+                            if controls.showing_full_file != full_file {
+                                controls.toggle_full_file(cx);
+                            }
+                        });
+                    });
+                    cx.run_until_parked();
+                    let editor = view.read_with(cx, |view, cx| {
+                        let editor = view.editor.read(cx);
+                        editor.lhs_editor().unwrap_or(editor.rhs_editor()).clone()
+                    });
+                    for (unified, split, expected) in &cases {
+                        let ranges = if style == DiffViewStyle::Unified {
+                            unified
+                        } else {
+                            split
+                        };
+                        editor.update_in(cx, |editor, window, cx| {
+                            window.focus(&editor.focus_handle(cx), cx);
+                            editor.change_selections(
+                                SelectionEffects::no_scroll(),
+                                window,
+                                cx,
+                                |selections| {
+                                    selections.select_ranges(ranges.iter().map(|(start, end)| {
+                                        Point::new(*start, 0)..Point::new(*end, 0)
+                                    }));
+                                },
+                            );
+                        });
+                        cx.run_until_parked();
+                        cx.update(|_, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                "previous clipboard".into(),
+                            ));
+                        });
+                        assert_eq!(
+                            view.read_with(cx, |view, cx| view
+                                .editor
+                                .read(cx)
+                                .focused_editor()
+                                .clone()),
+                            editor,
+                            "{style:?}: copy uses the selected editor"
+                        );
+                        view.update(cx, |view, cx| view.copy_reference(true, cx));
+                        let expected = expected
+                            .split('\n')
+                            .map(|lines| format!("new.txt{lines} (a..b)"))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        assert_eq!(
+                            cx.update(|_, cx| cx
+                                .read_from_clipboard()
+                                .and_then(|item| item.text())),
+                            Some(expected),
+                            "{style:?}, full file: {full_file}, base: {original:?}, selection: {ranges:?}"
+                        );
+                    }
+
+                    if modified.is_empty() {
+                        view.update_in(cx, |view, window, cx| {
+                            let editor = view.editor.read(cx).rhs_editor().clone();
+                            editor.update(cx, |editor, cx| {
+                                window.focus(&editor.focus_handle(cx), cx);
+                                editor.change_selections(
+                                    SelectionEffects::no_scroll(),
+                                    window,
+                                    cx,
+                                    |selections| {
+                                        selections.select_ranges([Point::zero()..Point::zero()]);
+                                    },
+                                );
+                            });
+                        });
+                        cx.run_until_parked();
+                        view.update(cx, |view, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                "previous clipboard".into(),
+                            ));
+                            view.copy_reference(true, cx);
+                            assert_eq!(
+                                cx.read_from_clipboard().and_then(|item| item.text()),
+                                Some("new.txt (a..b)".into())
+                            );
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -3542,6 +3884,33 @@ mod tests {
         assert!(copy.read_with(cx, |view, cx| view.buffer.read(cx).language().is_none()));
     }
 
+    fn assert_tab_copy_diff(
+        item: &dyn workspace::ItemHandle,
+        expected: &str,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        let menu = cx.update(|window, cx| {
+            let actions = item.tab_extra_context_menu_actions(window, cx);
+            let (label, action) = actions
+                .into_iter()
+                .find(|(label, _)| label.as_ref() == "KKW: Copy Diff")
+                .expect("tab Copy Diff action");
+            let focus = item.item_focus_handle(cx);
+            ui::ContextMenu::build(window, cx, |menu, _, _| {
+                menu.action(label, action).context(focus)
+            })
+        });
+        menu.update_in(cx, |menu, window, cx| {
+            menu.select_first(&menu::SelectFirst, window, cx);
+            menu.confirm(&menu::Confirm, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
+            Some(expected.to_owned())
+        );
+    }
+
     fn install_diff_toolbars(
         workspace: &Entity<Workspace>,
         cx: &mut gpui::VisualTestContext,
@@ -3988,18 +4357,22 @@ mod tests {
             })
             .await
             .expect("second file buffer");
-        let references = vec![
-            (
-                buffer.read_with(cx, |buffer, _| buffer.remote_id()),
-                "one.txt".into(),
-                target.copy_reference_label(),
-            ),
-            (
-                second_buffer.read_with(cx, |buffer, _| buffer.remote_id()),
-                "two.txt".into(),
-                target.copy_reference_label(),
-            ),
-        ];
+        let references = editor.read_with(cx, |editor, cx| {
+            let multibuffer = editor.rhs_editor().read(cx).buffer().read(cx);
+            [(&buffer, "one.txt"), (&second_buffer, "two.txt")]
+                .into_iter()
+                .map(|(buffer, path)| {
+                    let buffer = buffer.read(cx).snapshot();
+                    let diff = multibuffer.diff_for(buffer.remote_id()).expect("file diff");
+                    CopyReferenceFile {
+                        buffer,
+                        diff: diff.read(cx).snapshot(cx),
+                        path: path.into(),
+                        revision: target.copy_reference_label(),
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
         for cross_file in [false, true] {
             editor.update_in(cx, |editor, window, cx| {
                 editor.rhs_editor().update(cx, |right, cx| {
@@ -4036,17 +4409,37 @@ mod tests {
             let copied = cx
                 .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
                 .expect("references");
-            assert!(copied.contains("two.txt:1 ("), "{copied}");
-            assert!(
-                copied.contains(if cross_file {
-                    "one.txt:71~80 ("
-                } else {
-                    "one.txt:71 ("
-                }),
-                "{copied}"
+            let first_reference = if cross_file {
+                "one.txt:71~80"
+            } else {
+                "one.txt:71"
+            };
+
+            assert_eq!(
+                copied,
+                format!(
+                    "{first_reference} ({})\ntwo.txt:1 ({})",
+                    target.copy_reference_label(),
+                    target.copy_reference_label(),
+                )
             );
-            assert_eq!(copied.lines().count(), 2, "{copied}");
         }
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let change_id = &target.revision.as_ref().expect("change revision").change_id;
+        assert_tab_copy_diff(&single, &format!("one.txt ({change_id})"), cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(workspace.activate_item(&single, true, true, window, cx));
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let expected = files
+            .iter()
+            .map(|file| format!("{} ({change_id})", file.path))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_tab_copy_diff(&multi, &expected, cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(workspace.activate_item(&multi, true, true, window, cx));
+        });
         assert_eq!(
             search_bar.update_in(cx, |search, window, cx| {
                 search.set_active_pane_item(Some(&multi), window, cx)
@@ -5476,7 +5869,7 @@ mod tests {
         view.update(cx, |view, cx| view.copy_reference(true, cx));
         assert_eq!(
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
-            Some("old file.txt:1 (kkkkkkkk)".into())
+            Some("file.txt:1~3 (kkkkkkkk)".into())
         );
         assert_eq!(
             view.update(cx, |view, cx| view.classification_ranges(cx))
@@ -5524,7 +5917,7 @@ mod tests {
             view.update(cx, |view, cx| view.copy_reference(true, cx));
             assert_eq!(
                 cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
-                Some("old file.txt:1 (kkkkkkkk)".into()),
+                Some("file.txt:1 (kkkkkkkk)".into()),
                 "navigation style: {style:?}"
             );
             assert_eq!(

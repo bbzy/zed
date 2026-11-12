@@ -686,7 +686,7 @@ impl KkMultiDiff {
         cx.notify();
     }
 
-    fn update_file_order(&mut self, cx: &mut Context<Self>) {
+    fn ordered_files(&self, cx: &App) -> Vec<ChangedFile> {
         let mut files = self.files.clone();
         for entry in &self.entries {
             let file = &entry.read(cx).file;
@@ -694,12 +694,23 @@ impl KkMultiDiff {
                 files.push(file.clone());
             }
         }
-        let ordered = if let Some(panel) = self.panel.as_ref().and_then(WeakEntity::upgrade) {
-            panel.read(cx).file_order().files(&files)
+
+        if let Some(panel) = self.panel.as_ref().and_then(WeakEntity::upgrade) {
+            panel
+                .read(cx)
+                .file_order()
+                .files(&files)
+                .into_iter()
+                .cloned()
+                .collect()
         } else {
-            files.iter().collect()
-        };
-        let buffers = ordered
+            files
+        }
+    }
+
+    fn update_file_order(&mut self, cx: &mut Context<Self>) {
+        let buffers = self
+            .ordered_files(cx)
             .into_iter()
             .filter_map(|file| {
                 self.entries
@@ -1013,7 +1024,7 @@ impl Render for KkMultiDiff {
                 let files = this
                     .entries
                     .iter()
-                    .flat_map(|entry| entry.read(cx).copy_reference_files(cx))
+                    .map(|entry| entry.read(cx).copy_reference_file(cx))
                     .collect::<Vec<_>>();
                 super::kk_diff::copy_selected_references(
                     this.editor.read(cx).focused_editor().clone(),
@@ -1080,6 +1091,24 @@ impl Render for KkMultiDiff {
 
 impl Item for KkMultiDiff {
     type Event = EditorEvent;
+
+    fn tab_extra_context_menu_actions(
+        &self,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<(SharedString, Box<dyn gpui::Action>)> {
+        let text = self
+            .ordered_files(cx)
+            .iter()
+            .map(|file| self.target.file_reference(&file.path))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        vec![(
+            "KKW: Copy Diff".into(),
+            Box::new(super::kk_diff::CopyTabDiff { text }),
+        )]
+    }
 
     fn can_split(&self) -> bool {
         !self.loading && self.error.is_none()
