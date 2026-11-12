@@ -22,6 +22,114 @@ pub(super) fn conflict_fixture(
 }
 
 #[test]
+fn conflict_restoration_preserves_other_paths_and_rejects_external_edits() -> Result<()> {
+    smol::block_on(async {
+        for deleted in [false, true] {
+            let path = "quoted [file].txt";
+            let fixture = conflict_fixture(b"base\r\n", b"left\r\n", b"right\r\n", path)?;
+            let repository = fixture.repository().await?;
+            let snapshot = repository.snapshot(true).await?;
+            let conflict = snapshot.file_conflict("@", path).await?;
+            let result = (!deleted).then_some(b"resolved\r\n".as_slice());
+            let publication = snapshot
+                .prepare_conflict_resolution(&conflict, &conflict.commit_id, result, Some(true))
+                .await?
+                .publish()
+                .await?;
+            let resolved_commit = publication
+                .snapshot
+                .exact_revision("@")
+                .await?
+                .full_commit_id;
+            fs::write(fixture.root().join("unselected.txt"), "later edit\n")?;
+            let current = repository.snapshot(true).await?;
+            let commit = current.exact_revision("@").await?.full_commit_id;
+            let restored = current
+                .prepare_conflict_restoration(&conflict, &commit, &resolved_commit)
+                .await?
+                .publish()
+                .await?
+                .snapshot;
+            assert_eq!(
+                restored.file_conflict("@", path).await?.inputs,
+                conflict.inputs
+            );
+            assert_eq!(
+                restored.file_conflict("@", path).await?.materialized,
+                conflict.materialized
+            );
+            assert_eq!(
+                fs::read(fixture.root().join("unselected.txt"))?,
+                b"later edit\n"
+            );
+            let commit = restored.exact_revision("@").await?.full_commit_id;
+            let resolved = restored
+                .prepare_conflict_resolution(&conflict, &commit, result, None)
+                .await?
+                .publish()
+                .await?
+                .snapshot;
+            let resolved_commit = resolved.exact_revision("@").await?.full_commit_id;
+            fs::write(fixture.root().join(path), "external edit\n")?;
+            let current = repository.snapshot(true).await?;
+            let commit = current.exact_revision("@").await?.full_commit_id;
+            let error = current
+                .prepare_conflict_restoration(&conflict, &commit, &resolved_commit)
+                .await
+                .err()
+                .context("external edit must be protected")?;
+            assert!(error.to_string().contains("outside this conflict editor"));
+            assert_eq!(fs::read(fixture.root().join(path))?, b"external edit\n");
+        }
+
+        Ok(())
+    })
+}
+
+#[test]
+fn conflict_restoration_in_ancestor_preserves_descendant_edits() -> Result<()> {
+    smol::block_on(async {
+        let fixture = conflict_fixture(b"base\n", b"left\n", b"right\n", "file.txt")?;
+        fs::write(
+            fixture.root().join("notes.txt"),
+            "notes added in conflicted change\n",
+        )?;
+        let repository = fixture.repository().await?;
+        let original = repository.snapshot(true).await?;
+        let conflict = original.file_conflict("@", "file.txt").await?;
+        let target = conflict.revset();
+        fixture.run(&["new", "-m", "descendant"])?;
+        let current = repository.snapshot(true).await?;
+        let resolved = current
+            .prepare_conflict_resolution(&conflict, &conflict.commit_id, Some(b"right\n"), None)
+            .await?
+            .publish()
+            .await?
+            .snapshot;
+        fs::write(fixture.root().join("unselected.txt"), "later edit\n")?;
+        let current = repository.snapshot(true).await?;
+        let resolved_commit = resolved.exact_revision(&target).await?.full_commit_id;
+        let commit = current.exact_revision(&target).await?.full_commit_id;
+        let restored = current
+            .prepare_conflict_restoration(&conflict, &commit, &resolved_commit)
+            .await?
+            .publish()
+            .await?
+            .snapshot;
+        assert_eq!(
+            restored.file_conflict(&target, "file.txt").await?.inputs,
+            conflict.inputs
+        );
+        assert_eq!(
+            fs::read(fixture.root().join("unselected.txt"))?,
+            b"later edit\n"
+        );
+        assert_eq!(restored.conflicted_paths("@").await?, ["file.txt"]);
+        Ok(())
+    })
+}
+
+#[test]
 fn conflict_parsers_preserve_literal_markers_and_missing_newlines() -> Result<()> {
     let first = "a".repeat(40);
     let second = "b".repeat(40);
@@ -331,6 +439,11 @@ fn conflict_draft_cross_input_edits_require_explicit_confirmation() -> Result<()
     assert_eq!(confirmation.edits[0].text, "manually merged\n");
     draft.accept(confirmation)?;
     assert_eq!(draft.editor_text(), text);
+    assert_eq!(draft.conflicts.len(), 1);
+    draft.update(&text, None, ConflictEditReason::Undo)?;
+    assert_eq!(draft.conflicts.len(), 2);
+    assert!(draft.conflicts[0].edited);
+    draft.update(&text, None, ConflictEditReason::Redo)?;
     assert_eq!(draft.conflicts.len(), 1);
     draft.update(&original, None, ConflictEditReason::Undo)?;
     assert_eq!(draft.conflicts.len(), 2);

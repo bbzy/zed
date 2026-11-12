@@ -295,6 +295,7 @@ pub(super) struct ConflictRequest {
     pub conflict: FileConflict,
     pub result: Option<Vec<u8>>,
     pub executable: Option<bool>,
+    pub restore: Option<Snapshot>,
 }
 
 impl ConflictRequest {
@@ -306,6 +307,20 @@ impl ConflictRequest {
             .exact_revision(&self.conflict.revset())
             .await?
             .full_commit_id;
+        if let Some(resolved) = self.restore {
+            let resolved_commit = resolved
+                .exact_revision(&self.conflict.revset())
+                .await?
+                .full_commit_id;
+            return self
+                .snapshot
+                .repository()
+                .snapshot_before_write()
+                .await?
+                .prepare_conflict_restoration(&self.conflict, &commit, &resolved_commit)
+                .await;
+        }
+
         self.snapshot
             .repository()
             .snapshot_before_write()

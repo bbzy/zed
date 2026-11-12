@@ -343,6 +343,11 @@ pub enum Mutation {
         result: Option<Vec<u8>>,
         executable: Option<bool>,
     },
+    RestoreConflict {
+        conflict: FileConflict,
+        acknowledged_commit: String,
+        resolved_commit: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1159,6 +1164,15 @@ impl Service {
                         result.as_deref(),
                         executable,
                     )
+                    .await?,
+            ),
+            Mutation::RestoreConflict {
+                conflict,
+                acknowledged_commit,
+                resolved_commit,
+            } => Prepared::Conflict(
+                snapshot
+                    .prepare_conflict_restoration(&conflict, &acknowledged_commit, &resolved_commit)
                     .await?,
             ),
         };

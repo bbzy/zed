@@ -1362,21 +1362,30 @@ impl KkPanel {
                 let close_root = root.clone();
                 buttons = buttons
                     .child(
-                        IconButton::new(
-                            SharedString::from(format!("close-{:?}", row.id)),
-                            IconName::Close,
-                        )
-                        .aria_label("Close Comparison")
-                        .when(self.context_menu.is_none(), |item| {
-                            item.tooltip(Tooltip::text("Close Comparison"))
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(index) = this.repositories.iter().position(|repository| {
-                                repository.snapshot.repository().root() == close_root
-                            }) {
-                                this.close_repository_comparison(index, cx);
-                            }
-                        })),
+                        div()
+                            .debug_selector(|| "kk-close-comparison".to_owned())
+                            .child(
+                                IconButton::new(
+                                    SharedString::from(format!("close-{:?}", row.id)),
+                                    IconName::Close,
+                                )
+                                .aria_label("Close Comparison")
+                                .when(self.context_menu.is_none(), |item| {
+                                    item.tooltip(Tooltip::text("Close Comparison"))
+                                })
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        if let Some(index) =
+                                            this.repositories.iter().position(|repository| {
+                                                repository.snapshot.repository().root()
+                                                    == close_root
+                                            })
+                                        {
+                                            this.close_repository_comparison(index, cx);
+                                        }
+                                    },
+                                )),
+                            ),
                     )
                     .child(
                         IconButton::new(
@@ -1837,6 +1846,7 @@ mod tests {
             },
             result: Some(b"resolved\n".to_vec()),
             executable: None,
+            restore: None,
         };
         let resolved = previews.conflict(&repository, &request);
         let rows = ListPreviews::default().files_with_mutations(&repository, &previews);
@@ -1968,6 +1978,7 @@ mod tests {
                     conflict,
                     result: Some(b"resolved contents\n".to_vec()),
                     executable: None,
+                    restore: None,
                 },
                 cx,
             );
@@ -2407,6 +2418,7 @@ mod tests {
                 conflict,
                 result: Some(b"resolved\n".to_vec()),
                 executable: None,
+                restore: None,
             },
         );
         let mut rows = ListPreviews::default().files(&repository);
@@ -3155,7 +3167,7 @@ mod tests {
         click_row_icon(
             &panel,
             &TreeRowId::Comparison(root.clone()),
-            "ICON-Close",
+            "kk-close-comparison",
             cx,
         );
         assert!(panel.read_with(cx, |panel, _| panel.repositories[0].comparison.is_none()));

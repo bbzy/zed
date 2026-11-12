@@ -224,7 +224,9 @@ impl remote::Transport for ServiceTransport {
                 ..
             }
             | Request::Prepare {
-                mutation: Mutation::ResolveConflict { conflict, .. },
+                mutation:
+                    Mutation::ResolveConflict { conflict, .. }
+                    | Mutation::RestoreConflict { conflict, .. },
                 ..
             } => {
                 assert_eq!(conflict.repository_root, self.remote_root);
@@ -914,7 +916,16 @@ fn remote_conflict_resolution_preserves_exact_inputs_and_opaque_results() -> Res
                 fs::read(fixture.root().join("unselected.txt"))?,
                 b"unchanged\n"
             );
-            fixture.run(&["undo"])?;
+            let resolved_commit = publication
+                .snapshot
+                .exact_revision("@")
+                .await?
+                .full_commit_id;
+            let prepared = publication
+                .snapshot
+                .prepare_conflict_restoration(&conflict, &resolved_commit, &resolved_commit)
+                .await?;
+            prepared.publish().await?;
             assert_eq!(
                 repository
                     .snapshot(false)

@@ -2683,11 +2683,17 @@ impl KkPanel {
 
         let (completion, completed) = futures::channel::oneshot::channel();
         self.pending_writes += 1;
-        self.pending_status = "Applying resolution";
+        self.pending_status = if request.restore.is_some() {
+            "Undoing resolution"
+        } else {
+            "Applying resolution"
+        };
         let preview_id = self
             .repositories
             .iter()
-            .find(|repository| repository.snapshot.repository().root() == root)
+            .find(|repository| {
+                request.restore.is_none() && repository.snapshot.repository().root() == root
+            })
             .map(|repository| self.mutation_previews.conflict(repository, &request));
         let start = self
             .write_queues

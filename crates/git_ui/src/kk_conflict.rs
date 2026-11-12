@@ -67,6 +67,7 @@ pub(super) struct KkConflict {
     pending_reason: ConflictEditReason,
     update_scheduled: bool,
     applying: bool,
+    history_changed: bool,
     error: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
@@ -166,6 +167,7 @@ impl KkConflict {
                     snapshot,
                     result: input.id.as_ref().map(|_| input.bytes.clone()),
                     executable: Some(input.executable),
+                    restore: None,
                     conflict,
                 };
                 panel
@@ -334,11 +336,13 @@ impl KkConflict {
                     EditorEvent::TransactionUndone { transaction_id } => {
                         this.undone.insert(*transaction_id);
                         this.pending_reason = ConflictEditReason::Undo;
+                        this.history_changed = true;
                     }
                     EditorEvent::Edited { transaction_id }
                         if this.undone.remove(transaction_id) =>
                     {
                         this.pending_reason = ConflictEditReason::Redo;
+                        this.history_changed = true;
                     }
                     _ => {}
                 }
@@ -357,6 +361,9 @@ impl KkConflict {
                             std::mem::replace(&mut this.pending_reason, ConflictEditReason::Edit);
                         if let Err(error) = this.synchronize(reason, cx) {
                             this.error = Some(format!("{error:#}"));
+                            this.history_changed = false;
+                        } else {
+                            this.reconcile_history(window, cx);
                         }
 
                         this.refresh_blocks(window, cx);
@@ -389,6 +396,7 @@ impl KkConflict {
             pending_reason: ConflictEditReason::Edit,
             update_scheduled: false,
             applying: false,
+            history_changed: false,
             error: None,
             _subscriptions: vec![subscription],
         }
@@ -558,6 +566,81 @@ impl KkConflict {
         }
     }
 
+    fn reconcile_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.applying || !self.history_changed {
+            return;
+        }
+
+        self.history_changed = false;
+        if self.draft.applied_digest.is_none() {
+            self.apply_completed(window, cx);
+            return;
+        }
+
+        if self.draft.conflicts.is_empty() {
+            return;
+        }
+
+        let Some(snapshot) = self.snapshot.clone() else {
+            self.error = Some(
+                "The applied resolution snapshot is unavailable. Your draft is retained.".into(),
+            );
+            return;
+        };
+        let Some(panel) = self
+            .panel
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
+            .or_else(|| self.workspace.upgrade()?.read(cx).panel::<KkPanel>(cx))
+        else {
+            self.error = Some("KK Workbench is unavailable. Your draft is retained.".into());
+            return;
+        };
+        let request = ConflictRequest {
+            snapshot: snapshot.clone(),
+            conflict: self.draft.conflict.clone(),
+            result: None,
+            executable: None,
+            restore: Some(snapshot),
+        };
+        self.applying = true;
+        self.error = None;
+        let write = panel.update(cx, |panel, cx| panel.resolve_conflict(request, cx));
+        let resolution_owner = cx.entity();
+        cx.spawn_in(window, async move |this, cx| {
+            let _resolution_owner = resolution_owner;
+            let result = async {
+                let snapshot = write.await?;
+                this.update(cx, |this, cx| {
+                    this.operation = snapshot.operation().to_owned();
+                    this.snapshot = Some(snapshot);
+                    this.draft.applied_digest = None;
+                    this.draft.applied_deleted = false;
+                    this.persist(false, cx)
+                })?
+                .await
+            }
+            .await;
+            this.update_in(cx, |this, window, cx| {
+                this.applying = false;
+                match result {
+                    Ok(()) => this.reconcile_history(window, cx),
+                    Err(error) => {
+                        this.history_changed = false;
+                        this.error = Some(format!(
+                            "Could not undo the resolution. Your draft is retained. {error:#}"
+                        ));
+                    }
+                }
+
+                this.refresh_blocks(window, cx);
+                cx.notify();
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
     fn apply(&mut self, deleted: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.applying || self.draft.applied_digest.is_some() {
             return;
@@ -572,6 +655,10 @@ impl KkConflict {
             let _resolution_owner = resolution_owner;
             let result = async {
                 saved.await?;
+                if this.read_with(cx, |this, _| !deleted && !this.draft.conflicts.is_empty())? {
+                    return Ok(());
+                }
+
                 let (submitted, write) = this.update(cx, |this, cx| {
                     this.synchronize(ConflictEditReason::Edit, cx)?;
                     ensure!(
@@ -600,6 +687,7 @@ impl KkConflict {
                         conflict: this.draft.conflict.clone(),
                         result: (!deleted).then(|| submitted.as_bytes().to_vec()),
                         executable: None,
+                        restore: None,
                     };
                     let write = panel.update(cx, |panel, cx| panel.resolve_conflict(request, cx));
                     anyhow::Ok((submitted, write))
@@ -617,9 +705,12 @@ impl KkConflict {
             this.update_in(cx, |this, window, cx| {
                 this.applying = false;
                 if let Err(error) = result {
+                    this.history_changed = false;
                     this.error = Some(format!(
                         "Could not apply the resolution. Your draft is retained. {error:#}"
                     ));
+                } else {
+                    this.reconcile_history(window, cx);
                 }
 
                 this.refresh_blocks(window, cx);
@@ -656,25 +747,42 @@ impl KkConflict {
                     })
                     .collect::<Vec<_>>();
                 editor.unfold_ranges(&ranges, true, false, cx);
-                if next.editor_text() != self.draft.editor_text() {
-                    editor.finalize_last_transaction(cx);
-                    editor.transact(window, cx, |editor, _, cx| {
-                        editor.buffer().update(cx, |buffer, cx| {
+                editor.finalize_last_transaction(cx);
+                // Confirming edited text must be undoable even when its bytes stay the same.
+                editor.transact(window, cx, |editor, _, cx| {
+                    editor.buffer().update(cx, |buffer, cx| {
+                        if edits
+                            .iter()
+                            .all(|edit| edit.range.is_empty() && edit.text.is_empty())
+                        {
+                            // Empty edits are discarded, so retain a net-zero transaction for the metadata.
                             buffer.edit(
-                                edits.into_iter().map(|edit| {
-                                    (
-                                        MultiBufferOffset(edit.range.start)
-                                            ..MultiBufferOffset(edit.range.end),
-                                        edit.text,
-                                    )
-                                }),
+                                [(MultiBufferOffset(0)..MultiBufferOffset(0), "\n")],
                                 None,
                                 cx,
-                            )
-                        });
+                            );
+                            buffer.edit(
+                                [(MultiBufferOffset(0)..MultiBufferOffset(1), "")],
+                                None,
+                                cx,
+                            );
+                            return;
+                        }
+
+                        buffer.edit(
+                            edits.into_iter().map(|edit| {
+                                (
+                                    MultiBufferOffset(edit.range.start)
+                                        ..MultiBufferOffset(edit.range.end),
+                                    edit.text,
+                                )
+                            }),
+                            None,
+                            cx,
+                        );
                     });
-                    editor.finalize_last_transaction(cx);
-                }
+                });
+                editor.finalize_last_transaction(cx);
             });
             self.draft = next;
             anyhow::Ok(())
@@ -687,6 +795,7 @@ impl KkConflict {
         }
 
         self.refresh_blocks(window, cx);
+        self.editor.focus_handle(cx).focus(window, cx);
         cx.emit(EditorEvent::DirtyChanged);
         cx.notify();
     }
@@ -1240,7 +1349,8 @@ impl Render for KkConflict {
                             Button::new("retry-conflict", "Retry")
                                 .disabled(self.applying)
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.apply_completed(window, cx)
+                                    this.history_changed = true;
+                                    this.reconcile_history(window, cx);
                                 })),
                         ),
                 )
@@ -2434,6 +2544,62 @@ mod tests {
             published_operation
         );
 
+        cx.update(|_, cx| {
+            cx.bind_keys([
+                gpui::KeyBinding::new("cmd-z", editor::actions::Undo, Some("Editor")),
+                gpui::KeyBinding::new("cmd-shift-z", editor::actions::Redo, Some("Editor")),
+            ]);
+        });
+        cx.simulate_keystrokes("cmd-z");
+        cx.condition(&mutable, |view, _| !view.applying).await;
+        mutable.read_with(cx, |view, _| {
+            assert!(view.error.is_none(), "{:?}", view.error);
+            assert!(!view.draft.conflicts.is_empty());
+            assert!(view.draft.applied_digest.is_none());
+        });
+        let restored_snapshot = repository.snapshot(false).await?;
+        let restored = restored_snapshot.file_conflict("@", "file.txt").await?;
+        let expected = snapshot.file_conflict(&revision, "file.txt").await?;
+        assert_eq!(
+            restored
+                .inputs
+                .iter()
+                .map(|input| (
+                    input.role,
+                    input.index,
+                    &input.id,
+                    input.executable,
+                    &input.bytes
+                ))
+                .collect::<Vec<_>>(),
+            expected
+                .inputs
+                .iter()
+                .map(|input| (
+                    input.role,
+                    input.index,
+                    &input.id,
+                    input.executable,
+                    &input.bytes
+                ))
+                .collect::<Vec<_>>(),
+        );
+        assert!(std::fs::read_to_string(fixture.root.join("file.txt"))?.contains("<<<<<<<"));
+        assert_eq!(
+            std::fs::read(fixture.root.join("notes.txt"))?,
+            b"new notes\noriginal notes\n"
+        );
+        cx.simulate_keystrokes("cmd-shift-z");
+        cx.condition(&mutable, |view, _| !view.applying).await;
+        mutable.read_with(cx, |view, _| {
+            assert!(view.error.is_none(), "{:?}", view.error);
+            assert!(view.draft.applied_digest.is_some());
+        });
+        assert_eq!(
+            std::fs::read(fixture.root.join("file.txt"))?,
+            submitted.as_bytes()
+        );
+
         mutable.update(cx, |view, cx| {
             view.buffer.update(cx, |buffer, cx| {
                 buffer.edit([(0..0, "newer result\n")], None, cx)
@@ -2839,14 +3005,21 @@ mod tests {
         cx.update(|cx| {
             let settings = SettingsStore::test(cx);
             cx.set_global(settings);
+            cx.bind_keys([
+                gpui::KeyBinding::new("cmd-z", editor::actions::Undo, Some("Editor")),
+                gpui::KeyBinding::new("cmd-shift-z", editor::actions::Redo, Some("Editor")),
+            ]);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
         });
         let root = snapshot.repository().root().to_owned();
         let workspace_contents =
             std::fs::read(root.join("file.txt")).expect("initial workspace conflict");
         let fs = FakeFs::new(cx.executor());
-        fs.insert_tree(&root, serde_json::json!({"file.txt": "workspace contents"}))
-            .await;
+        fs.insert_tree(
+            &root,
+            serde_json::json!({"file.txt": "workspace contents", "notes.txt": "notes\n"}),
+        )
+        .await;
         let project = Project::test(fs, [root.as_path()], cx).await;
         let (multi_workspace, cx) =
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
@@ -2898,6 +3071,9 @@ mod tests {
             assert!(!comparison.is_dirty(cx));
             assert!(comparison.rhs_editor().read(cx).read_only(cx));
         });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activate_item(&view, true, true, window, cx);
+        });
         view.update_in(cx, |view, window, cx| {
             view.refresh_blocks(window, cx);
             assert_eq!(view.blocks.len(), 3);
@@ -2915,19 +3091,14 @@ mod tests {
         cx.run_until_parked();
         let accepted = buffer.read_with(cx, |buffer, _| buffer.text());
         assert!(!accepted.contains("<<<<<<<"));
-        let editor = view.read_with(cx, |view, _| view.editor.clone());
-        editor.update_in(cx, |editor, window, cx| {
-            editor.undo(&editor::actions::Undo, window, cx)
-        });
+        cx.simulate_keystrokes("cmd-z");
         cx.run_until_parked();
         view.read_with(cx, |view, _| {
             assert_eq!(view.draft.conflicts.len(), 1);
             assert_eq!(view.draft.editor_text(), initial);
             assert!(!view.draft.conflicts[0].edited);
         });
-        editor.update_in(cx, |editor, window, cx| {
-            editor.redo(&editor::actions::Redo, window, cx)
-        });
+        cx.simulate_keystrokes("cmd-shift-z");
         cx.run_until_parked();
         view.read_with(cx, |view, _| assert!(view.draft.conflicts.is_empty()));
         view.update_in(cx, |view, window, cx| {
@@ -3016,6 +3187,19 @@ mod tests {
                 cx,
             );
         });
+        assert!(mutable.read_with(cx, |view, _| view.applying));
+        cx.simulate_keystrokes("cmd-z");
+        cx.condition(&mutable, |view, _| !view.applying).await;
+        mutable.read_with(cx, |view, _| {
+            assert!(view.error.is_none(), "{:?}", view.error);
+            assert!(!view.draft.conflicts.is_empty());
+            assert!(view.draft.applied_digest.is_none());
+        });
+        assert_eq!(
+            std::fs::read(root.join("file.txt")).expect("undo while applying"),
+            workspace_contents
+        );
+        cx.simulate_keystrokes("cmd-shift-z");
         cx.condition(&mutable, |view, _| !view.applying).await;
         mutable.read_with(cx, |view, _| {
             assert!(view.error.is_none(), "{:?}", view.error);
@@ -3037,6 +3221,149 @@ mod tests {
             !std::fs::read_to_string(root.join("file.txt"))
                 .expect("resolved working file")
                 .contains("<<<<<<<")
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+        });
+        mutable.update(cx, |view, _| view.panel = None);
+        let resolved = std::fs::read(root.join("file.txt")).expect("applied bytes");
+        for _ in 0..2 {
+            cx.simulate_keystrokes("cmd-z");
+            cx.condition(&mutable, |view, _| !view.applying).await;
+            mutable.read_with(cx, |view, _| {
+                assert!(view.error.is_none(), "{:?}", view.error);
+                assert!(!view.draft.conflicts.is_empty());
+                assert!(view.draft.applied_digest.is_none());
+            });
+            assert_eq!(
+                std::fs::read(root.join("file.txt")).expect("restored conflict"),
+                workspace_contents
+            );
+            cx.simulate_keystrokes("cmd-shift-z");
+            cx.condition(&mutable, |view, _| !view.applying).await;
+            mutable.read_with(cx, |view, _| {
+                assert!(view.error.is_none(), "{:?}", view.error);
+                assert!(view.draft.conflicts.is_empty());
+                assert!(view.draft.applied_digest.is_some());
+            });
+            assert_eq!(
+                std::fs::read(root.join("file.txt")).expect("redone bytes"),
+                resolved
+            );
+        }
+        cx.simulate_keystrokes("cmd-z cmd-shift-z cmd-z");
+        cx.condition(&mutable, |view, _| !view.applying).await;
+        mutable.read_with(cx, |view, _| {
+            assert!(view.error.is_none(), "{:?}", view.error);
+            assert!(!view.draft.conflicts.is_empty());
+            assert!(view.draft.applied_digest.is_none());
+        });
+        assert_eq!(
+            std::fs::read(root.join("file.txt")).expect("final conflict"),
+            workspace_contents
+        );
+        for manual_result in ["manually merged\n", ""] {
+            let expected_result = manual_result.replace('\n', "\r\n");
+            if mutable.read_with(cx, |view, _| view.draft.applied_digest.is_some()) {
+                cx.simulate_keystrokes("cmd-z");
+                cx.condition(&mutable, |view, _| !view.applying).await;
+            }
+
+            mutable.update_in(cx, |view, window, cx| {
+                view.editor.update(cx, |editor, cx| {
+                    editor.finalize_last_transaction(cx);
+                    editor.transact(window, cx, |editor, _, cx| {
+                        editor.buffer().update(cx, |buffer, cx| {
+                            let length = buffer.read(cx).len();
+                            buffer.edit([(MultiBufferOffset(0)..length, manual_result)], None, cx);
+                        });
+                    });
+                    editor.finalize_last_transaction(cx);
+                });
+            });
+            cx.run_until_parked();
+            mutable.update_in(cx, |view, window, cx| {
+                assert!(view.draft.conflicts[0].edited);
+                let start = view.draft.conflicts[0].range.start;
+                view.accept(vec![start], ConflictChoice::Edited, window, cx);
+            });
+            cx.condition(&mutable, |view, _| !view.applying).await;
+            assert_eq!(
+                std::fs::read(root.join("file.txt")).expect("manual result"),
+                expected_result.as_bytes()
+            );
+            cx.simulate_keystrokes("cmd-z");
+            cx.condition(&mutable, |view, _| !view.applying).await;
+            mutable.read_with(cx, |view, _| {
+                assert!(view.error.is_none(), "{:?}", view.error);
+                assert_eq!(view.draft.editor_text(), manual_result);
+                assert_eq!(view.draft.conflicts.len(), 1);
+                assert!(view.draft.conflicts[0].edited);
+                assert!(view.draft.applied_digest.is_none());
+            });
+            assert_eq!(
+                std::fs::read(root.join("file.txt")).expect("manual undo conflict"),
+                workspace_contents
+            );
+            cx.simulate_keystrokes("cmd-shift-z");
+            cx.condition(&mutable, |view, _| !view.applying).await;
+            mutable.read_with(cx, |view, _| {
+                assert!(view.error.is_none(), "{:?}", view.error);
+                assert!(view.draft.conflicts.is_empty());
+                assert!(view.draft.applied_digest.is_some());
+            });
+            assert_eq!(
+                std::fs::read(root.join("file.txt")).expect("manual redo result"),
+                expected_result.as_bytes()
+            );
+        }
+        let notes_path = project
+            .read_with(cx, |project, cx| {
+                project.find_project_path(&root.join("notes.txt"), cx)
+            })
+            .expect("notes path");
+        let notes = project
+            .update(cx, |project, cx| project.open_buffer(notes_path, cx))
+            .await
+            .expect("notes buffer");
+        notes.update(cx, |buffer, cx| {
+            buffer.edit([(0..0, "unsaved ")], None, cx);
+        });
+        cx.simulate_keystrokes("cmd-z");
+        cx.condition(&mutable, |view, _| !view.applying).await;
+        mutable.read_with(cx, |view, _| {
+            assert!(
+                view.error
+                    .as_ref()
+                    .is_some_and(|error| error.contains("notes.txt")),
+                "{:?}",
+                view.error
+            );
+            assert!(!view.draft.conflicts.is_empty());
+            assert!(view.draft.applied_digest.is_some());
+        });
+        assert!(
+            std::fs::read(root.join("file.txt"))
+                .expect("failed undo keeps applied file")
+                .is_empty()
+        );
+        project
+            .update(cx, |project, cx| project.save_buffer(notes, cx))
+            .await
+            .expect("save blocking notes");
+        mutable.update_in(cx, |view, window, cx| {
+            view.history_changed = true;
+            view.reconcile_history(window, cx);
+        });
+        cx.condition(&mutable, |view, _| !view.applying).await;
+        mutable.read_with(cx, |view, _| {
+            assert!(view.error.is_none(), "{:?}", view.error);
+            assert!(!view.draft.conflicts.is_empty());
+            assert!(view.draft.applied_digest.is_none());
+        });
+        assert_eq!(
+            std::fs::read(root.join("file.txt")).expect("retry restores conflict"),
+            workspace_contents
         );
         view.read_with(cx, |view, _| {
             assert!(view.draft.is_dirty());

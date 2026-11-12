@@ -175,7 +175,7 @@ impl ConflictDraft {
     ) -> Result<()> {
         let next = normalize_conflict_text(next);
         let previous = self.editor_text();
-        if previous == next {
+        if previous == next && reason == ConflictEditReason::Edit {
             return Ok(());
         }
 
@@ -201,6 +201,10 @@ impl ConflictDraft {
             self.conflicts = self.history[index].conflicts.clone();
             self.cursor = index;
             self.text = raw;
+            return Ok(());
+        }
+
+        if previous == next {
             return Ok(());
         }
 

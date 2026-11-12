@@ -157,6 +157,110 @@ impl PreparedConflictResolution {
 }
 
 impl Snapshot {
+    pub async fn prepare_conflict_restoration(
+        &self,
+        conflict: &FileConflict,
+        acknowledged_commit: &str,
+        resolved_commit: &str,
+    ) -> Result<PreparedConflictResolution> {
+        if let Some(remote) = self.repository().remote() {
+            let prepared = remote
+                .prepare(
+                    self,
+                    crate::remote::Mutation::RestoreConflict {
+                        conflict: conflict.clone(),
+                        acknowledged_commit: acknowledged_commit.into(),
+                        resolved_commit: resolved_commit.into(),
+                    },
+                )
+                .await?
+                .context("Missing remote conflict restoration")?;
+            return Ok(PreparedConflictResolution {
+                transaction: crate::transaction::PreparedTransaction::Remote(prepared),
+                target: conflict.revset(),
+            });
+        }
+
+        validate_conflict_path(&conflict.path)?;
+        ensure!(
+            self.repository().root() == conflict.repository_root,
+            "The selected repository changed"
+        );
+        ensure!(!conflict.immutable, "This change is immutable");
+        let mut transaction = Transaction::begin(self).await?;
+        let target = conflict.revset();
+        let current = self.exact_revision(&target).await?;
+        ensure!(
+            current.full_commit_id == acknowledged_commit,
+            "The revision changed while undo was pending. Your draft is retained."
+        );
+        ensure!(
+            self.diff(
+                &DiffScope::Comparison {
+                    base: resolved_commit.into(),
+                    target: current.full_commit_id.clone(),
+                },
+                Some(&conflict.path)
+            )
+            .await?
+            .is_empty(),
+            "The resolved file changed outside this conflict editor. Your draft is retained; nothing was overwritten."
+        );
+        ensure!(
+            self.snapshot_conflict_content(&conflict.commit_id, &conflict.path)
+                .await?
+                == conflict.materialized,
+            "The original conflict no longer matches this draft"
+        );
+        // A path-limited restore can reorder conflict sides when a side equals the resolved file.
+        // Start with the original tree, then put back every unselected path before publishing.
+        transaction
+            .prepare(&["restore", "--from", &conflict.commit_id, "--into", &target])
+            .await?;
+        transaction
+            .prepare(&[
+                "restore",
+                "--from",
+                &current.full_commit_id,
+                "--into",
+                &target,
+                "--",
+                &format!("~({})", literal_fileset(&conflict.path)?),
+            ])
+            .await?;
+        let prepared = transaction.snapshot();
+        let changed = prepared
+            .changed_files(&DiffScope::Comparison {
+                base: current.full_commit_id,
+                target: target.clone(),
+            })
+            .await?;
+        ensure!(
+            changed
+                .iter()
+                .all(|file| file.path == conflict.path && file.renamed_from.is_none()),
+            "Conflict undo changed an unexpected path. Nothing was published."
+        );
+        let restoration_diff = prepared
+            .diff(
+                &DiffScope::Comparison {
+                    base: conflict.commit_id.clone(),
+                    target: target.clone(),
+                },
+                Some(&conflict.path),
+            )
+            .await?;
+        ensure!(
+            restoration_diff.is_empty(),
+            "Conflict undo did not restore the original conflict. Nothing was published."
+        );
+
+        Ok(PreparedConflictResolution {
+            transaction: transaction.into(),
+            target,
+        })
+    }
+
     pub async fn conflicted_paths(&self, revision: &str) -> Result<Vec<String>> {
         if let Some(remote) = self.repository().remote() {
             return remote
