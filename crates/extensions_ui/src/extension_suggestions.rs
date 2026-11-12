@@ -1,11 +1,11 @@
-use std::sync::Arc;
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 use db::kvp::KeyValueStore;
-use editor::Editor;
+use editor::{Editor, EditorEvent, SplittableEditor};
 use extension_host::{ExtensionSettings, ExtensionStore};
 use extension_suggest::SuggestedExtension;
-use gpui::{App, AppContext as _, Context, Entity, SharedString};
-use language::{Buffer, PLAIN_TEXT};
+use gpui::{App, AppContext as _, Context, Entity, EntityId, SharedString};
+use language::{Buffer, LanguageName, PLAIN_TEXT};
 use markdown::{Markdown, MarkdownElement};
 use project::lsp_store::LspStoreEvent;
 use settings::Settings as _;
@@ -14,29 +14,65 @@ use util::ResultExt;
 use workspace::notifications::{
     NotificationId, markdown_style, simple_message_notification::MessageNotification,
 };
-use workspace::{AppState, Event as WorkspaceEvent, Workspace};
+use workspace::{AppState, Event as WorkspaceEvent, Workspace, item::ItemHandle};
 
 struct ExtensionSuggestionNotification;
+
+#[derive(Default)]
+struct SuggestionState {
+    pending: bool,
+    candidates: HashMap<EntityId, SuggestionCandidate>,
+}
+
+#[derive(PartialEq, Eq)]
+struct SuggestionCandidate {
+    buffer_id: EntityId,
+    language_name: Option<LanguageName>,
+    file_path: Option<String>,
+}
 
 pub(crate) fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
         if window.is_none() {
             return;
         }
+        let state = Rc::new(RefCell::new(SuggestionState::default()));
         let lsp_store = workspace.project().read(cx).lsp_store();
-        cx.subscribe(&lsp_store, |workspace, _, event, cx| {
-            if let LspStoreEvent::LanguageDetected { buffer, .. } = event {
-                suggest_for_buffer(workspace, buffer.clone(), cx);
+        cx.subscribe(&lsp_store, {
+            let state = state.clone();
+            move |_, _, event, cx| {
+                if let LspStoreEvent::LanguageDetected { .. } = event {
+                    schedule_suggestions(&state, cx);
+                }
             }
         })
         .detach();
-        cx.subscribe_self(|workspace, event, cx| {
-            if let WorkspaceEvent::ItemAdded { item } = event
-                && let Some(editor) = item.downcast::<Editor>()
-                && let Some(buffer) = editor.read(cx).buffer().read(cx).as_singleton()
-            {
-                suggest_for_buffer(workspace, buffer, cx);
+        let mut subscriptions = HashMap::new();
+        cx.subscribe_self(move |_, event, cx| match event {
+            WorkspaceEvent::ItemAdded { item } => {
+                subscriptions.entry(item.item_id()).or_insert_with(|| {
+                    let state = state.clone();
+                    if let Some(editor) = item.act_as::<SplittableEditor>(cx) {
+                        Some(cx.subscribe(&editor, move |_, _, event, cx| {
+                            on_editor_event(event, &state, cx);
+                        }))
+                    } else {
+                        item.act_as::<Editor>(cx).map(|editor| {
+                            cx.subscribe(&editor, move |_, _, event, cx| {
+                                on_editor_event(event, &state, cx);
+                            })
+                        })
+                    }
+                });
+                schedule_suggestions(&state, cx);
             }
+            WorkspaceEvent::ItemRemoved { item_id } => {
+                subscriptions.remove(item_id);
+                state.borrow_mut().candidates.remove(item_id);
+                schedule_suggestions(&state, cx);
+            }
+            WorkspaceEvent::ActiveItemChanged => schedule_suggestions(&state, cx),
+            _ => {}
         })
         .detach();
         cx.subscribe(
@@ -58,6 +94,111 @@ pub(crate) fn init(cx: &mut App) {
         .detach();
     })
     .detach();
+}
+
+fn on_editor_event(
+    event: &EditorEvent,
+    state: &Rc<RefCell<SuggestionState>>,
+    cx: &mut Context<Workspace>,
+) {
+    if matches!(
+        event,
+        EditorEvent::SelectionsChanged { .. }
+            | EditorEvent::BufferRangesUpdated { .. }
+            | EditorEvent::BuffersRemoved { .. }
+            | EditorEvent::FileHandleChanged
+            | EditorEvent::Reparsed(_)
+            | EditorEvent::Focused
+            | EditorEvent::FocusedIn
+    ) {
+        schedule_suggestions(state, cx);
+    }
+}
+
+fn schedule_suggestions(state: &Rc<RefCell<SuggestionState>>, cx: &mut Context<Workspace>) {
+    if state.borrow().pending {
+        return;
+    }
+
+    state.borrow_mut().pending = true;
+    let state = state.clone();
+    let workspace = cx.weak_entity();
+    // Diff events can arrive before the selection and split focus have settled.
+    cx.defer(move |cx| {
+        state.borrow_mut().pending = false;
+        workspace
+            .update(cx, |workspace, cx| {
+                let buffers = active_buffers(workspace, cx);
+                let candidates = {
+                    let mut state = state.borrow_mut();
+                    state.candidates.retain(|item_id, _| {
+                        buffers
+                            .iter()
+                            .any(|(active_item, _)| active_item == item_id)
+                    });
+                    buffers
+                        .into_iter()
+                        .filter_map(|(item_id, buffer)| {
+                            let candidate = {
+                                let buffer_state = buffer.read(cx);
+                                SuggestionCandidate {
+                                    buffer_id: buffer.entity_id(),
+                                    language_name: buffer_state
+                                        .language()
+                                        .map(|language| language.name()),
+                                    file_path: buffer_state
+                                        .file()
+                                        .map(|file| file.path().as_unix_str().to_owned()),
+                                }
+                            };
+                            if state.candidates.get(&item_id) == Some(&candidate) {
+                                return None;
+                            }
+
+                            state.candidates.insert(item_id, candidate);
+                            Some(buffer)
+                        })
+                        .collect::<Vec<_>>()
+                };
+                for buffer in candidates {
+                    suggest_for_buffer(workspace, buffer, cx);
+                }
+            })
+            .ok();
+    });
+}
+
+fn active_buffers(workspace: &Workspace, cx: &App) -> Vec<(EntityId, Entity<Buffer>)> {
+    workspace
+        .panes()
+        .iter()
+        .filter_map(|pane| {
+            let item = pane.read(cx).active_item()?;
+            Some((item.item_id(), active_buffer(item.as_ref(), cx)?))
+        })
+        .collect()
+}
+
+fn active_buffer(item: &dyn ItemHandle, cx: &App) -> Option<Entity<Buffer>> {
+    if let Some(split) = item.act_as::<SplittableEditor>(cx) {
+        let split = split.read(cx);
+        let editor = split.focused_editor().read(cx);
+        let buffer = editor.active_buffer(cx)?;
+        if split.focused_editor() != split.rhs_editor() {
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            let diff = snapshot.diff_for_buffer_id(buffer.read(cx).remote_id())?;
+            return split
+                .rhs_editor()
+                .read(cx)
+                .buffer()
+                .read(cx)
+                .buffer(diff.buffer_id());
+        }
+
+        return Some(buffer);
+    }
+
+    item.act_as::<Editor>(cx)?.read(cx).active_buffer(cx)
 }
 
 fn language_extension_key(extension_id: &str) -> String {
@@ -103,10 +244,6 @@ fn suggest_for_buffer(
     buffer: Entity<Buffer>,
     cx: &mut Context<Workspace>,
 ) {
-    if !is_active_in_some_pane(workspace, &buffer, cx) {
-        return;
-    }
-
     let buffer = buffer.read(cx);
     let Some(file) = buffer.file().cloned() else {
         return;
@@ -173,17 +310,6 @@ fn suggest_for_buffer(
             });
         }
     }
-}
-
-fn is_active_in_some_pane(workspace: &Workspace, buffer: &Entity<Buffer>, cx: &App) -> bool {
-    workspace.panes().iter().any(|pane| {
-        pane.read(cx)
-            .active_item()
-            .and_then(|item| item.downcast::<Editor>())
-            .is_some_and(|editor| {
-                editor.read(cx).buffer().read(cx).as_singleton().as_ref() == Some(buffer)
-            })
-    })
 }
 
 fn show_suggestion(
@@ -254,9 +380,10 @@ mod tests {
     use extension::ExtensionHostProxy;
     use extension_host::RELOAD_DEBOUNCE_DURATION;
     use fs::RemoveOptions;
-    use gpui::{AnyView, TestAppContext, VisualTestContext};
+    use gpui::{AnyView, Focusable as _, TestAppContext, VisualTestContext};
     use http_client::HttpClient as _;
     use language::{Language, LanguageConfig, LanguageMatcher};
+    use multi_buffer::MultiBuffer;
     use project::{Project, WorktreeId};
     use serde_json::json;
     use settings::SettingsStore;
@@ -265,6 +392,359 @@ mod tests {
     use workspace::{AppState, SplitDirection};
 
     const EMMET_EXTENSION_ID: &str = "emmet";
+
+    #[gpui::test]
+    async fn test_background_language_detection_does_not_repeat_suggestion(
+        cx: &mut TestAppContext,
+    ) {
+        let app_state = init_test(cx);
+        let (workspace, cx) = open_test_workspace(&app_state, cx).await;
+        open_file(&workspace, "main.gleam", cx).await;
+        workspace.update(cx, |workspace, cx| {
+            workspace.dismiss_notification(&notification_id("gleam"), cx);
+        });
+        let project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
+        let worktree_id = worktree_id(&workspace, cx);
+        project
+            .update(cx, |project, cx| {
+                project.open_buffer((worktree_id, rel_path("other.lua")), cx)
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
+        assert!(notification_ids(&workspace, cx).is_empty());
+    }
+
+    #[gpui::test]
+    async fn test_closed_diff_suggestion_waits_for_another_file(cx: &mut TestAppContext) {
+        let app_state = init_test(cx);
+        let (workspace, cx) = open_test_workspace(&app_state, cx).await;
+        let (split, buffers) = create_diff(&workspace, &["main.gleam", "other.lua"], cx).await;
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(split.clone()), None, true, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            notification_ids(&workspace, cx),
+            vec![notification_id("gleam")]
+        );
+        workspace.update(cx, |workspace, cx| {
+            workspace.dismiss_notification(&notification_id("gleam"), cx);
+        });
+        split.update_in(cx, |split, window, cx| {
+            split.rhs_editor().update(cx, |editor, cx| {
+                editor.change_selections(Default::default(), window, cx, |selections| {
+                    let cursor = language::Point::new(0, 1);
+                    selections.select_ranges([cursor..cursor]);
+                });
+            });
+        });
+        cx.run_until_parked();
+        assert!(notification_ids(&workspace, cx).is_empty());
+        let (_, background) = create_diff(&workspace, &["other.html"], cx).await;
+        split.update(cx, |split, cx| {
+            split
+                .rhs_editor()
+                .read(cx)
+                .buffer()
+                .clone()
+                .update(cx, |multibuffer, cx| {
+                    multibuffer.set_excerpts_for_buffer(
+                        background[0].clone(),
+                        [language::Point::zero()..background[0].read(cx).max_point()],
+                        0,
+                        cx,
+                    );
+                });
+        });
+        cx.run_until_parked();
+        assert!(notification_ids(&workspace, cx).is_empty());
+        select_diff_file(&split, &buffers[1], false, cx);
+        assert_eq!(
+            notification_ids(&workspace, cx),
+            vec![notification_id("lua")]
+        );
+        select_diff_file(&split, &buffers[0], false, cx);
+        let notifications = notification_ids(&workspace, cx);
+        assert_eq!(notifications.len(), 2);
+        assert!(notifications.contains(&notification_id("gleam")));
+    }
+
+    #[gpui::test]
+    async fn test_diff_suggestions_follow_current_file(cx: &mut TestAppContext) {
+        let app_state = init_test(cx);
+        let (workspace, cx) = open_test_workspace(&app_state, cx).await;
+        let (split, buffers) = create_diff(&workspace, &["main.gleam", "other.lua"], cx).await;
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(split.clone()), None, true, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            notification_ids(&workspace, cx),
+            vec![notification_id("gleam")]
+        );
+        let first_notification = notification_views(&workspace, cx)[0].entity_id();
+        select_diff_file(&split, &buffers[0], false, cx);
+        assert_eq!(
+            notification_views(&workspace, cx)[0].entity_id(),
+            first_notification
+        );
+
+        select_diff_file(&split, &buffers[1], false, cx);
+        let notifications = notification_ids(&workspace, cx);
+        assert_eq!(notifications.len(), 2);
+        assert!(notifications.contains(&notification_id("lua")));
+    }
+
+    #[gpui::test]
+    async fn test_split_diff_suggestions_follow_left_file(cx: &mut TestAppContext) {
+        let app_state = init_test(cx);
+        let (workspace, cx) = open_test_workspace(&app_state, cx).await;
+        let (split, buffers) = create_diff(&workspace, &["main.gleam", "other.lua"], cx).await;
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(split.clone()), None, true, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            notification_ids(&workspace, cx),
+            vec![notification_id("gleam")]
+        );
+
+        select_diff_file(&split, &buffers[1], true, cx);
+        let notifications = notification_ids(&workspace, cx);
+        assert_eq!(notifications.len(), 2);
+        assert!(notifications.contains(&notification_id("lua")));
+    }
+
+    #[gpui::test]
+    async fn test_diff_suggestions_after_loading_and_activation(cx: &mut TestAppContext) {
+        let app_state = init_test(cx);
+        let (workspace, cx) = open_test_workspace(&app_state, cx).await;
+        let (split, _) = create_diff(&workspace, &[], cx).await;
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(split.clone()), None, true, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(notification_ids(&workspace, cx).is_empty());
+
+        open_file(&workspace, "main.rs", cx).await;
+        let (_, buffers) = create_diff(&workspace, &["main.gleam"], cx).await;
+        split.update(cx, |split, cx| {
+            let multibuffer = split.rhs_editor().read(cx).buffer().clone();
+            multibuffer.update(cx, |multibuffer, cx| {
+                let buffer = &buffers[0];
+                multibuffer.set_excerpts_for_buffer(
+                    buffer.clone(),
+                    [language::Point::zero()..buffer.read(cx).max_point()],
+                    0,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        assert!(notification_ids(&workspace, cx).is_empty());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activate_item(&split, true, true, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            notification_ids(&workspace, cx),
+            vec![notification_id("gleam")]
+        );
+
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        pane.update_in(cx, |pane, window, cx| {
+            pane.remove_item(split.entity_id(), false, false, window, cx);
+        });
+        workspace.update(cx, |workspace, cx| {
+            workspace.dismiss_notification(&notification_id("gleam"), cx);
+        });
+        select_diff_file(&split, &buffers[0], false, cx);
+        assert!(notification_ids(&workspace, cx).is_empty());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(split), None, true, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            notification_ids(&workspace, cx),
+            vec![notification_id("gleam")]
+        );
+    }
+
+    #[gpui::test]
+    async fn test_diff_suggestions_when_excerpts_load_later(cx: &mut TestAppContext) {
+        let app_state = init_test(cx);
+        let (workspace, cx) = open_test_workspace(&app_state, cx).await;
+        let (split, _) = create_diff(&workspace, &[], cx).await;
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(split.clone()), None, true, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(notification_ids(&workspace, cx).is_empty());
+        let (_, buffers) = create_diff(&workspace, &["main.gleam"], cx).await;
+        split.update(cx, |split, cx| {
+            split
+                .rhs_editor()
+                .read(cx)
+                .buffer()
+                .clone()
+                .update(cx, |multibuffer, cx| {
+                    multibuffer.set_excerpts_for_buffer(
+                        buffers[0].clone(),
+                        [language::Point::zero()..buffers[0].read(cx).max_point()],
+                        0,
+                        cx,
+                    );
+                });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            notification_ids(&workspace, cx),
+            vec![notification_id("gleam")]
+        );
+    }
+
+    #[gpui::test]
+    async fn test_diff_suggestions_skip_installed_and_dismissed_extensions(
+        cx: &mut TestAppContext,
+    ) {
+        let app_state = init_test(cx);
+        install_extension_on_disk("gleam", &app_state, cx).await;
+        let (workspace, cx) = open_test_workspace(&app_state, cx).await;
+        let (split, buffers) = create_diff(&workspace, &["main.gleam", "other.lua"], cx).await;
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(split.clone()), None, true, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(notification_ids(&workspace, cx).is_empty());
+        select_diff_file(&split, &buffers[1], false, cx);
+        assert_eq!(
+            notification_ids(&workspace, cx),
+            vec![notification_id("lua")]
+        );
+        cx.update(|_, cx| dismiss_suggestion("lua", cx));
+        cx.run_until_parked();
+        select_diff_file(&split, &buffers[0], false, cx);
+        select_diff_file(&split, &buffers[1], false, cx);
+        assert!(notification_ids(&workspace, cx).is_empty());
+    }
+
+    #[gpui::test]
+    async fn test_diff_suggestions_after_delayed_language_detection(cx: &mut TestAppContext) {
+        let app_state = init_test(cx);
+        let (workspace, cx) = open_test_workspace(&app_state, cx).await;
+        let (split, buffers) = create_diff(&workspace, &["main.rs"], cx).await;
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(split), None, true, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(notification_ids(&workspace, cx).is_empty());
+        let project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
+        let html = project
+            .read_with(cx, |project, _| {
+                project.languages().language_for_name("HTML")
+            })
+            .await
+            .unwrap();
+        buffers[0].update(cx, |buffer, cx| buffer.set_language(Some(html), cx));
+        cx.run_until_parked();
+        assert_eq!(
+            notification_ids(&workspace, cx),
+            vec![notification_id(EMMET_EXTENSION_ID)]
+        );
+    }
+
+    async fn create_diff(
+        workspace: &Entity<Workspace>,
+        paths: &[&str],
+        cx: &mut VisualTestContext,
+    ) -> (Entity<SplittableEditor>, Vec<Entity<Buffer>>) {
+        let project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
+        let worktree_id = worktree_id(workspace, cx);
+        let multibuffer = cx.new(|_| MultiBuffer::new(language::Capability::ReadOnly));
+        let mut buffers = Vec::new();
+        for path in paths {
+            let buffer = project
+                .update(cx, |project, cx| {
+                    project.open_buffer((worktree_id, rel_path(path)), cx)
+                })
+                .await
+                .unwrap();
+            let diff = cx.new(|cx| {
+                buffer_diff::BufferDiff::new_with_base_text(
+                    "old\n",
+                    &buffer.read(cx).snapshot().text,
+                    cx,
+                )
+            });
+            multibuffer.update(cx, |multibuffer, cx| {
+                multibuffer.set_excerpts_for_buffer(
+                    buffer.clone(),
+                    [language::Point::zero()..buffer.read(cx).max_point()],
+                    0,
+                    cx,
+                );
+                multibuffer.add_diff(diff, cx);
+                multibuffer.set_all_diff_hunks_expanded(cx);
+            });
+            buffers.push(buffer);
+        }
+
+        let split = cx.new_window_entity(|window, cx| {
+            SplittableEditor::new(
+                editor::DiffViewStyle::Unified,
+                multibuffer,
+                project,
+                workspace.clone(),
+                window,
+                cx,
+            )
+        });
+        (split, buffers)
+    }
+
+    fn select_diff_file(
+        split: &Entity<SplittableEditor>,
+        buffer: &Entity<Buffer>,
+        left: bool,
+        cx: &mut VisualTestContext,
+    ) {
+        split.update_in(cx, |split, window, cx| {
+            if left {
+                split.split(window, cx);
+            }
+
+            let editor = if left {
+                split.lhs_editor().unwrap()
+            } else {
+                split.rhs_editor()
+            };
+            editor.update(cx, |editor, cx| {
+                let multibuffer = editor.buffer().read(cx);
+                let snapshot = multibuffer.snapshot(cx);
+                let target = snapshot
+                    .excerpts()
+                    .find_map(|range| {
+                        let buffer_id = range.context.start.buffer_id;
+                        let matches = if left {
+                            snapshot
+                                .diff_for_buffer_id(buffer_id)
+                                .is_some_and(|diff| diff.buffer_id() == buffer.read(cx).remote_id())
+                        } else {
+                            buffer_id == buffer.read(cx).remote_id()
+                        };
+                        matches.then(|| snapshot.anchor_in_excerpt(range.context.start).unwrap())
+                    })
+                    .unwrap();
+                editor.change_selections(Default::default(), window, cx, |selections| {
+                    selections.select_ranges([target..target]);
+                });
+                editor.focus_handle(cx).focus(window, cx);
+            });
+        });
+        cx.run_until_parked();
+    }
 
     #[gpui::test]
     async fn test_language_suggestion_for_supported_language(cx: &mut TestAppContext) {
@@ -512,7 +992,12 @@ mod tests {
             )
             .await
             .unwrap();
+        let reload = cx.update(|_, cx| {
+            ExtensionStore::global(cx).update(cx, |store, cx| store.reload(None, cx))
+        });
+        cx.run_until_parked();
         cx.executor().advance_clock(RELOAD_DEBOUNCE_DURATION);
+        reload.await;
         cx.run_until_parked();
         cx.update(|_, cx| {
             assert_eq!(
@@ -856,6 +1341,7 @@ mod tests {
                 "other.html": "<span></span>",
                 "main.rs": "fn main() {}",
                 "main.gleam": "pub fn main() {}",
+                "other.lua": "print('hello')",
             }),
         )
         .await;

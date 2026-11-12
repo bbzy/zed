@@ -89,6 +89,8 @@ ctor.workspace = true
 db = { workspace = true, features = ["test-support"] }
 editor = { workspace = true, features = ["test-support"] }
 extension.workspace = true
+extension_host.workspace = true
+extensions_ui.workspace = true
 fs = { workspace = true, features = ["test-support"] }
 git = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }

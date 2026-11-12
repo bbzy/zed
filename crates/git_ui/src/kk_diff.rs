@@ -2645,6 +2645,26 @@ impl SerializableItem for KkDiff {
 }
 
 #[cfg(test)]
+pub(super) fn init_extension_suggestions_test(cx: &mut App) -> Arc<workspace::AppState> {
+    let app_state = workspace::AppState::test(cx);
+    workspace::AppState::set_global(app_state.clone(), cx);
+    cx.set_global(db::AppDatabase::test_new());
+    release_channel::init("0.0.1".parse().unwrap(), cx);
+    extension::init(cx);
+    extension_host::init(
+        Arc::new(extension::ExtensionHostProxy::new()),
+        app_state.fs.clone(),
+        app_state.client.clone(),
+        app_state.node_runtime.clone(),
+        cx,
+    );
+    editor::init(cx);
+    extensions_ui::init(cx);
+    crate::init(cx);
+    app_state
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::kk_panel::remote_tests::run_kk;
@@ -2658,6 +2678,117 @@ mod tests {
     use settings::{DiffViewStyle, SettingsStore};
     use std::path::Path;
     use workspace::{MultiWorkspace, ToolbarItemView};
+
+    #[gpui::test]
+    async fn diff_extension_suggestions_cover_git_and_kk_items(cx: &mut gpui::TestAppContext) {
+        let app_state = cx.update(init_extension_suggestions_test);
+        let root = std::path::Path::new("/diff-extension-test");
+        let fs = app_state.fs.as_fake();
+        fs.insert_tree(
+            root,
+            serde_json::json!({"main.gleam": "pub fn main() {}\n"}),
+        )
+        .await;
+        let project = Project::test(fs, [root], cx).await;
+        let buffer = project
+            .update(cx, |project, cx| {
+                project.open_local_buffer(root.join("main.gleam"), cx)
+            })
+            .await
+            .unwrap();
+        let (workspace, cx) = cx.add_window_view(|window, cx| {
+            Workspace::new(None, project.clone(), app_state, window, cx)
+        });
+        let diff = cx.new(|cx| {
+            BufferDiff::new_with_base_text("old\n", &buffer.read(cx).snapshot().text, cx)
+        });
+        let git_diff = workspace.update_in(cx, |workspace, window, cx| {
+            crate::project_diff::ProjectDiff::deploy_at(workspace, None, window, cx);
+            workspace
+                .items_of_type::<crate::project_diff::ProjectDiff>(cx)
+                .next()
+                .unwrap()
+        });
+        cx.run_until_parked();
+        git_diff.update(cx, |view, cx| {
+            let multibuffer = view
+                .editor(cx)
+                .read(cx)
+                .rhs_editor()
+                .read(cx)
+                .buffer()
+                .clone();
+            multibuffer.update(cx, |multibuffer, cx| {
+                multibuffer.set_excerpts_for_buffer(
+                    buffer.clone(),
+                    [Point::zero()..buffer.read(cx).max_point()],
+                    0,
+                    cx,
+                );
+                multibuffer.add_diff(diff.clone(), cx);
+            });
+        });
+        cx.run_until_parked();
+        let notifications = workspace.read_with(cx, |workspace, _| workspace.notification_ids());
+        assert_eq!(notifications.len(), 1);
+        workspace.update(cx, |workspace, cx| {
+            workspace.dismiss_notification(&notifications[0], cx)
+        });
+
+        for working_copy in [true, false] {
+            let view = cx.new_window_entity(|window, cx| {
+                KkDiff::new(
+                    DiffIdentity {
+                        root: root.to_owned(),
+                        scope: "change".into(),
+                        path: "main.gleam".into(),
+                        working_copy,
+                        presentation: DiffPresentation::Text,
+                    },
+                    DiffTarget {
+                        scope: DiffScope::Change("captured".into()),
+                        identity: "change".into(),
+                        label: "change".into(),
+                        reference: "kkkkkkkk".into(),
+                        comparison: None,
+                        revision: None,
+                        category: None,
+                    },
+                    ChangedFile {
+                        path: "main.gleam".into(),
+                        change_type: ChangeKind::Modified,
+                        renamed_from: None,
+                        has_conflict: false,
+                    },
+                    buffer.clone(),
+                    diff.clone(),
+                    Some(Arc::from("old\n")),
+                    project.clone(),
+                    workspace.clone(),
+                    window,
+                    cx,
+                )
+            });
+            workspace.update_in(cx, |workspace, window, cx| {
+                KkDiff::show(&view, DiffOpenMode::Open, workspace, window, cx);
+                assert_eq!(
+                    workspace
+                        .active_item_as::<KkDiff>(cx)
+                        .map(|item| item.entity_id()),
+                    Some(view.entity_id())
+                );
+            });
+            cx.run_until_parked();
+            assert_eq!(
+                workspace.read_with(cx, |workspace, _| workspace.notification_ids()),
+                notifications,
+                "working_copy={working_copy}"
+            );
+            workspace.update(cx, |workspace, cx| {
+                workspace.dismiss_notification(&notifications[0], cx)
+            });
+        }
+    }
 
     #[gpui::test]
     async fn kk_conflict_comparison_uses_shared_controls(cx: &mut TestAppContext) {
