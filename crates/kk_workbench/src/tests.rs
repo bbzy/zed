@@ -6,6 +6,8 @@ use tempfile::TempDir;
 
 #[path = "conflict_tests.rs"]
 mod conflict_tests;
+#[path = "file_edit_tests.rs"]
+mod file_edit_tests;
 #[path = "remote_tests.rs"]
 mod remote_tests;
 #[path = "transaction_tests.rs"]

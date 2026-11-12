@@ -110,41 +110,41 @@ actions!(
 );
 
 pub(crate) fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
-    Vim::action(editor, cx, Vim::insert_after);
-    Vim::action(editor, cx, Vim::insert_before);
-    Vim::action(editor, cx, Vim::insert_first_non_whitespace);
-    Vim::action(editor, cx, Vim::insert_end_of_line);
-    Vim::action(editor, cx, Vim::insert_line_above);
-    Vim::action(editor, cx, Vim::insert_line_below);
-    Vim::action(editor, cx, Vim::insert_empty_line_above);
-    Vim::action(editor, cx, Vim::insert_empty_line_below);
-    Vim::action(editor, cx, Vim::insert_at_previous);
-    Vim::action(editor, cx, Vim::change_case);
-    Vim::action(editor, cx, Vim::convert_to_upper_case);
-    Vim::action(editor, cx, Vim::convert_to_lower_case);
-    Vim::action(editor, cx, Vim::convert_to_rot13);
-    Vim::action(editor, cx, Vim::convert_to_rot47);
+    Vim::edit_action(editor, cx, Vim::insert_after);
+    Vim::edit_action(editor, cx, Vim::insert_before);
+    Vim::edit_action(editor, cx, Vim::insert_first_non_whitespace);
+    Vim::edit_action(editor, cx, Vim::insert_end_of_line);
+    Vim::edit_action(editor, cx, Vim::insert_line_above);
+    Vim::edit_action(editor, cx, Vim::insert_line_below);
+    Vim::edit_action(editor, cx, Vim::insert_empty_line_above);
+    Vim::edit_action(editor, cx, Vim::insert_empty_line_below);
+    Vim::edit_action(editor, cx, Vim::insert_at_previous);
+    Vim::edit_action(editor, cx, Vim::change_case);
+    Vim::edit_action(editor, cx, Vim::convert_to_upper_case);
+    Vim::edit_action(editor, cx, Vim::convert_to_lower_case);
+    Vim::edit_action(editor, cx, Vim::convert_to_rot13);
+    Vim::edit_action(editor, cx, Vim::convert_to_rot47);
     Vim::action(editor, cx, Vim::yank_line);
     Vim::action(editor, cx, Vim::yank_to_end_of_line);
-    Vim::action(editor, cx, Vim::toggle_comments);
-    Vim::action(editor, cx, Vim::toggle_block_comments);
-    Vim::action(editor, cx, Vim::paste);
+    Vim::edit_action(editor, cx, Vim::toggle_comments);
+    Vim::edit_action(editor, cx, Vim::toggle_block_comments);
+    Vim::edit_action(editor, cx, Vim::paste);
     Vim::action(editor, cx, Vim::show_location);
 
-    Vim::action(editor, cx, |vim, _: &DeleteLeft, window, cx| {
+    Vim::edit_action(editor, cx, |vim, _: &DeleteLeft, window, cx| {
         vim.record_current_action(cx);
         let times = Vim::take_count(cx);
         let forced_motion = Vim::take_forced_motion(cx);
         vim.delete_motion(Motion::Left, times, forced_motion, window, cx);
     });
-    Vim::action(editor, cx, |vim, _: &DeleteRight, window, cx| {
+    Vim::edit_action(editor, cx, |vim, _: &DeleteRight, window, cx| {
         vim.record_current_action(cx);
         let times = Vim::take_count(cx);
         let forced_motion = Vim::take_forced_motion(cx);
         vim.delete_motion(Motion::Right, times, forced_motion, window, cx);
     });
 
-    Vim::action(editor, cx, |vim, _: &HelixDelete, window, cx| {
+    Vim::edit_action(editor, cx, |vim, _: &HelixDelete, window, cx| {
         vim.record_current_action(cx);
         let original_selections =
             vim.update_editor(cx, |_, editor, _| editor.selections.disjoint_anchors_arc());
@@ -186,7 +186,7 @@ pub(crate) fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
         });
     });
 
-    Vim::action(editor, cx, |vim, _: &ChangeToEndOfLine, window, cx| {
+    Vim::edit_action(editor, cx, |vim, _: &ChangeToEndOfLine, window, cx| {
         vim.start_recording(cx);
         let times = Vim::take_count(cx);
         let forced_motion = Vim::take_forced_motion(cx);
@@ -200,7 +200,7 @@ pub(crate) fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
             cx,
         );
     });
-    Vim::action(editor, cx, |vim, _: &DeleteToEndOfLine, window, cx| {
+    Vim::edit_action(editor, cx, |vim, _: &DeleteToEndOfLine, window, cx| {
         vim.record_current_action(cx);
         let times = Vim::take_count(cx);
         let forced_motion = Vim::take_forced_motion(cx);
@@ -214,11 +214,11 @@ pub(crate) fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
             cx,
         );
     });
-    Vim::action(editor, cx, |vim, _: &JoinLines, window, cx| {
+    Vim::edit_action(editor, cx, |vim, _: &JoinLines, window, cx| {
         vim.join_lines_impl(true, window, cx);
     });
 
-    Vim::action(editor, cx, |vim, _: &JoinLinesNoWhitespace, window, cx| {
+    Vim::edit_action(editor, cx, |vim, _: &JoinLinesNoWhitespace, window, cx| {
         vim.join_lines_impl(false, window, cx);
     });
 

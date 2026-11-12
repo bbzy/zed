@@ -1072,6 +1072,31 @@ impl Vim {
         cx.on_release(|_, _| drop(subscription)).detach();
     }
 
+    pub fn edit_action<A: Action>(
+        editor: &mut Editor,
+        cx: &mut Context<Vim>,
+        action: impl Fn(&mut Vim, &A, &mut Window, &mut Context<Vim>) + 'static,
+    ) {
+        Self::action(editor, cx, move |vim, event, window, cx| {
+            if !vim.request_edit(window, cx) {
+                return;
+            }
+            action(vim, event, window, cx);
+        });
+    }
+
+    fn request_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let allowed = self
+            .update_editor(cx, |_, editor, cx| {
+                !editor.notifies_read_only_edits() || editor.request_edit(cx)
+            })
+            .unwrap_or(false);
+        if !allowed {
+            self.clear_operator(window, cx);
+        }
+        allowed
+    }
+
     pub fn editor(&self) -> Option<Entity<Editor>> {
         self.editor.upgrade()
     }
@@ -1207,6 +1232,18 @@ impl Vim {
     }
 
     fn push_operator(&mut self, operator: Operator, window: &mut Window, cx: &mut Context<Self>) {
+        let edits_buffer = (operator.starts_dot_recording()
+            || matches!(
+                operator,
+                Operator::AddSurrounds { .. } | Operator::ChangeSurrounds { .. }
+            ))
+            && !matches!(
+                operator,
+                Operator::HelixNext { .. } | Operator::HelixPrevious { .. }
+            );
+        if edits_buffer && !self.request_edit(window, cx) {
+            return;
+        }
         if operator.starts_dot_recording() {
             self.start_recording(cx);
         }
@@ -1233,6 +1270,9 @@ impl Vim {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if matches!(mode, Mode::Insert | Mode::Replace) && !self.request_edit(window, cx) {
+            return;
+        }
         if self.temp_mode && mode == Mode::Normal {
             self.temp_mode = false;
             self.switch_mode(Mode::Normal, leave_selections, window, cx);

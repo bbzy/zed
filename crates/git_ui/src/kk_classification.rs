@@ -273,8 +273,15 @@ pub(super) enum RepositoryJob {
     Classification(ClassificationJob),
     File(FileMutationJob),
     Conflict(ConflictJob),
+    Edit(FileEditJob),
     Sparse(SparseCheckoutJob),
     UpdateStale(UpdateStaleJob),
+}
+
+pub(super) struct FileEditJob {
+    pub snapshot: Snapshot,
+    pub edit: kk_workbench::FileEdit,
+    pub completion: oneshot::Sender<Result<Snapshot, ClassificationFailure>>,
 }
 
 pub(super) struct UpdateStaleJob {
@@ -347,6 +354,7 @@ impl RepositoryJob {
             Self::Classification(job) => &job.snapshot,
             Self::File(job) => &job.request.snapshot,
             Self::Conflict(job) => &job.request.snapshot,
+            Self::Edit(job) => &job.snapshot,
             Self::Sparse(job) => &job.snapshot,
             Self::UpdateStale(job) => &job.snapshot,
         }
@@ -361,6 +369,7 @@ impl RepositoryJob {
                 .collect::<Vec<_>>(),
             Self::File(job) => vec![&job.request.file],
             Self::Conflict(job) => return vec![job.request.conflict.path.clone()],
+            Self::Edit(job) => return vec![job.edit.path.clone()],
             // Materialization does not rewrite history and may yield to saved-file captures.
             // Later writes must not depend on a checkout that can be cancelled or deferred.
             Self::Sparse(_) => return Vec::new(),
@@ -781,6 +790,7 @@ impl Drop for RepositoryQueue {
                 }
                 RepositoryJob::File(job) => job.take_completions(),
                 RepositoryJob::Conflict(job) => vec![job.completion],
+                RepositoryJob::Edit(job) => vec![job.completion],
                 RepositoryJob::Sparse(job) => vec![job.completion],
                 RepositoryJob::UpdateStale(job) => vec![job.completion],
             };
@@ -878,6 +888,15 @@ impl RepositoryQueue {
         self.flush();
         let dependencies = std::mem::take(&mut job.dependencies);
         self.enqueue_write(RepositoryJob::File(job), dependencies)
+    }
+
+    pub fn enqueue_edit(&mut self, job: FileEditJob) -> bool {
+        let dependencies = self.dependencies(
+            std::slice::from_ref(&job.edit.path),
+            job.snapshot.repository().lifetime(),
+        );
+        self.flush();
+        self.enqueue_write(RepositoryJob::Edit(job), dependencies)
     }
 
     pub fn enqueue_conflict(&mut self, job: ConflictJob) -> bool {
@@ -1182,7 +1201,8 @@ mod tests {
 
                             (result, job.take_completions())
                         }
-                        RepositoryJob::Conflict(_)
+                        RepositoryJob::Edit(_)
+                        | RepositoryJob::Conflict(_)
                         | RepositoryJob::Sparse(_)
                         | RepositoryJob::UpdateStale(_) => {
                             anyhow::bail!("Unexpected job in file queue test")

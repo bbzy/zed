@@ -285,6 +285,14 @@ pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
 
     fn toggle_read_only(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
 
+    fn can_toggle_read_only(&self, _: &App) -> bool {
+        false
+    }
+
+    fn can_autosave(&self, _: &App) -> bool {
+        true
+    }
+
     fn has_deleted_file(&self, _: &App) -> bool {
         false
     }
@@ -527,6 +535,7 @@ pub trait ItemHandle: 'static + Send {
     fn to_any_view(&self) -> AnyView;
     fn is_dirty(&self, cx: &App) -> bool;
     fn capability(&self, cx: &App) -> Capability;
+    fn can_toggle_read_only(&self, cx: &App) -> bool;
     fn toggle_read_only(&self, window: &mut Window, cx: &mut App);
     fn has_deleted_file(&self, cx: &App) -> bool;
     fn has_conflict(&self, cx: &App) -> bool;
@@ -583,9 +592,14 @@ pub trait ItemHandle: 'static + Send {
         window: &mut Window,
         cx: &mut App,
     ) -> Vec<(SharedString, Box<dyn Action>)>;
+    fn allows_autosave(&self, cx: &App) -> bool;
     fn can_autosave(&self, cx: &App) -> bool {
         let is_deleted = self.project_entry_ids(cx).is_empty();
-        self.is_dirty(cx) && !self.has_conflict(cx) && self.can_save(cx) && !is_deleted
+        self.allows_autosave(cx)
+            && self.is_dirty(cx)
+            && !self.has_conflict(cx)
+            && self.can_save(cx)
+            && !is_deleted
     }
 }
 
@@ -1043,10 +1057,16 @@ impl<T: Item> ItemHandle for Entity<T> {
         self.read(cx).capability(cx)
     }
 
+    fn allows_autosave(&self, cx: &App) -> bool {
+        self.read(cx).can_autosave(cx)
+    }
+
+    fn can_toggle_read_only(&self, cx: &App) -> bool {
+        self.read(cx).can_toggle_read_only(cx)
+    }
+
     fn toggle_read_only(&self, window: &mut Window, cx: &mut App) {
-        self.update(cx, |this, cx| {
-            this.toggle_read_only(window, cx);
-        })
+        self.update(cx, |item, cx| item.toggle_read_only(window, cx));
     }
 
     fn has_deleted_file(&self, cx: &App) -> bool {

@@ -14,7 +14,7 @@ pub(crate) struct Rewrap {
 }
 
 pub(crate) fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
-    Vim::action(editor, cx, |vim, action: &Rewrap, window, cx| {
+    Vim::edit_action(editor, cx, |vim, action: &Rewrap, window, cx| {
         vim.record_current_action(cx);
         Vim::take_count(cx);
         Vim::take_forced_motion(cx);

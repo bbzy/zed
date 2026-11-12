@@ -19,14 +19,14 @@ actions!(
 );
 
 pub(crate) fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
-    Vim::action(editor, cx, |vim, _: &Substitute, window, cx| {
+    Vim::edit_action(editor, cx, |vim, _: &Substitute, window, cx| {
         vim.start_recording(cx);
         let count = Vim::take_count(cx);
         Vim::take_forced_motion(cx);
         vim.substitute(count, vim.mode == Mode::VisualLine, window, cx);
     });
 
-    Vim::action(editor, cx, |vim, _: &SubstituteLine, window, cx| {
+    Vim::edit_action(editor, cx, |vim, _: &SubstituteLine, window, cx| {
         vim.start_recording(cx);
         if matches!(vim.mode, Mode::VisualBlock | Mode::Visual) {
             vim.switch_mode(Mode::VisualLine, false, window, cx)

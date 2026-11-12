@@ -24,13 +24,13 @@ actions!(
 );
 
 pub fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
-    Vim::action(editor, cx, |vim, _: &ToggleReplace, window, cx| {
+    Vim::edit_action(editor, cx, |vim, _: &ToggleReplace, window, cx| {
         vim.replacements = vec![];
         vim.start_recording(cx);
         vim.switch_mode(Mode::Replace, false, window, cx);
     });
 
-    Vim::action(editor, cx, |vim, _: &UndoReplace, window, cx| {
+    Vim::edit_action(editor, cx, |vim, _: &UndoReplace, window, cx| {
         if vim.mode != Mode::Replace {
             return;
         }

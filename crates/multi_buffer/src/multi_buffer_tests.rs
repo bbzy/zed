@@ -14,6 +14,49 @@ use util::rel_path::rel_path;
 use util::test::sample_text;
 
 #[gpui::test]
+fn test_capability_changes_refresh_cached_buffer_snapshots(cx: &mut App) {
+    let buffer = cx.new(|cx| {
+        let mut buffer = Buffer::local("text\n", cx);
+        buffer.set_capability(Capability::ReadOnly, cx);
+        buffer
+    });
+    let buffer_id = buffer.read(cx).remote_id();
+    let multibuffer = cx.new(|cx| MultiBuffer::singleton(buffer.clone(), cx));
+    let original = multibuffer.read(cx).snapshot(cx);
+    assert_eq!(
+        original
+            .buffer_for_id(buffer_id)
+            .expect("original buffer")
+            .capability,
+        Capability::ReadOnly
+    );
+    for capability in [
+        Capability::ReadWrite,
+        Capability::Read,
+        Capability::ReadOnly,
+        Capability::ReadWrite,
+    ] {
+        buffer.update(cx, |buffer, cx| buffer.set_capability(capability, cx));
+        let snapshot = multibuffer.read(cx).snapshot(cx);
+        assert_eq!(
+            snapshot
+                .buffer_for_id(buffer_id)
+                .expect("updated buffer")
+                .capability,
+            capability
+        );
+        assert_eq!(
+            original
+                .buffer_for_id(buffer_id)
+                .expect("retained snapshot")
+                .capability,
+            Capability::ReadOnly
+        );
+        assert_eq!(buffer.read(cx).text(), "text\n");
+    }
+}
+
+#[gpui::test]
 fn kk_diff_file_order_preserves_buffer_anchors(cx: &mut App) {
     let first = cx.new(|cx| Buffer::local("abc\ndef\n", cx));
     let second = cx.new(|cx| Buffer::local("xyz\n", cx));

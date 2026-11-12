@@ -62,7 +62,7 @@ pub(crate) fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
         vim.switch_mode(Mode::Normal, false, window, cx)
     });
 
-    Vim::action(editor, cx, |vim, _: &Repeat, window, cx| {
+    Vim::edit_action(editor, cx, |vim, _: &Repeat, window, cx| {
         vim.repeat(false, window, cx)
     });
 

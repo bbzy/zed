@@ -691,7 +691,7 @@ fn validate_conflict_path(path: &str) -> Result<()> {
 }
 
 // All paths and bytes are passed separately. A resolution must never evaluate file content as code.
-const RESOLUTION_EDITOR: &str = r#"set -eu
+pub(crate) const RESOLUTION_EDITOR: &str = r#"set -eu
 target="$1/$2"
 test -f "$target" && test ! -L "$target"
 cmp -s "$target" "$3"

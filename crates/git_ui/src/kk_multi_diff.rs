@@ -507,6 +507,7 @@ impl KkMultiDiff {
                 cx,
             );
             editor.rhs_editor().update(cx, |editor, cx| {
+                editor.set_read_only(!working_copy);
                 editor.set_show_diff_review_button(true, cx);
                 editor.set_allow_git_diff_scrollbar_markers(showing_full_file, cx);
             });

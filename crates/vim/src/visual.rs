@@ -79,13 +79,13 @@ pub fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
     });
     Vim::action(editor, cx, Vim::other_end);
     Vim::action(editor, cx, Vim::other_end_row_aware);
-    Vim::action(editor, cx, Vim::visual_insert_end_of_line);
-    Vim::action(editor, cx, Vim::visual_insert_first_non_white_space);
-    Vim::action(editor, cx, |vim, _: &VisualDelete, window, cx| {
+    Vim::edit_action(editor, cx, Vim::visual_insert_end_of_line);
+    Vim::edit_action(editor, cx, Vim::visual_insert_first_non_white_space);
+    Vim::edit_action(editor, cx, |vim, _: &VisualDelete, window, cx| {
         vim.record_current_action(cx);
         vim.visual_delete(false, window, cx);
     });
-    Vim::action(editor, cx, |vim, _: &VisualDeleteLine, window, cx| {
+    Vim::edit_action(editor, cx, |vim, _: &VisualDeleteLine, window, cx| {
         vim.record_current_action(cx);
         vim.visual_delete(true, window, cx);
     });

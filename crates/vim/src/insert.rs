@@ -24,10 +24,10 @@ actions!(
 pub fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
     Vim::action(editor, cx, Vim::normal_before);
     Vim::action(editor, cx, Vim::temporary_normal);
-    Vim::action(editor, cx, |vim, _: &InsertFromAbove, window, cx| {
+    Vim::edit_action(editor, cx, |vim, _: &InsertFromAbove, window, cx| {
         vim.insert_around(Direction::Prev, window, cx)
     });
-    Vim::action(editor, cx, |vim, _: &InsertFromBelow, window, cx| {
+    Vim::edit_action(editor, cx, |vim, _: &InsertFromBelow, window, cx| {
         vim.insert_around(Direction::Next, window, cx)
     })
 }

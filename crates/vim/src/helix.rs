@@ -75,14 +75,14 @@ actions!(
 
 pub fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
     Vim::action(editor, cx, Vim::helix_select_lines);
-    Vim::action(editor, cx, Vim::helix_insert);
-    Vim::action(editor, cx, Vim::helix_append);
-    Vim::action(editor, cx, Vim::helix_insert_end_of_line);
+    Vim::edit_action(editor, cx, Vim::helix_insert);
+    Vim::edit_action(editor, cx, Vim::helix_append);
+    Vim::edit_action(editor, cx, Vim::helix_insert_end_of_line);
     Vim::action(editor, cx, Vim::helix_yank);
     Vim::action(editor, cx, Vim::helix_goto_last_modification);
     Vim::action(editor, cx, Vim::helix_goto_line);
-    Vim::action(editor, cx, Vim::helix_paste);
-    Vim::action(editor, cx, Vim::helix_replace_with_yanked);
+    Vim::edit_action(editor, cx, Vim::helix_paste);
+    Vim::edit_action(editor, cx, Vim::helix_replace_with_yanked);
     Vim::action(editor, cx, Vim::helix_select_regex);
     Vim::action(editor, cx, Vim::helix_keep_newest_selection);
     Vim::action(editor, cx, |vim, _: &HelixDuplicateBelow, window, cx| {
@@ -93,8 +93,8 @@ pub fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
         let times = Vim::take_count(cx);
         vim.helix_duplicate_selections_above(times, window, cx);
     });
-    Vim::action(editor, cx, Vim::helix_substitute);
-    Vim::action(editor, cx, Vim::helix_substitute_no_yank);
+    Vim::edit_action(editor, cx, Vim::helix_substitute);
+    Vim::edit_action(editor, cx, Vim::helix_substitute_no_yank);
     Vim::action(editor, cx, Vim::helix_jump_to_word);
     Vim::action(editor, cx, Vim::helix_select_next);
     Vim::action(editor, cx, Vim::helix_select_previous);

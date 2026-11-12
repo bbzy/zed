@@ -1626,3 +1626,28 @@ fn remote_cancellation_and_root_close_release_write_locks_and_preserve_other_roo
         Ok(())
     })
 }
+
+#[test]
+fn diffedit_remote_read_prepare_and_publish() -> Result<()> {
+    smol::block_on(async {
+        let fixture = Fixture::create()?;
+        fs::write(fixture.root().join("file.txt"), b"before\n")?;
+        fixture.run(&["new"])?;
+        let transport = ServiceTransport::new(&fixture)?;
+        let repository = transport.open().await?;
+        let snapshot = repository.snapshot(true).await?;
+        let mut edit = snapshot.file_edit("@-", "file.txt").await?;
+        edit.contents = b"remote edit\n".to_vec();
+        let target = edit.revision.revset();
+        let publication = snapshot.prepare_file_edit(&edit).await?.publish().await?;
+        assert_eq!(
+            publication
+                .snapshot
+                .file_content(&target, "file.txt")
+                .await?,
+            edit.contents
+        );
+        assert_eq!(fs::read(fixture.root().join("file.txt"))?, edit.contents);
+        Ok(())
+    })
+}

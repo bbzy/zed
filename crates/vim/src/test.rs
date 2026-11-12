@@ -42,6 +42,77 @@ use crate::{
 use util_macros::perf;
 
 #[gpui::test]
+async fn test_diffedit_read_only_attempts_preserve_mode_and_contents(cx: &mut TestAppContext) {
+    let mut cx = VimTestContext::new(cx, true).await;
+    for key in ["i", "a", "o", "x", "d", "s", "S", "R", "."] {
+        cx.set_state("heˇllo", Mode::Normal);
+        cx.update_editor(|editor, _, cx| {
+            editor.set_notify_read_only_edits(true);
+            editor.set_read_only(true);
+            cx.notify();
+        });
+        cx.simulate_keystrokes(key);
+        cx.assert_state("heˇllo", Mode::Normal);
+    }
+    cx.simulate_keystrokes("3 x");
+    cx.assert_state("heˇllo", Mode::Normal);
+    cx.update_editor(|editor, _, cx| {
+        editor.set_read_only(false);
+        cx.notify();
+    });
+    cx.simulate_keystrokes("x");
+    cx.assert_state("heˇlo", Mode::Normal);
+    cx.set_state("heˇllo", Mode::Normal);
+    cx.simulate_keystrokes("i");
+    cx.assert_state("heˇllo", Mode::Insert);
+}
+
+#[gpui::test]
+async fn test_diffedit_visual_attempts_preserve_selection(cx: &mut TestAppContext) {
+    let mut cx = VimTestContext::new(cx, true).await;
+    for key in [
+        "d", "c", "A", "I", "R", ">", "<", "=", "g q", "ctrl-a", "ctrl-x",
+    ] {
+        cx.set_state("he«lˇ»lo", Mode::Visual);
+        cx.update_editor(|editor, _, cx| {
+            editor.set_notify_read_only_edits(true);
+            editor.set_read_only(true);
+            cx.notify();
+        });
+        cx.simulate_keystrokes(key);
+        cx.assert_state("he«lˇ»lo", Mode::Visual);
+    }
+}
+
+#[gpui::test]
+async fn test_diffedit_helix_attempts_preserve_mode_and_contents(cx: &mut TestAppContext) {
+    let mut cx = VimTestContext::new(cx, true).await;
+    cx.update(|_, cx| {
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.vim_mode = Some(false);
+                settings.helix_mode = Some(true);
+            });
+        });
+    });
+    for key in ["i", "a", "o", "d", "c"] {
+        cx.set_state("heˇllo", Mode::HelixNormal);
+        cx.update_editor(|editor, _, cx| {
+            editor.set_notify_read_only_edits(true);
+            editor.set_read_only(true);
+            cx.notify();
+        });
+        cx.simulate_keystrokes(key);
+        cx.assert_state("heˇllo", Mode::HelixNormal);
+    }
+    cx.simulate_keystrokes("]");
+    assert!(matches!(
+        cx.active_operator(),
+        Some(crate::state::Operator::HelixNext { .. })
+    ));
+}
+
+#[gpui::test]
 async fn test_modal_editing_is_limited_to_workspace_content(cx: &mut TestAppContext) {
     let mut cx = VimTestContext::new(cx, true).await;
     let embedded = cx.update(|window, cx| {

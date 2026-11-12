@@ -28,7 +28,7 @@ actions!(
 );
 
 pub(crate) fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
-    Vim::action(editor, cx, |vim, _: &Indent, window, cx| {
+    Vim::edit_action(editor, cx, |vim, _: &Indent, window, cx| {
         vim.record_current_action(cx);
         let count = Vim::take_count(cx).unwrap_or(1);
         Vim::take_forced_motion(cx);
@@ -49,7 +49,7 @@ pub(crate) fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
         }
     });
 
-    Vim::action(editor, cx, |vim, _: &Outdent, window, cx| {
+    Vim::edit_action(editor, cx, |vim, _: &Outdent, window, cx| {
         vim.record_current_action(cx);
         let count = Vim::take_count(cx).unwrap_or(1);
         Vim::take_forced_motion(cx);
@@ -70,7 +70,7 @@ pub(crate) fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
         }
     });
 
-    Vim::action(editor, cx, |vim, _: &AutoIndent, window, cx| {
+    Vim::edit_action(editor, cx, |vim, _: &AutoIndent, window, cx| {
         vim.record_current_action(cx);
         let count = Vim::take_count(cx).unwrap_or(1);
         Vim::take_forced_motion(cx);

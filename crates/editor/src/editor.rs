@@ -1126,6 +1126,7 @@ pub struct Editor {
     expects_character_input: bool,
     use_modal_editing: bool,
     read_only: bool,
+    notify_read_only_edits: bool,
     leader_id: Option<CollaboratorId>,
     remote_id: Option<ViewId>,
     pub hover_state: HoverState,
@@ -1952,6 +1953,7 @@ impl Editor {
             .clone_state(&self.scroll_manager, &my_snapshot, &clone_snapshot, cx);
         clone.searchable = self.searchable;
         clone.read_only = self.read_only;
+        clone.notify_read_only_edits = self.notify_read_only_edits;
         clone.buffers_with_disabled_indent_guides =
             self.buffers_with_disabled_indent_guides.clone();
         clone.enable_mouse_wheel_zoom = self.enable_mouse_wheel_zoom;
@@ -2516,6 +2518,7 @@ impl Editor {
             expects_character_input: !is_minimap,
             use_modal_editing: false,
             read_only: is_minimap,
+            notify_read_only_edits: false,
             use_autoclose: true,
             use_auto_surround: true,
             use_selection_highlight: true,
@@ -3489,6 +3492,24 @@ impl Editor {
 
     pub fn read_only(&self, cx: &App) -> bool {
         self.read_only || self.buffer.read(cx).read_only()
+    }
+
+    pub fn set_notify_read_only_edits(&mut self, enabled: bool) {
+        self.notify_read_only_edits = enabled;
+    }
+
+    pub fn notifies_read_only_edits(&self) -> bool {
+        self.notify_read_only_edits
+    }
+
+    pub fn request_edit(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.read_only(cx) {
+            if self.notify_read_only_edits {
+                cx.emit(EditorEvent::ReadOnlyEditAttempt);
+            }
+            return false;
+        }
+        true
     }
 
     pub fn set_read_only(&mut self, read_only: bool) {
@@ -6182,6 +6203,12 @@ impl Editor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.notify_read_only_edits {
+            if self.read_only(cx) {
+                cx.emit(EditorEvent::ReadOnlyEditAttempt);
+            }
+            return;
+        }
         if let Some(buffer) = self.buffer.read(cx).as_singleton() {
             buffer.update(cx, |buffer, cx| {
                 buffer.set_capability(
@@ -8838,6 +8865,9 @@ impl Editor {
         cx: &mut Context<Self>,
         update: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>),
     ) -> Option<TransactionId> {
+        if self.notify_read_only_edits && !self.request_edit(cx) {
+            return None;
+        }
         self.with_selection_effects_deferred(window, cx, |this, window, cx| {
             this.start_transaction_at(Instant::now(), window, cx);
             update(this, window, cx);
@@ -12781,6 +12811,7 @@ impl Deref for EditorSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EditorEvent {
+    ReadOnlyEditAttempt,
     ModalEditingChanged,
     /// Emitted when the stored review comments change (added, removed, or updated).
     ReviewCommentsChanged {

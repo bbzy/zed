@@ -1,8 +1,8 @@
 use super::{
     kk_classification::{
         ClassificationCompletion, ClassificationFailure, ClassificationJob, ConflictJob,
-        ConflictRequest, FileMutationAction, FileMutationJob, FileMutationRequest, QueuedPreview,
-        RepositoryJob, RepositoryQueue, UpdateStaleJob, WriteDependency,
+        ConflictRequest, FileEditJob, FileMutationAction, FileMutationJob, FileMutationRequest,
+        QueuedPreview, RepositoryJob, RepositoryQueue, UpdateStaleJob, WriteDependency,
     },
     kk_comparison::{Comparison, ComparisonIntent, ComparisonState},
     kk_diff::{DiffOpenMode, KkDiff},
@@ -2390,7 +2390,7 @@ impl KkPanel {
                     let advance_comparison = queued.has_dependencies();
                     let successes = queued.successes;
                     let previous = snapshot.clone();
-                    let retain_uncertain = matches!(&queued.job, RepositoryJob::Conflict(_));
+                    let retain_uncertain = matches!(&queued.job, RepositoryJob::Conflict(_) | RepositoryJob::Edit(_));
                     let mut list_previews = Vec::new();
                     let mutation_previews = match &queued.job {
                         RepositoryJob::File(job) => job.preview_id.into_iter().collect::<Vec<_>>(),
@@ -2473,6 +2473,21 @@ impl KkPanel {
                                 anyhow::Ok(ClassificationCompletion { snapshot: published_snapshot.clone().unwrap_or(snapshot), publication, published_snapshot })
                             }.await;
                             (result, original, job.take_completions(), Vec::new())
+                        }
+                        RepositoryJob::Edit(job) => {
+                            let original = job.snapshot.clone();
+                            let result = async {
+                                dependency?;
+                                this.read_with(cx, |this, cx| this.check_conflict_write(&root, cx))??;
+                                let prepared = cx.background_spawn(async move {
+                                    snapshot.repository().snapshot_before_write().await?.prepare_file_edit(&job.edit).await
+                                }).await?;
+                                this.read_with(cx, |this, cx| this.check_conflict_write(&root, cx))??;
+                                let publication = cx.background_spawn(prepared.publish()).await?;
+                                let snapshot = publication.snapshot.clone();
+                                anyhow::Ok(ClassificationCompletion { snapshot: snapshot.clone(), publication: Some(publication), published_snapshot: Some(snapshot) })
+                            }.await;
+                            (result, original, vec![job.completion], Vec::new())
                         }
                         RepositoryJob::Conflict(mut job) => {
                             job.request.snapshot = job.request.snapshot.with_performance_context(execution.context().cloned());
@@ -2769,11 +2784,11 @@ impl KkPanel {
             self.repositories
                 .iter()
                 .any(|repository| repository.snapshot.repository().root() == root),
-            "The selected repository was closed. Reopen the conflict; your draft is retained."
+            "The selected repository was closed. Reopen the repository; your draft is retained."
         );
         anyhow::ensure!(
             !self.uncertain_operations.contains_key(root),
-            "Refresh KK Workbench to confirm the previous operation before applying the resolution"
+            "Refresh KK Workbench to confirm the previous operation before changing history"
         );
         let workspace = self
             .workspace
@@ -2812,6 +2827,48 @@ impl KkPanel {
                 anyhow::anyhow!("Refresh KK Workbench before applying this restored draft")
             })?;
         repository.snapshot.repository().snapshot_at(operation)
+    }
+
+    pub(super) fn save_file_edit(
+        &mut self,
+        snapshot: Snapshot,
+        edit: kk_workbench::FileEdit,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<Snapshot>> {
+        let snapshot = match self.bind_write_snapshot(snapshot, cx) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return Task::ready(Err(anyhow::anyhow!(error.message))),
+        };
+        let root = snapshot.repository().root().to_owned();
+        if let Err(error) = self.check_conflict_write(&root, cx) {
+            return Task::ready(Err(error));
+        }
+        let (completion, completed) = futures::channel::oneshot::channel();
+        self.pending_writes += 1;
+        self.pending_status = "Saving Diffedit";
+        let start = self
+            .write_queues
+            .entry(root.clone())
+            .or_insert_with(|| RepositoryQueue::new(cx.background_executor().clone()))
+            .enqueue_edit(FileEditJob {
+                snapshot,
+                edit,
+                completion,
+            });
+        if start {
+            self.run_write_queue(root, cx);
+        }
+        cx.notify();
+        cx.spawn(async move |_, _| {
+            completed
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "Diffedit outcome was not confirmed; your draft is retained: {error}"
+                    )
+                })?
+                .map_err(|failure| anyhow::anyhow!(failure.message))
+        })
     }
 
     pub(super) fn resolve_conflict(

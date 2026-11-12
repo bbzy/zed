@@ -51,6 +51,8 @@ struct SavedDiffTab {
     working_copy: bool,
     operation: String,
     host: Option<String>,
+    #[serde(default)]
+    file_edit: Option<kk_workbench::FileEdit>,
     buffer: Option<SerializedBufferContents>,
     split: bool,
     left: bool,
@@ -670,7 +672,28 @@ pub(super) struct KkDiff {
     classification: Option<PendingClassification>,
     preview_task: Task<()>,
     error: Option<String>,
+    diffedit: DiffEditState,
     _subscriptions: Vec<Subscription>,
+}
+
+struct DiffEditState {
+    draft: Option<kk_workbench::FileEdit>,
+    requested: bool,
+    prompting: bool,
+    saving: bool,
+    task: Task<()>,
+}
+
+impl Default for DiffEditState {
+    fn default() -> Self {
+        Self {
+            draft: None,
+            requested: false,
+            prompting: false,
+            saving: false,
+            task: Task::ready(()),
+        }
+    }
 }
 
 impl KkDiff {
@@ -1052,7 +1075,9 @@ impl KkDiff {
                         })
                     });
                 if let Some(existing) = existing {
-                    if existing.read_with(cx, |view, _| view.has_pending_classification()) {
+                    if existing.read_with(cx, |view, _| {
+                        view.has_pending_classification() || view.diffedit.draft.is_some()
+                    }) {
                         workspace.update_in(cx, |workspace, window, cx| {
                             Self::show(&existing, mode, workspace, window, cx)
                         })?;
@@ -1149,6 +1174,14 @@ impl KkDiff {
                         .update(cx, |project, cx| project.open_local_buffer(path, cx))
                         .await?
                 };
+                if restored
+                    .as_ref()
+                    .is_some_and(|saved| saved.file_edit.is_some())
+                {
+                    buffer.update(cx, |buffer, cx| {
+                        buffer.set_capability(Capability::ReadWrite, cx)
+                    });
+                }
                 if let Some(contents) = saved_buffer {
                     buffer.update(cx, |buffer, cx| {
                         if buffer.capability() == Capability::ReadWrite && !buffer.is_dirty() {
@@ -1188,6 +1221,8 @@ impl KkDiff {
                         );
                         view.base_revision = base_revision;
                         view.snapshot = Some(snapshot_for_view);
+                        view.diffedit.draft =
+                            restored.as_ref().and_then(|saved| saved.file_edit.clone());
                         view
                     });
                     if let Some(saved) = restored {
@@ -1403,6 +1438,15 @@ impl KkDiff {
         let subscriptions = vec![
             cx.subscribe(&editor, |this: &mut Self, _, event: &EditorEvent, cx| {
                 this.attach_editor_addons(cx);
+                if matches!(event, EditorEvent::ReadOnlyEditAttempt)
+                    && this.supports_diffedit()
+                    && this.diffedit.draft.is_none()
+                    && !this.diffedit.prompting
+                    && !this.diffedit.saving
+                {
+                    this.diffedit.requested = true;
+                    cx.notify();
+                }
                 cx.emit(event.clone())
             }),
             cx.observe(&editor, |this: &mut Self, _, cx| {
@@ -1441,11 +1485,189 @@ impl KkDiff {
             classification: None,
             preview_task: Task::ready(()),
             error: None,
+            diffedit: DiffEditState::default(),
             _subscriptions: subscriptions,
         };
         view.update_base_language(cx);
         view.attach_editor_addons(cx);
         view
+    }
+
+    fn supports_diffedit(&self) -> bool {
+        !self.identity.working_copy
+            && self.identity.presentation == DiffPresentation::Text
+            && matches!(self.target.scope, DiffScope::Change(_))
+            && self.file.change_type != ChangeKind::Deleted
+            && !self.file.has_conflict
+    }
+
+    fn enable_diffedit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.supports_diffedit()
+            || self.diffedit.draft.is_some()
+            || self.diffedit.prompting
+            || self.diffedit.saving
+        {
+            return;
+        }
+        let Some(snapshot) = self.snapshot.clone() else {
+            return;
+        };
+        let target = self.target.clone();
+        let path = self.file.path.clone();
+        let message = format!("Enable Diffedit for {}?", self.file.path);
+        let revision = self
+            .target
+            .revision
+            .as_ref()
+            .map(|revision| format!("{} ({})", revision.change_id, revision.subject()))
+            .unwrap_or_else(|| self.target.tab_label());
+        let detail = format!(
+            "This file belongs to change {revision}. Saving will modify this change and rebase its descendants, which may cause conflicts."
+        );
+        let prompt = window.prompt(
+            gpui::PromptLevel::Warning,
+            &message,
+            Some(&detail),
+            &["Enable Diffedit", "Cancel"],
+            cx,
+        );
+        self.diffedit.prompting = true;
+        self.diffedit.task = cx.spawn_in(window, async move |this, cx| {
+            let result = async {
+                if prompt.await? != 0 {
+                    return Ok(None);
+                }
+                let DiffScope::Change(revision) = target.scope else {
+                    anyhow::bail!("Select a single change before editing");
+                };
+                let edit = cx
+                    .background_spawn(async move { snapshot.file_edit(&revision, &path).await })
+                    .await?;
+                Ok(Some(edit))
+            }
+            .await;
+            this.update_in(cx, |this, window, cx| {
+                this.diffedit.prompting = false;
+                match result {
+                    Ok(Some(edit)) => {
+                        let mut original = String::from_utf8_lossy(&edit.original).into_owned();
+                        language::LineEnding::normalize(&mut original);
+                        if this.buffer.read(cx).text() != original {
+                            this.error = Some(
+                                "The displayed file changed. Refresh before enabling Diffedit."
+                                    .into(),
+                            );
+                        } else {
+                            let item_id = cx.entity_id();
+                            if let Some(workspace) = this.workspace.upgrade()
+                                && let Some(pane) = workspace.read(cx).pane_for_item_id(item_id)
+                            {
+                                pane.update(cx, |pane, _| pane.unpreview_item_if_preview(item_id));
+                            }
+                            this.diffedit.draft = Some(edit);
+                            this.buffer.update(cx, |buffer, cx| {
+                                buffer.set_capability(Capability::ReadWrite, cx)
+                            });
+                            this.error = None;
+                            let editor = this.editor.read(cx).rhs_editor().clone();
+                            window.focus(&editor.focus_handle(cx), cx);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        this.error = Some(format!("Could not enable Diffedit: {error:#}"))
+                    }
+                }
+                cx.emit(EditorEvent::TitleChanged);
+                cx.notify();
+            })
+            .log_err();
+        });
+        cx.notify();
+    }
+
+    fn save_diffedit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Task<Result<()>> {
+        if self.diffedit.saving {
+            return Task::ready(Ok(()));
+        }
+        let result = (|| {
+            let mut edit = self
+                .diffedit
+                .draft
+                .clone()
+                .context("Diffedit is not enabled")?;
+            let buffer = self.buffer.read(cx);
+            let contents = buffer.text();
+            edit.contents = if buffer.line_ending() == language::LineEnding::Windows {
+                contents.replace('\n', "\r\n").into_bytes()
+            } else {
+                contents.into_bytes()
+            };
+            let snapshot = self.snapshot.clone().context("The diff is still loading")?;
+            let workspace = self.workspace.upgrade().context("Workspace was closed")?;
+            let panel = workspace
+                .read(cx)
+                .panel::<super::kk_panel::KkPanel>(cx)
+                .context("KK Workbench is unavailable")?;
+            anyhow::Ok((panel, snapshot, edit))
+        })();
+        let (panel, snapshot, edit) = match result {
+            Ok(values) => values,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        if !self.buffer.read(cx).is_dirty() || edit.contents == edit.original {
+            self.diffedit.draft = None;
+            self.buffer.update(cx, |buffer, cx| {
+                buffer.did_save(buffer.version(), None, cx);
+                buffer.set_capability(Capability::ReadOnly, cx);
+            });
+            cx.notify();
+            return Task::ready(Ok(()));
+        }
+        self.diffedit.saving = true;
+        // Keep the buffer writable so dirty state and crash recovery retain the draft.
+        self.editor
+            .read(cx)
+            .rhs_editor()
+            .clone()
+            .update(cx, |editor, cx| {
+                editor.set_read_only(true);
+                cx.notify();
+            });
+        let task = panel.update(cx, |panel, cx| panel.save_file_edit(snapshot, edit, cx));
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                this.diffedit.saving = false;
+                this.editor
+                    .read(cx)
+                    .rhs_editor()
+                    .clone()
+                    .update(cx, |editor, cx| {
+                        editor.set_read_only(false);
+                        cx.notify();
+                    });
+                match &result {
+                    Ok(snapshot) => {
+                        this.diffedit.draft = None;
+                        this.buffer.update(cx, |buffer, cx| {
+                            buffer.did_save(buffer.version(), None, cx);
+                            buffer.set_capability(Capability::ReadOnly, cx);
+                        });
+                        this.refresh(snapshot.clone(), cx);
+                        this.error = None;
+                    }
+                    Err(error) => {
+                        this.error = Some(format!(
+                            "Could not save Diffedit; your draft is retained: {error:#}"
+                        ))
+                    }
+                }
+                cx.emit(EditorEvent::TitleChanged);
+                cx.notify();
+            })?;
+            result.map(|_| ())
+        })
     }
 
     fn update_base_language(&mut self, cx: &mut Context<Self>) {
@@ -1482,7 +1704,11 @@ impl KkDiff {
         for editor in editors {
             if editor.read(cx).addon::<DiffAddon>().is_none() {
                 let view = cx.weak_entity();
-                editor.update(cx, |editor, _| editor.register_addon(DiffAddon(view)));
+                let right = self.editor.read(cx).rhs_editor() == &editor;
+                editor.update(cx, |editor, _| {
+                    editor.set_notify_read_only_edits(right && self.supports_diffedit());
+                    editor.register_addon(DiffAddon(view));
+                });
             }
         }
     }
@@ -1497,6 +1723,9 @@ impl KkDiff {
     }
 
     pub(super) fn refresh(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
+        if self.diffedit.draft.is_some() || self.diffedit.prompting || self.diffedit.saving {
+            return;
+        }
         if self
             .classification
             .as_ref()
@@ -1578,6 +1807,9 @@ impl KkDiff {
                 };
                 this.update(cx, |this, cx| {
                     if generation != this.refresh_generation
+                        || this.diffedit.draft.is_some()
+                        || this.diffedit.prompting
+                        || this.diffedit.saving
                         || snapshot.repository().check_lifetime().is_err()
                     {
                         return;
@@ -2231,7 +2463,10 @@ impl Focusable for KkDiff {
 }
 
 impl Render for KkDiff {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.diffedit.requested) {
+            self.enable_diffedit(window, cx);
+        }
         self.controls.update(cx, |controls, cx| {
             if let Some(snapshot) = self.snapshot.clone() {
                 controls.set_context(snapshot, self.target.clone(), self.workspace.clone(), cx);
@@ -2288,7 +2523,10 @@ impl Item for KkDiff {
     }
 
     fn can_split(&self) -> bool {
-        !self.identity.working_copy && !self.has_pending_classification()
+        !self.identity.working_copy
+            && !self.has_pending_classification()
+            && self.diffedit.draft.is_none()
+            && !self.diffedit.prompting
     }
 
     fn clone_on_split(
@@ -2397,7 +2635,12 @@ impl Item for KkDiff {
     }
 
     fn tab_content_text(&self, _: usize, _: &App) -> SharedString {
-        self.identity.title(&self.target, &self.file)
+        let title = self.identity.title(&self.target, &self.file);
+        if self.diffedit.draft.is_some() {
+            format!("{title} [Diffedit]").into()
+        } else {
+            title
+        }
     }
     fn tab_tooltip_text(&self, _: &App) -> Option<SharedString> {
         Some(
@@ -2451,8 +2694,22 @@ impl Item for KkDiff {
     fn as_searchable(&self, _: &Entity<Self>, _: &App) -> Option<Box<dyn SearchableItemHandle>> {
         Some(Box::new(self.editor.clone()))
     }
+    fn can_toggle_read_only(&self, _: &App) -> bool {
+        self.supports_diffedit()
+            && self.diffedit.draft.is_none()
+            && !self.diffedit.prompting
+            && !self.diffedit.saving
+    }
+    fn toggle_read_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.diffedit.draft.is_none() {
+            self.enable_diffedit(window, cx);
+        }
+    }
+    fn can_autosave(&self, _: &App) -> bool {
+        !self.supports_diffedit()
+    }
     fn can_save(&self, cx: &App) -> bool {
-        self.editor.read(cx).can_save(cx)
+        self.diffedit.draft.is_some() || self.editor.read(cx).can_save(cx)
     }
     fn buffer_kind(&self, _: &App) -> ItemBufferKind {
         // Excerpts render the diff, but the item edits one file.
@@ -2522,6 +2779,31 @@ impl Item for KkDiff {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
+        if let Some(edit) = self.diffedit.draft.clone() {
+            if self.diffedit.saving {
+                return Task::ready(Err(anyhow::anyhow!("Wait for Diffedit to finish saving")));
+            }
+            let text = match String::from_utf8(edit.original) {
+                Ok(text) => text,
+                Err(error) => return Task::ready(Err(error.into())),
+            };
+            let edits = self.buffer.read(cx).diff(text, cx);
+            return cx.spawn(async move |this, cx| {
+                let edits = edits.await;
+                this.update(cx, |this, cx| {
+                    this.buffer.update(cx, |buffer, cx| {
+                        buffer.apply_diff(edits, cx);
+                        buffer.did_save(buffer.version(), None, cx);
+                        buffer.set_capability(Capability::ReadOnly, cx);
+                    });
+                    this.diffedit.draft = None;
+                    this.error = None;
+                    cx.emit(EditorEvent::TitleChanged);
+                    cx.notify();
+                })?;
+                Ok(())
+            });
+        }
         self.editor
             .update(cx, |editor, cx| editor.reload(project, window, cx))
     }
@@ -2539,6 +2821,12 @@ impl Item for KkDiff {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
+        if self.diffedit.draft.is_some() {
+            if options.autosave {
+                return Task::ready(Ok(()));
+            }
+            return self.save_diffedit(window, cx);
+        }
         self.editor
             .update(cx, |editor, cx| editor.save(options, project, window, cx))
     }
@@ -2698,6 +2986,7 @@ impl SerializableItem for KkDiff {
                         let selected_editor = editor.focused_editor().clone();
                         let left = editor.lhs_editor() == Some(&selected_editor);
                         anyhow::Ok(SavedDiffTab {
+                            file_edit: this.diffedit.draft.clone(),
                             root: this.identity.root.clone(),
                             target: this.target.clone(),
                             file: this.file.clone(),
@@ -2739,7 +3028,8 @@ impl SerializableItem for KkDiff {
     fn should_serialize(&self, event: &EditorEvent) -> bool {
         matches!(
             event,
-            EditorEvent::BufferEdited
+            EditorEvent::TitleChanged
+                | EditorEvent::BufferEdited
                 | EditorEvent::Edited { .. }
                 | EditorEvent::TransactionUndone { .. }
                 | EditorEvent::Saved
@@ -3142,6 +3432,250 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[gpui::test]
+    async fn kk_diffedit_confirms_saves_and_relocks_in_place(cx: &mut TestAppContext) {
+        let directory = super::super::kk_multi_diff::tests::local_fixture(cx).await;
+        let root = directory.path().join("repo");
+        run_kk(&root, &["new", "-m", "descendant"])
+            .await
+            .expect("freeze target");
+        let repository = kk_workbench::Repository::open(&root, Path::new("kk"))
+            .await
+            .expect("repository");
+        let snapshot = repository.snapshot(true).await.expect("snapshot");
+        let revision = snapshot.exact_revision("@-").await.expect("target");
+        let target = DiffTarget::change(&revision);
+        let file = snapshot
+            .changed_files(&target.scope)
+            .await
+            .expect("files")
+            .into_iter()
+            .find(|file| file.path == "a.txt")
+            .expect("file");
+        cx.update(|cx| {
+            editor::init(cx);
+            crate::init(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(&root, json!({"a.txt":"new a\n"})).await;
+        cx.update(|cx| <dyn Fs>::set_global(fs.clone(), cx));
+        let project = Project::test(fs, [root.as_path()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |view, _| view.workspace().clone());
+        let panel = cx
+            .update(|window, cx| {
+                super::super::kk_panel::KkPanel::load(workspace.downgrade(), window.to_async(cx))
+            })
+            .await
+            .expect("panel");
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx)
+        });
+        panel
+            .update(cx, |panel, cx| panel.refresh_for_test(cx))
+            .await;
+        let view = cx
+            .update(|window, cx| {
+                KkDiff::open(
+                    snapshot.clone(),
+                    target,
+                    file,
+                    false,
+                    workspace.downgrade(),
+                    DiffOpenMode::Open,
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("diff");
+        let (multi_target, multi_file) =
+            view.read_with(cx, |view, _| (view.target.clone(), view.file.clone()));
+        let multi = cx
+            .update(|window, cx| {
+                super::super::kk_multi_diff::KkMultiDiff::open(
+                    snapshot.clone(),
+                    multi_target,
+                    vec![multi_file],
+                    false,
+                    workspace.downgrade(),
+                    DiffOpenMode::Hidden,
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("historical multi-file view");
+        multi
+            .update(cx, |multi, cx| {
+                multi.refresh_for_focus(snapshot.clone(), cx)
+            })
+            .await;
+        let identifier = view.entity_id();
+        let buffer = view.read_with(cx, |view, _| view.buffer.clone());
+        let editor = view.read_with(cx, |view, cx| view.editor.read(cx).rhs_editor().clone());
+        assert_eq!(
+            buffer.read_with(cx, |buffer, _| buffer.capability()),
+            Capability::ReadOnly
+        );
+        editor.update_in(cx, |editor, window, cx| {
+            editor.handle_input("discarded", window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.has_pending_prompt());
+        editor.update_in(cx, |editor, window, cx| {
+            editor.handle_input("also discarded", window, cx)
+        });
+        cx.run_until_parked();
+        cx.simulate_prompt_answer("Cancel");
+        view.update(cx, |view, _| {
+            std::mem::replace(&mut view.diffedit.task, Task::ready(()))
+        })
+        .await;
+        assert_eq!(buffer.read_with(cx, |buffer, _| buffer.text()), "new a\n");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            !cx.has_pending_prompt(),
+            "cancel must not reopen a duplicate prompt"
+        );
+        let lock = cx
+            .debug_bounds("ICON-FileLock")
+            .expect("native read-only lock");
+        cx.simulate_click(lock.center(), gpui::Modifiers::none());
+        cx.simulate_prompt_answer("Enable Diffedit");
+        view.update(cx, |view, _| {
+            std::mem::replace(&mut view.diffedit.task, Task::ready(()))
+        })
+        .await;
+        assert!(!editor.read_with(cx, |editor, cx| editor.read_only(cx)));
+        view.update_in(cx, |view, window, cx| {
+            view.editor
+                .update(cx, |editor, cx| editor.split(window, cx));
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            let left = view.editor.read(cx).lhs_editor().expect("left comparison");
+            assert!(left.read(cx).read_only(cx));
+            assert!(!left.read(cx).notifies_read_only_edits());
+        });
+        assert_eq!(
+            multi.read_with(cx, |multi, cx| multi.capability(cx)),
+            Capability::ReadOnly,
+            "unlocking one file must not unlock a historical multi-file view"
+        );
+        assert!(!view.read_with(cx, |view, cx| view.can_autosave(cx)));
+        assert_eq!(buffer.read_with(cx, |buffer, _| buffer.text()), "new a\n");
+        editor.update_in(cx, |editor, window, cx| {
+            editor.handle_input("edited ", window, cx)
+        });
+        let expected = buffer.read_with(cx, |buffer, _| buffer.text());
+        assert_ne!(expected, "new a\n", "the unlocked side must accept input");
+        assert!(buffer.read_with(cx, |buffer, _| buffer.is_dirty()));
+
+        view.update_in(cx, |view, window, cx| {
+            view.save(
+                SaveOptions {
+                    autosave: true,
+                    ..Default::default()
+                },
+                project.clone(),
+                window,
+                cx,
+            )
+        })
+        .await
+        .expect("ignored autosave");
+        assert_eq!(std::fs::read(root.join("a.txt")).expect("disk"), b"new a\n");
+        view.update_in(cx, |view, window, cx| {
+            view.save(SaveOptions::default(), project, window, cx)
+        })
+        .await
+        .expect("save edit");
+        view.update(cx, |view, _| {
+            std::mem::replace(&mut view.refresh_task, Task::ready(()))
+        })
+        .await;
+        assert_eq!(view.entity_id(), identifier);
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.buffer, buffer);
+            assert!(view.diffedit.draft.is_none());
+            assert_eq!(view.capability(cx), Capability::ReadOnly);
+            assert!(!view.is_dirty(cx));
+            assert!(view.error.is_none(), "{:?}", view.error);
+        });
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).expect("rebased content"),
+            expected
+        );
+        let current = repository.snapshot(true).await.expect("updated snapshot");
+        assert_eq!(
+            current
+                .file_content(&revision.revset(), "a.txt")
+                .await
+                .expect("saved target"),
+            expected.as_bytes()
+        );
+        assert_ne!(
+            current
+                .exact_revision(&revision.revset())
+                .await
+                .expect("rewritten change")
+                .full_commit_id,
+            revision.full_commit_id
+        );
+        view.update_in(cx, |view, window, cx| view.toggle_read_only(window, cx));
+        cx.simulate_prompt_answer("Enable Diffedit");
+        view.update(cx, |view, _| {
+            std::mem::replace(&mut view.diffedit.task, Task::ready(()))
+        })
+        .await;
+        editor.update_in(cx, |editor, window, cx| {
+            editor.handle_input("retained draft", window, cx)
+        });
+        let draft = buffer.read_with(cx, |buffer, _| buffer.text());
+        run_kk(
+            &root,
+            &[
+                "describe",
+                "-r",
+                &revision.revset(),
+                "-m",
+                "external rewrite",
+            ],
+        )
+        .await
+        .expect("external rewrite");
+        assert!(
+            view.update_in(cx, |view, window, cx| view.save(
+                SaveOptions::default(),
+                workspace.read(cx).project().clone(),
+                window,
+                cx
+            ))
+            .await
+            .is_err()
+        );
+        view.read_with(cx, |view, cx| {
+            assert!(view.diffedit.draft.is_some());
+            assert_eq!(view.buffer.read(cx).text(), draft);
+            assert!(view.is_dirty(cx));
+            assert!(view.error.is_some());
+            assert_eq!(view.capability(cx), Capability::ReadWrite);
+        });
+        view.update_in(cx, |view, window, cx| {
+            view.reload(workspace.read(cx).project().clone(), window, cx)
+        })
+        .await
+        .expect("discard draft");
+        view.read_with(cx, |view, cx| {
+            assert!(view.diffedit.draft.is_none());
+            assert_eq!(view.capability(cx), Capability::ReadOnly);
+            assert_eq!(view.buffer.read(cx).text(), expected);
+        });
     }
 
     #[gpui::test]

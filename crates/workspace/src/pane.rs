@@ -3091,7 +3091,7 @@ impl Pane {
                     .children(if let Some(icon) = icon {
                         Some(icon)
                     } else if !capability.editable() {
-                        Some(read_only_toggle(capability == Capability::Read).into_any_element())
+                        Some(read_only_toggle(item.can_toggle_read_only(cx)).into_any_element())
                     } else {
                         None
                     })
@@ -3112,9 +3112,13 @@ impl Pane {
                         }
                         None => this,
                     })
-                    .when(capability == Capability::Read && has_file_icon, |this| {
-                        this.child(read_only_toggle(true))
-                    }),
+                    .when(
+                        has_file_icon
+                            && (capability == Capability::Read
+                                || (capability == Capability::ReadOnly
+                                    && item.can_toggle_read_only(cx))),
+                        |this| this.child(read_only_toggle(true)),
+                    ),
             );
 
         let single_entry_to_resolve = (self.items[ix].buffer_kind(cx) == ItemBufferKind::Singleton)

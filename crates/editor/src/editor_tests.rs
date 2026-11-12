@@ -18681,6 +18681,46 @@ async fn test_snippet_with_multi_word_prefix(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_read_only_edit_attempt_notification_is_opt_in(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorTestContext::new(cx).await;
+    cx.set_state("abˇcd");
+    let attempts = Rc::new(RefCell::new(0));
+    cx.update_editor({
+        let attempts = attempts.clone();
+        move |editor, window, cx| {
+            editor.set_read_only(true);
+            let entity = cx.entity();
+            cx.subscribe_in(&entity, window, move |_, _, event: &EditorEvent, _, _| {
+                if matches!(event, EditorEvent::ReadOnlyEditAttempt) {
+                    *attempts.borrow_mut() += 1;
+                }
+            })
+            .detach();
+            editor.handle_input("ignored", window, cx);
+        }
+    });
+    cx.run_until_parked();
+    assert_eq!(*attempts.borrow(), 0);
+    cx.update_editor(|editor, window, cx| {
+        editor.set_notify_read_only_edits(true);
+        editor.handle_input("ignored", window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(*attempts.borrow(), 1);
+    cx.assert_editor_state("abˇcd");
+    cx.update_editor(|editor, window, cx| editor.newline(&Newline, window, cx));
+    cx.run_until_parked();
+    assert_eq!(*attempts.borrow(), 2);
+    cx.assert_editor_state("abˇcd");
+    cx.update_editor(|editor, window, cx| {
+        editor.set_read_only(false);
+        editor.handle_input("x", window, cx);
+    });
+    cx.assert_editor_state("abxˇcd");
+}
+
+#[gpui::test]
 async fn test_read_only_buffer_is_not_formatted_or_saved(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
 

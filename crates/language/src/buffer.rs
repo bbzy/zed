@@ -1645,7 +1645,10 @@ impl Buffer {
     pub fn set_capability(&mut self, capability: Capability, cx: &mut Context<Self>) {
         if self.capability != capability {
             self.capability = capability;
-            cx.emit(BufferEvent::CapabilityChanged)
+            self.non_text_state_update_count += 1;
+            self.was_changed();
+            cx.emit(BufferEvent::CapabilityChanged);
+            cx.notify();
         }
     }
 

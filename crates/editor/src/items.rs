@@ -919,6 +919,10 @@ impl Item for Editor {
         self.capability(cx)
     }
 
+    fn can_toggle_read_only(&self, cx: &App) -> bool {
+        self.buffer.read(cx).as_singleton().is_some() && self.capability(cx) != Capability::ReadOnly
+    }
+
     // Note: this mirrors the logic in `Editor::toggle_read_only`, but is reachable
     // without relying on focus-based action dispatch.
     fn toggle_read_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {

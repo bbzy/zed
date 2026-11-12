@@ -43,7 +43,7 @@ pub struct DiagnosticOutput {
     pub text: String,
 }
 
-const PROTOCOL_VERSION: u32 = 6;
+const PROTOCOL_VERSION: u32 = 7;
 
 pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     Ok(bincode::DefaultOptions::new().serialize(&(PROTOCOL_VERSION, value))?)
@@ -234,6 +234,10 @@ pub enum Request {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Read {
+    FileEdit {
+        revision: String,
+        path: String,
+    },
     Revisions {
         revset: Option<String>,
         limit: usize,
@@ -323,6 +327,9 @@ pub enum Read {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Mutation {
+    EditFile {
+        edit: crate::FileEdit,
+    },
     Classify {
         previous: SnapshotInfo,
         request: ClassificationRequest,
@@ -1034,6 +1041,7 @@ impl Service {
             }
             Read::Annotate { revision, path } => data(snapshot.annotate(&revision, &path).await?),
             Read::ConflictedPaths { revision } => data(snapshot.conflicted_paths(&revision).await?),
+            Read::FileEdit { revision, path } => data(snapshot.file_edit(&revision, &path).await?),
             Read::FileConflict { revision, path } => {
                 data(snapshot.file_conflict(&revision, &path).await?)
             }
@@ -1151,6 +1159,7 @@ impl Service {
             Mutation::Revert { scope, file } => {
                 Prepared::File(snapshot.prepare_file_revert(&scope, &file).await?)
             }
+            Mutation::EditFile { edit } => Prepared::File(snapshot.prepare_file_edit(&edit).await?),
             Mutation::ResolveConflict {
                 conflict,
                 acknowledged_commit,
@@ -1424,7 +1433,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("protocol version 2 (expected 6)"),
+                .contains("protocol version 2 (expected 7)"),
             "{error:#}"
         );
         let revision: Revision = serde_json::from_value(serde_json::json!({

@@ -1,13 +1,21 @@
 use crate::{
     ChangeKind, ChangedFile, DiffScope, Publication, Revision, Snapshot, transaction::Transaction,
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 pub enum FileMoveDirection {
     Parent,
     Child,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FileEdit {
+    pub revision: Revision,
+    pub path: String,
+    pub original: Vec<u8>,
+    pub contents: Vec<u8>,
 }
 
 pub struct PreparedFileMutation {
@@ -30,6 +38,184 @@ impl PreparedFileMutation {
 }
 
 impl Snapshot {
+    pub async fn file_edit(&self, revision: &str, path: &str) -> Result<FileEdit> {
+        if let Some(remote) = self.repository().remote() {
+            return remote
+                .read(
+                    self,
+                    crate::remote::Read::FileEdit {
+                        revision: revision.into(),
+                        path: path.into(),
+                    },
+                )
+                .await;
+        }
+        crate::repository::validate_path(path)?;
+        ensure!(
+            !crate::repository::is_metadata_path(path),
+            "Repository metadata cannot be edited"
+        );
+        let revision = self.exact_revision(revision).await?;
+        ensure!(
+            !revision.is_working_copy,
+            "Use the normal editor for the working copy"
+        );
+        let immutable = self
+            .read(&[
+                "log".into(),
+                "-r".into(),
+                revision.full_commit_id.clone(),
+                "--no-graph".into(),
+                "-T".into(),
+                "immutable".into(),
+            ])
+            .await?;
+        ensure!(
+            immutable == b"false",
+            "This change is immutable and cannot be edited"
+        );
+        let information = self
+            .file_information(&revision.full_commit_id, path)
+            .await?;
+        ensure!(
+            information.file_type.as_deref() == Some("file") && information.pointer.is_none(),
+            "Diffedit supports existing regular text files only"
+        );
+        ensure!(
+            !self
+                .conflicted_paths(&revision.full_commit_id)
+                .await?
+                .iter()
+                .any(|conflict| conflict == path),
+            "Use the conflict editor to resolve this file"
+        );
+        let original = self.file_content(&revision.full_commit_id, path).await?;
+        std::str::from_utf8(&original)?;
+        ensure!(
+            !original.contains(&0),
+            "Diffedit does not support binary files"
+        );
+        Ok(FileEdit {
+            revision,
+            path: path.into(),
+            contents: original.clone(),
+            original,
+        })
+    }
+
+    pub async fn prepare_file_edit(&self, edit: &FileEdit) -> Result<PreparedFileMutation> {
+        if let Some(remote) = self.repository().remote() {
+            let prepared = remote
+                .prepare(
+                    self,
+                    crate::remote::Mutation::EditFile { edit: edit.clone() },
+                )
+                .await?
+                .context("Missing remote file edit")?;
+            return Ok(PreparedFileMutation {
+                transaction: crate::transaction::PreparedTransaction::Remote(prepared),
+                targets: Vec::new(),
+            });
+        }
+
+        crate::repository::validate_path(&edit.path)?;
+        ensure!(
+            !crate::repository::is_metadata_path(&edit.path),
+            "Repository metadata cannot be edited"
+        );
+        ensure!(
+            !edit.contents.contains(&0),
+            "Diffedit supports UTF-8 text without NUL bytes"
+        );
+        std::str::from_utf8(&edit.contents)?;
+        let mut transaction = Transaction::begin(self).await?;
+        let target = format!("exactly({}, 1)", edit.revision.revset());
+        let actual = self.file_edit(&target, &edit.path).await?;
+        let current = actual.revision;
+        ensure!(
+            current.full_commit_id == edit.revision.full_commit_id,
+            "This change changed since Diffedit was enabled. Your draft is retained; nothing was overwritten."
+        );
+        ensure!(
+            actual.original == edit.original,
+            "The file changed. Your draft is retained"
+        );
+
+        let directory = smol::unblock(|| {
+            tempfile::Builder::new()
+                .prefix("zed-kk-diffedit-")
+                .tempdir()
+        })
+        .await?;
+        let result = async {
+            let expected = directory.path().join("expected");
+            let replacement = directory.path().join("result");
+            let validated = directory.path().join("validated");
+            let script = directory.path().join("edit.sh");
+            smol::fs::write(&expected, &edit.original).await?;
+            smol::fs::write(&replacement, &edit.contents).await?;
+            smol::fs::write(&script, crate::conflict::RESOLUTION_EDITOR).await?;
+            let arguments = serde_json::to_string(&[
+                script.to_str().context("Temporary path is not UTF-8")?,
+                "$right",
+                &edit.path,
+                expected.to_str().context("Temporary path is not UTF-8")?,
+                replacement
+                    .to_str()
+                    .context("Temporary path is not UTF-8")?,
+                "write",
+                "preserve",
+                validated.to_str().context("Temporary path is not UTF-8")?,
+            ])?;
+            transaction
+                .prepare(&[
+                    "--config",
+                    "merge-tools.zed-kk-diffedit.program=\"/bin/sh\"",
+                    "--config",
+                    &format!("merge-tools.zed-kk-diffedit.edit-args={arguments}"),
+                    "diffedit",
+                    "--from",
+                    "root()",
+                    "--to",
+                    &target,
+                    "--tool",
+                    "zed-kk-diffedit",
+                    "--",
+                    &crate::repository::literal_fileset(&edit.path)?,
+                ])
+                .await?;
+            ensure!(
+                smol::fs::read(&validated).await? == b"ok",
+                "KK did not validate the diffedit checkout"
+            );
+            let prepared = transaction.snapshot();
+            let changed = prepared
+                .changed_files(&DiffScope::Comparison {
+                    base: current.full_commit_id,
+                    target: target.clone(),
+                })
+                .await?;
+            ensure!(
+                changed
+                    .iter()
+                    .all(|file| file.path == edit.path && file.renamed_from.is_none()),
+                "Diffedit changed an unexpected path. Nothing was published"
+            );
+            ensure!(
+                prepared.file_content(&target, &edit.path).await? == edit.contents,
+                "The prepared edit does not match the submitted content. Nothing was published"
+            );
+            anyhow::Ok(())
+        }
+        .await;
+        smol::unblock(move || directory.close()).await?;
+        result?;
+        Ok(PreparedFileMutation {
+            transaction: transaction.into(),
+            targets: vec![target],
+        })
+    }
+
     pub async fn verify_file_version(
         &self,
         previous: &str,

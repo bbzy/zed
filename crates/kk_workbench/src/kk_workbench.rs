@@ -32,7 +32,7 @@ pub use conflict_model::{
 pub use diagnostics::{Diagnostics, PerformanceContext, PerformanceSpan};
 pub use discovery::{Discovery, DiscoveryError, discover, discover_with_diagnostics};
 pub use file::{BlameLine, FileInformation, LfsPointer, SparseCheckout};
-pub use file_mutation::{FileMoveDirection, PreparedFileMutation};
+pub use file_mutation::{FileEdit, FileMoveDirection, PreparedFileMutation};
 pub use history::{GraphRow, HistoryMode, HistoryPage, Revision, history_graph, rank_revisions};
 pub use opening::DiffOpening;
 pub use preview::{ClassificationPreview, TransferDirection};
