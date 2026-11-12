@@ -46,6 +46,7 @@ async fn load_review_diff(
 pub(super) struct KkDiffControls {
     pub editor: Entity<SplittableEditor>,
     pub showing_full_file: bool,
+    ignore_trim_whitespace: bool,
     pub status: Option<git::status::FileStatus>,
     pub generic_style_controls: bool,
     pub aggregate: bool,
@@ -135,6 +136,7 @@ impl KkDiffControls {
         Self {
             editor,
             showing_full_file,
+            ignore_trim_whitespace: true,
             status: None,
             generic_style_controls: false,
             aggregate: false,
@@ -301,6 +303,7 @@ impl KkDiffControls {
             })
             .collect();
         self.buffers = buffers;
+        self.apply_whitespace_preference(cx);
         cx.notify();
     }
 
@@ -346,9 +349,13 @@ impl KkDiffControls {
         if self.showing_full_file != value {
             self.set_full_file(value, window, cx);
         }
+        self.ignore_trim_whitespace = preference.read(cx).ignore_trim_whitespace();
+        self.apply_whitespace_preference(cx);
         self.diff_display_subscription =
             Some(
                 cx.observe_in(&preference, window, |this, preference, window, cx| {
+                    this.ignore_trim_whitespace = preference.read(cx).ignore_trim_whitespace();
+                    this.apply_whitespace_preference(cx);
                     let value = preference.read(cx).showing_full_file();
                     if this.showing_full_file != value {
                         this.set_full_file(value, window, cx);
@@ -357,6 +364,29 @@ impl KkDiffControls {
                 }),
             );
         self.diff_display = Some(preference);
+    }
+
+    fn apply_whitespace_preference(&self, cx: &mut Context<Self>) {
+        for (_, diff, is_text) in &self.buffers {
+            if *is_text {
+                diff.update(cx, |diff, cx| {
+                    diff.set_ignore_trim_whitespace(self.ignore_trim_whitespace, cx);
+                });
+            }
+        }
+    }
+
+    pub(super) fn toggle_ignore_trim_whitespace(&mut self, cx: &mut Context<Self>) {
+        if let Some(preference) = self.diff_display.clone() {
+            preference.update(cx, |preference, cx| {
+                preference.toggle_ignore_trim_whitespace(cx)
+            });
+            self.ignore_trim_whitespace = preference.read(cx).ignore_trim_whitespace();
+        } else {
+            self.ignore_trim_whitespace = !self.ignore_trim_whitespace;
+        }
+        self.apply_whitespace_preference(cx);
+        cx.notify();
     }
 
     pub fn toggle_full_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -601,6 +631,7 @@ impl KkDiffControls {
                     .is_some_and(|operations| operations.supports_restore())
             })
         });
+        let ignore_trim_whitespace = this.ignore_trim_whitespace;
         let review_count = this.review_count;
         let aggregate = this.aggregate;
         let showing_commit_details = this.showing_commit_details(cx);
@@ -627,6 +658,21 @@ impl KkDiffControls {
             .py_1()
             .gap_1p5()
             .flex_wrap()
+            .child(
+                ui::Button::new("ignore-trim-whitespace", "Ignore Trim Whitespace")
+                    .toggle_state(ignore_trim_whitespace)
+                    .tooltip(Tooltip::text(
+                        "Ignore changes in leading and trailing spaces and tabs",
+                    ))
+                    .on_click({
+                        let controls = controls.clone();
+                        move |_, _, cx| {
+                            controls.update(cx, |controls, cx| {
+                                controls.toggle_ignore_trim_whitespace(cx);
+                            });
+                        }
+                    }),
+            )
             .when_some(context, |this, (snapshot, target, workspace)| {
                 let historical = target
                     .revision

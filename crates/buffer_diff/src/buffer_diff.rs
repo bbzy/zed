@@ -26,6 +26,8 @@ pub struct BufferDiff {
     secondary_diff: Option<Entity<BufferDiff>>,
     buffer_snapshot: text::BufferSnapshot,
     operations: Option<Arc<dyn DiffOperations>>,
+    ignore_trim_whitespace: bool,
+    whitespace_task: Option<Task<()>>,
 }
 
 pub trait DiffOperations {
@@ -90,6 +92,7 @@ pub struct BufferDiffSnapshot {
     pending_hunks: SumTree<PendingHunk>,
     base_text: language::BufferSnapshot,
     base_text_exists: bool,
+    ignore_trim_whitespace: bool,
     buffer_snapshot: text::BufferSnapshot,
     secondary_diff: Option<Arc<BufferDiffSnapshot>>,
 }
@@ -109,6 +112,7 @@ pub struct BufferDiffUpdate {
     hunks: SumTree<InternalDiffHunk>,
     base_text: language::BufferSnapshot,
     base_text_exists: bool,
+    ignore_trim_whitespace: bool,
     buffer_snapshot: text::BufferSnapshot,
 }
 
@@ -1221,10 +1225,29 @@ fn build_diff_options(
         })
 }
 
+fn trim_line(line: &str) -> &str {
+    line.strip_suffix('\n')
+        .unwrap_or(line)
+        .trim_matches([' ', '\t'])
+}
+
+fn comparison_line(line: &str, ignore_trim_whitespace: bool) -> std::borrow::Cow<'_, [u8]> {
+    if ignore_trim_whitespace {
+        let mut content = trim_line(line).to_owned();
+        if line.ends_with('\n') {
+            content.push('\n');
+        }
+        std::borrow::Cow::Owned(content.into_bytes())
+    } else {
+        std::borrow::Cow::Borrowed(line.as_bytes())
+    }
+}
+
 fn compute_hunks(
     diff_base: Option<(Arc<str>, Rope)>,
     buffer: &text::BufferSnapshot,
     diff_options: Option<DiffOptions>,
+    ignore_trim_whitespace: bool,
 ) -> SumTree<InternalDiffHunk> {
     let mut tree = SumTree::new(buffer);
 
@@ -1234,7 +1257,11 @@ fn compute_hunks(
         // A common case in Zed is that the empty buffer is represented as just a newline,
         // but if we just compute a naive diff you get a "preserved" line in the middle,
         // which is a bit odd.
-        if buffer_text == "\n" && diff_base.ends_with("\n") && diff_base.len() > 1 {
+        if !ignore_trim_whitespace
+            && buffer_text == "\n"
+            && diff_base.ends_with("\n")
+            && diff_base.len() > 1
+        {
             tree.push(
                 InternalDiffHunk {
                     buffer_range: buffer.anchor_before(0)..buffer.anchor_before(0),
@@ -1249,7 +1276,10 @@ fn compute_hunks(
             return tree;
         }
 
-        let input = InternedInput::new(lines(diff_base.as_ref()), lines(buffer_text.as_str()));
+        let comparison_line = |line| comparison_line(line, ignore_trim_whitespace);
+        let mut input = InternedInput::default();
+        input.update_before(lines(diff_base.as_ref()).map(comparison_line));
+        input.update_after(lines(buffer_text.as_str()).map(comparison_line));
         let mut diff = Diff::compute(Algorithm::Histogram, &input);
         // Canonicalize the placement of ambiguous hunks (git's slider/indent
         // heuristic). Without this, diffs of the same buffer against different
@@ -1258,7 +1288,13 @@ fn compute_hunks(
         // misbehaves: hunks render as staged when they aren't, and staging or
         // unstaging them corrupts the index.
         diff.postprocess_lines(&input);
-        let mut sink = HunkSink::new(&diff_base, &diff_base_rope, buffer, diff_options.as_ref());
+        let mut sink = HunkSink::new(
+            &diff_base,
+            &diff_base_rope,
+            buffer,
+            diff_options.as_ref(),
+            ignore_trim_whitespace,
+        );
         for hunk in diff.hunks() {
             sink.process_change(hunk.before, hunk.after);
         }
@@ -1284,6 +1320,7 @@ struct HunkSink<'a> {
     diff_base_rope: &'a Rope,
     buffer: &'a text::BufferSnapshot,
     diff_options: Option<&'a DiffOptions>,
+    ignore_trim_whitespace: bool,
     old_line_offsets: Vec<usize>,
     hunks: Vec<InternalDiffHunk>,
 }
@@ -1294,6 +1331,7 @@ impl<'a> HunkSink<'a> {
         diff_base_rope: &'a Rope,
         buffer: &'a text::BufferSnapshot,
         diff_options: Option<&'a DiffOptions>,
+        ignore_trim_whitespace: bool,
     ) -> Self {
         let old_line_offsets = Self::compute_line_offsets(diff_base);
         Self {
@@ -1301,6 +1339,7 @@ impl<'a> HunkSink<'a> {
             buffer,
             diff_options,
             old_line_offsets,
+            ignore_trim_whitespace,
             hunks: Vec::new(),
         }
     }
@@ -1345,14 +1384,41 @@ impl HunkSink<'_> {
                 .collect();
             let buffer_text: String = self.buffer.text_for_range(buffer_range.clone()).collect();
 
-            let (base_word_diffs, buffer_word_diffs_relative) = word_diff_ranges(
-                &base_text,
-                &buffer_text,
-                DiffOptions {
-                    language_scope: diff_options.language_scope.clone(),
-                    ..*diff_options
-                },
-            );
+            let options = || DiffOptions {
+                language_scope: diff_options.language_scope.clone(),
+                ..*diff_options
+            };
+            let (base_word_diffs, buffer_word_diffs_relative) = if self.ignore_trim_whitespace {
+                let mut base_ranges = Vec::new();
+                let mut buffer_ranges = Vec::new();
+                let mut base_offset = 0;
+                let mut buffer_offset = 0;
+                for (base_line, buffer_line) in lines(&base_text).zip(lines(&buffer_text)) {
+                    let base_content = trim_line(base_line);
+                    let buffer_content = trim_line(buffer_line);
+                    let base_start = base_offset + base_line.len()
+                        - base_line.trim_start_matches([' ', '\t']).len();
+                    let buffer_start = buffer_offset + buffer_line.len()
+                        - buffer_line.trim_start_matches([' ', '\t']).len();
+                    let (base_changes, buffer_changes) =
+                        word_diff_ranges(base_content, buffer_content, options());
+                    base_ranges.extend(
+                        base_changes
+                            .into_iter()
+                            .map(|range| base_start + range.start..base_start + range.end),
+                    );
+                    buffer_ranges.extend(
+                        buffer_changes
+                            .into_iter()
+                            .map(|range| buffer_start + range.start..buffer_start + range.end),
+                    );
+                    base_offset += base_line.len();
+                    buffer_offset += buffer_line.len();
+                }
+                (base_ranges, buffer_ranges)
+            } else {
+                word_diff_ranges(&base_text, &buffer_text, options())
+            };
 
             let buffer_start_offset = buffer_range.start.to_offset(self.buffer);
             let buffer_word_diffs = buffer_word_diffs_relative
@@ -1638,6 +1704,8 @@ impl BufferDiff {
             buffer_snapshot: buffer.clone(),
             secondary_diff: None,
             operations: None,
+            ignore_trim_whitespace: false,
+            whitespace_task: None,
         }
     }
 
@@ -1653,6 +1721,8 @@ impl BufferDiff {
             buffer_snapshot: buffer.clone(),
             secondary_diff: None,
             operations: None,
+            ignore_trim_whitespace: false,
+            whitespace_task: None,
         }
     }
 
@@ -1680,6 +1750,7 @@ impl BufferDiff {
             pending_hunks: SumTree::new(buffer),
             base_text: base_text_snapshot,
             base_text_exists: true,
+            ignore_trim_whitespace: false,
             buffer_snapshot: buffer.clone(),
             secondary_diff: None,
         };
@@ -1691,6 +1762,8 @@ impl BufferDiff {
             buffer_snapshot: buffer.clone(),
             secondary_diff: None,
             operations: None,
+            ignore_trim_whitespace: false,
+            whitespace_task: None,
         }
     }
 
@@ -1719,6 +1792,42 @@ impl BufferDiff {
         ));
         this.set_snapshot(update, cx);
         this
+    }
+
+    pub fn ignore_trim_whitespace(&self) -> bool {
+        self.ignore_trim_whitespace
+    }
+
+    pub fn set_ignore_trim_whitespace(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.ignore_trim_whitespace == enabled {
+            return;
+        }
+        self.ignore_trim_whitespace = enabled;
+        self.whitespace_task = None;
+        let Some(snapshot) = self.diff_snapshot.clone() else {
+            return;
+        };
+        let update = self.update_diff(
+            snapshot.buffer_snapshot.clone(),
+            &snapshot.base_text,
+            snapshot
+                .base_text_exists
+                .then(|| Arc::from(snapshot.base_text.text())),
+            cx,
+        );
+        self.whitespace_task = Some(cx.spawn(async move |this, cx| {
+            let update = update.await;
+            this.update(cx, |this, cx| {
+                if this.ignore_trim_whitespace == update.ignore_trim_whitespace
+                    && this.buffer_snapshot.version() == snapshot.buffer_snapshot.version()
+                    && this.base_text_exists() == snapshot.base_text_exists
+                    && this.base_text(cx).version() == snapshot.base_text.version()
+                {
+                    this.set_snapshot(update, cx);
+                }
+            })
+            .log_err();
+        }));
     }
 
     pub fn set_secondary_diff(&mut self, diff: Entity<BufferDiff>) {
@@ -1998,11 +2107,13 @@ impl BufferDiff {
             language.map(|l| l.default_scope()),
             cx,
         );
+        let ignore_trim_whitespace = self.ignore_trim_whitespace;
         let buffer_snapshot = buffer.clone();
         let base_text_snapshot = base_text_snapshot.clone();
         let base_text_exists = base_text.is_some();
         let unchanged_hunks = self.diff_snapshot.as_ref().and_then(|diff_snapshot| {
-            if diff_snapshot.base_text_exists == base_text_exists
+            if diff_snapshot.ignore_trim_whitespace == ignore_trim_whitespace
+                && diff_snapshot.base_text_exists == base_text_exists
                 && diff_snapshot.base_text.version() == base_text_snapshot.version()
                 && diff_snapshot.buffer_snapshot.version() == buffer_snapshot.version()
             {
@@ -2020,12 +2131,14 @@ impl BufferDiff {
                     Some((base_text, base_text_snapshot.as_rope().clone())),
                     &buffer,
                     diff_options,
+                    ignore_trim_whitespace,
                 )
             } else {
-                compute_hunks(None, &buffer, diff_options)
+                compute_hunks(None, &buffer, diff_options, ignore_trim_whitespace)
             };
 
             BufferDiffUpdate {
+                ignore_trim_whitespace,
                 hunks,
                 base_text: base_text_snapshot,
                 base_text_exists,
@@ -2045,6 +2158,7 @@ impl BufferDiff {
 
         let BufferDiffUpdate {
             hunks: new_hunks,
+            ignore_trim_whitespace,
             base_text: new_base_text,
             base_text_exists: new_base_text_exists,
             buffer_snapshot: new_buffer_snapshot,
@@ -2058,10 +2172,12 @@ impl BufferDiff {
                 pending_hunks: SumTree::new(buffer),
                 base_text: new_base_text.clone(),
                 base_text_exists: false,
+                ignore_trim_whitespace: self.ignore_trim_whitespace,
                 buffer_snapshot: new_buffer_snapshot.clone(),
                 secondary_diff: None,
             });
         let mut new_snapshot = BufferDiffSnapshot {
+            ignore_trim_whitespace,
             hunks: new_hunks.clone(),
             base_text: new_base_text.clone(),
             base_text_exists: new_base_text_exists,
@@ -2214,6 +2330,7 @@ impl BufferDiff {
                 pending_hunks: SumTree::new(&self.buffer_snapshot),
                 base_text,
                 base_text_exists: false,
+                ignore_trim_whitespace: self.ignore_trim_whitespace,
                 buffer_snapshot: self.buffer_snapshot.clone(),
                 secondary_diff: None,
             }
@@ -2286,7 +2403,26 @@ impl BufferDiff {
             else {
                 return;
             };
-            let state = state.await;
+            let mut state = state.await;
+            loop {
+                let Some(next) = this
+                    .update(cx, |this, cx| {
+                        (state.ignore_trim_whitespace != this.ignore_trim_whitespace).then(|| {
+                            this.update_diff(
+                                buffer.clone(),
+                                &base_text_snapshot,
+                                base_text_exists.then(|| base_text.clone()),
+                                cx,
+                            )
+                        })
+                    })
+                    .log_err()
+                else {
+                    return;
+                };
+                let Some(next) = next else { break };
+                state = next.await;
+            }
             this.update(cx, |this, cx| {
                 if &this.base_text_buffer.read(cx).version() != edited_base_text.base_version() {
                     log::warn!("dropping concurrent diff update");
@@ -2482,6 +2618,102 @@ mod tests {
     #[ctor::ctor(unsafe)]
     fn init_logger() {
         zlog::init_test();
+    }
+
+    #[gpui::test]
+    async fn test_ignore_trim_whitespace_rules_and_original_ranges(cx: &mut gpui::TestAppContext) {
+        for (base, modified, empty) in [
+            ("  value \n", "\tvalue\t\n", true),
+            (" \t\n", "\n", true),
+            ("  value", "value\t", true),
+            ("a b\n", "ab\n", false),
+            ("a b\n", "a  b\n", false),
+            ("value\n", "value\n\n", false),
+            ("value\n\n", "value\n", false),
+            ("value\n", "value", false),
+            ("", " \n", false),
+            (" \n", "", false),
+        ] {
+            let buffer = Buffer::new(ReplicaId::LOCAL, BufferId::new(1).expect("id"), modified);
+            let diff = cx.new(|cx| BufferDiff::new_with_base_text(base, &buffer, cx));
+            assert!(
+                !diff.read_with(cx, |diff, cx| diff.snapshot(cx).is_empty()),
+                "exact: {base:?} {modified:?}"
+            );
+            diff.update(cx, |diff, cx| diff.set_ignore_trim_whitespace(true, cx));
+            cx.run_until_parked();
+            diff.read_with(cx, |diff, cx| {
+                assert_eq!(
+                    diff.snapshot(cx).is_empty(),
+                    empty,
+                    "trim: {base:?} {modified:?}"
+                );
+                assert_eq!(diff.base_text_string(cx).as_deref(), Some(base));
+                assert_eq!(diff.buffer_snapshot.text(), modified);
+            });
+            diff.update(cx, |diff, cx| diff.set_ignore_trim_whitespace(false, cx));
+            cx.run_until_parked();
+            assert!(!diff.read_with(cx, |diff, cx| diff.snapshot(cx).is_empty()));
+        }
+
+        let base = "  same \n  old \n\tend\n";
+        let modified = "same\n\tnew\t\nend \n";
+        let buffer = Buffer::new(ReplicaId::LOCAL, BufferId::new(1).expect("id"), modified);
+        let diff = cx.new(|cx| BufferDiff::new_with_base_text(base, &buffer, cx));
+        diff.update(cx, |diff, cx| diff.set_ignore_trim_whitespace(true, cx));
+        cx.run_until_parked();
+        diff.read_with(cx, |diff, cx| {
+            let snapshot = diff.snapshot(cx);
+            assert_hunks(
+                snapshot.hunks(&buffer),
+                &buffer,
+                base,
+                &[(
+                    1..2,
+                    "  old \n",
+                    "\tnew\t\n",
+                    DiffHunkStatus::modified_none(),
+                )],
+            );
+            let hunk = snapshot.hunks(&buffer).next().expect("content change");
+            assert_eq!(hunk.base_word_diffs, vec![2..5]);
+            assert_eq!(
+                hunk.buffer_word_diffs
+                    .iter()
+                    .map(|range| range.to_offset(&buffer))
+                    .collect::<Vec<_>>(),
+                vec![6..9]
+            );
+        });
+    }
+
+    #[gpui::test(iterations = 10)]
+    async fn test_ignore_trim_whitespace_during_content_updates(cx: &mut gpui::TestAppContext) {
+        let mut buffer = Buffer::new(ReplicaId::LOCAL, BufferId::new(1).expect("id"), "old\n");
+        let diff = cx.new(|cx| BufferDiff::new_with_base_text("old\n", &buffer, cx));
+        buffer.edit([(0..4, "  new \n")]);
+        let update = diff.update(cx, |diff, cx| {
+            let update =
+                diff.set_base_text(Some(Arc::from("new\n")), buffer.snapshot().clone(), cx);
+            diff.set_ignore_trim_whitespace(true, cx);
+            update
+        });
+        cx.executor().simulate_random_delay().await;
+        diff.update(cx, |diff, cx| {
+            diff.set_ignore_trim_whitespace(false, cx);
+            diff.set_ignore_trim_whitespace(true, cx);
+        });
+        update.await;
+        cx.run_until_parked();
+        diff.read_with(cx, |diff, cx| {
+            assert!(diff.snapshot(cx).is_empty());
+            assert!(diff.snapshot(cx).ignore_trim_whitespace);
+            assert_eq!(diff.base_text_string(cx).as_deref(), Some("new\n"));
+            assert_eq!(diff.buffer_snapshot.text(), "  new \n");
+        });
+        diff.update(cx, |diff, cx| diff.set_ignore_trim_whitespace(false, cx));
+        cx.run_until_parked();
+        assert!(!diff.read_with(cx, |diff, cx| diff.snapshot(cx).is_empty()));
     }
 
     #[gpui::test]
@@ -3910,6 +4142,7 @@ mod tests {
             Some((Arc::from(initial_base), Rope::from(initial_base))),
             buffer.snapshot(),
             None,
+            false,
         );
 
         // Insert "XXX\n" after "aaa\n" in the base text.
@@ -3921,6 +4154,7 @@ mod tests {
             Some((new_base_str_1.clone(), Rope::from(new_base_str_1.as_ref()))),
             buffer.snapshot(),
             None,
+            false,
         );
 
         let DiffChanged {
@@ -3970,6 +4204,7 @@ mod tests {
             Some((Arc::from(simple_base), Rope::from(simple_base))),
             buffer_2.snapshot(),
             None,
+            false,
         );
 
         // The base text is edited so "two" becomes "TWO", now matching the buffer.
@@ -3981,6 +4216,7 @@ mod tests {
             Some((new_base_str_2.clone(), Rope::from(new_base_str_2.as_ref()))),
             buffer_2.snapshot(),
             None,
+            false,
         );
 
         let DiffChanged {
@@ -4038,6 +4274,7 @@ mod tests {
             Some((Arc::from(base_3), Rope::from(base_3))),
             buffer_3.snapshot(),
             None,
+            false,
         );
 
         // Change "ddd" to "DDD" in the base text so that hunk disappears,
@@ -4050,6 +4287,7 @@ mod tests {
             Some((new_base_str_3.clone(), Rope::from(new_base_str_3.as_ref()))),
             buffer_3.snapshot(),
             None,
+            false,
         );
 
         let DiffChanged {
@@ -4106,6 +4344,7 @@ mod tests {
             Some((Arc::from(base_4), Rope::from(base_4))),
             buffer_4.snapshot(),
             None,
+            false,
         );
 
         // Edit the buffer: change "delta" to "DELTA" (new modification hunk).
@@ -4128,6 +4367,7 @@ mod tests {
             Some((new_base_str_4.clone(), Rope::from(new_base_str_4.as_ref()))),
             buffer_4.snapshot(),
             None,
+            false,
         );
 
         let DiffChanged {

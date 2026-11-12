@@ -1900,6 +1900,127 @@ pub(crate) mod tests {
     }
 
     #[gpui::test(iterations = 3)]
+    async fn kk_diff_whitespace_syncs_single_aggregate_and_cloned_views(cx: &mut TestAppContext) {
+        let directory = local_fixture(cx).await;
+        let root = directory.path().join("repo");
+        let text = " \told a \t\n";
+        std::fs::write(root.join("a.txt"), text).expect("whitespace change");
+        let repository = kk_workbench::Repository::open(&root, Path::new("kk"))
+            .await
+            .expect("repository");
+        let snapshot = repository.snapshot(true).await.expect("snapshot");
+        let target = DiffTarget::change(&snapshot.exact_revision("@").await.expect("revision"));
+        let files = snapshot.changed_files(&target.scope).await.expect("files");
+        let file = files
+            .iter()
+            .find(|file| file.path == "a.txt")
+            .expect("text file")
+            .clone();
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            &root,
+            json!({"a.txt":text,"repo":{},"mixed.bin":"new\0binary"}),
+        )
+        .await;
+        let project = Project::test(fs, [root.as_path()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |view, _| view.workspace().clone());
+        let panel = cx
+            .update(|window, cx| {
+                super::super::kk_panel::KkPanel::load(workspace.downgrade(), window.to_async(cx))
+            })
+            .await
+            .expect("panel");
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx)
+        });
+        let single = cx
+            .update(|window, cx| {
+                KkDiff::open(
+                    snapshot.clone(),
+                    target.clone(),
+                    file,
+                    true,
+                    workspace.downgrade(),
+                    DiffOpenMode::Open,
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("single diff");
+        let view = cx
+            .update(|window, cx| {
+                KkMultiDiff::open(
+                    snapshot,
+                    target,
+                    files,
+                    true,
+                    workspace.downgrade(),
+                    DiffOpenMode::Open,
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("aggregate diff");
+        cx.condition(&view, |view, _| !view.loading).await;
+        cx.run_until_parked();
+        let diff = single.read_with(cx, |single, _| single.diff.clone());
+        assert!(diff.read_with(cx, |diff, cx| diff.snapshot(cx).is_empty()));
+        view.update(cx, |view, cx| {
+            view.controls.update(cx, |controls, cx| {
+                controls.toggle_ignore_trim_whitespace(cx)
+            })
+        });
+        cx.run_until_parked();
+        assert!(!panel.read_with(cx, |panel, cx| {
+            panel.diff_display.read(cx).ignore_trim_whitespace()
+        }));
+        assert!(!diff.read_with(cx, |diff, cx| diff.snapshot(cx).is_empty()));
+        let clone = view
+            .update_in(cx, |view, window, cx| view.clone_on_split(None, window, cx))
+            .await
+            .expect("clone");
+        cx.run_until_parked();
+        clone.read_with(cx, |view, cx| {
+            let entry = view
+                .entries
+                .iter()
+                .find(|entry| entry.read(cx).file.path == "a.txt")
+                .expect("cloned entry")
+                .read(cx);
+            assert!(!entry.diff.read(cx).ignore_trim_whitespace());
+            assert!(!entry.diff.read(cx).snapshot(cx).is_empty());
+        });
+        clone.update(cx, |view, cx| {
+            view.controls.update(cx, |controls, cx| {
+                controls.toggle_ignore_trim_whitespace(cx)
+            })
+        });
+        cx.run_until_parked();
+        assert!(panel.read_with(cx, |panel, cx| {
+            panel.diff_display.read(cx).ignore_trim_whitespace()
+        }));
+        for view in [&view, &clone] {
+            view.read_with(cx, |view, cx| {
+                let entry = view
+                    .entries
+                    .iter()
+                    .find(|entry| entry.read(cx).file.path == "a.txt")
+                    .expect("entry")
+                    .read(cx);
+                assert!(entry.diff.read(cx).ignore_trim_whitespace());
+                assert!(entry.diff.read(cx).snapshot(cx).is_empty());
+                assert_eq!(entry.buffer.read(cx).text(), text);
+                assert!(view.files.iter().any(|file| file.path == "a.txt"));
+            });
+        }
+        assert!(diff.read_with(cx, |diff, cx| diff.snapshot(cx).is_empty()));
+    }
+
+    #[gpui::test(iterations = 3)]
     async fn kk_diff_loading_order_and_pane_clone(cx: &mut TestAppContext) {
         let directory = local_fixture(cx).await;
         let root = directory.path().join("repo");

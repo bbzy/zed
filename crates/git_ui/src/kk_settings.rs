@@ -139,6 +139,7 @@ impl CommitInformation {
 
 pub(super) struct DiffDisplayPreference {
     showing_full_file: bool,
+    ignore_trim_whitespace: bool,
     store: Arc<KeyValueStore>,
     key: Option<String>,
     writes: Shared<Task<()>>,
@@ -170,8 +171,15 @@ impl DiffDisplayPreference {
             .transpose()?
             .flatten()
             .map_or(default, |value| value == "full");
+        let ignore_trim_whitespace = key
+            .as_ref()
+            .map(|key| store.read_kvp(&format!("{key}:ignoreTrimWhitespace")))
+            .transpose()?
+            .flatten()
+            .is_none_or(|value| value != "false");
         Ok(Self {
             showing_full_file,
+            ignore_trim_whitespace,
             store,
             key,
             writes: Task::ready(()).shared(),
@@ -196,6 +204,27 @@ impl DiffDisplayPreference {
             "changes"
         }
         .to_owned();
+        self.save(key, value, cx);
+    }
+
+    pub fn ignore_trim_whitespace(&self) -> bool {
+        self.ignore_trim_whitespace
+    }
+
+    pub fn toggle_ignore_trim_whitespace(&mut self, cx: &mut Context<Self>) {
+        self.ignore_trim_whitespace = !self.ignore_trim_whitespace;
+        self.error = None;
+        cx.notify();
+        if let Some(key) = &self.key {
+            self.save(
+                format!("{key}:ignoreTrimWhitespace"),
+                self.ignore_trim_whitespace.to_string(),
+                cx,
+            );
+        }
+    }
+
+    fn save(&mut self, key: String, value: String, cx: &mut Context<Self>) {
         let store = self.store.clone();
         let previous = self.writes.clone();
         self.writes = cx
@@ -325,6 +354,38 @@ mod tests {
                 .expect("transient workspace")
                 .mode,
             HistoryMode::Lineage
+        );
+    }
+
+    #[gpui::test]
+    async fn kk_diff_whitespace_is_persistent_and_workspace_scoped(cx: &mut TestAppContext) {
+        let store = Arc::new(KeyValueStore::open_test_db("kk_diff_whitespace").await);
+        let preference =
+            DiffDisplayPreference::load(store.clone(), Some("first".into()), true).expect("load");
+        assert!(preference.ignore_trim_whitespace());
+        let preference = cx.new(|_| preference);
+        let writes = preference.update(cx, |preference, cx| {
+            preference.toggle_ignore_trim_whitespace(cx);
+            preference.toggle(cx);
+            preference.toggle_ignore_trim_whitespace(cx);
+            preference.toggle_ignore_trim_whitespace(cx);
+            preference.writes.clone()
+        });
+        drop(preference);
+        writes.await;
+        let restored = DiffDisplayPreference::load(store.clone(), Some("first".into()), true)
+            .expect("restore");
+        assert!(!restored.ignore_trim_whitespace());
+        assert!(!restored.showing_full_file());
+        assert!(
+            DiffDisplayPreference::load(store.clone(), Some("second".into()), true)
+                .expect("other workspace")
+                .ignore_trim_whitespace()
+        );
+        assert!(
+            DiffDisplayPreference::load(store, None, false)
+                .expect("transient")
+                .ignore_trim_whitespace()
         );
     }
 
