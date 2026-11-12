@@ -64,6 +64,10 @@ impl Diagnostics {
         )
     }
 
+    pub fn end_cursor(&self) -> (usize, usize) {
+        (self.state().lines.len(), 0)
+    }
+
     pub fn read_batch(
         &self,
         cursor: (usize, usize),
@@ -278,6 +282,22 @@ mod tests {
             diagnostics.read_batch(cursor, 5),
             (cursor, String::new(), false)
         );
+    }
+
+    #[test]
+    fn diagnostic_end_cursor_skips_pending_batches_without_removing_history() {
+        let diagnostics = Diagnostics::default();
+        assert_eq!(diagnostics.end_cursor(), (0, 0));
+        diagnostics.append_output(&"三🙂".repeat(100));
+        let (partial_cursor, _, more) = diagnostics.read_batch((0, 0), 8);
+        assert!(more);
+        assert_ne!(partial_cursor.1, 0);
+        let cleared_cursor = diagnostics.end_cursor();
+        diagnostics.append_output("new output\n");
+        let (_, text, more) = diagnostics.read_batch(cleared_cursor, 64);
+        assert_eq!(text, "new output\n");
+        assert!(!more);
+        assert!(diagnostics.read_since(0).1.starts_with("三🙂"));
     }
 
     #[test]

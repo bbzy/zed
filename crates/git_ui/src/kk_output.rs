@@ -2,13 +2,15 @@ use super::kk_panel::ShowOutput;
 use editor::Editor;
 use futures::{FutureExt as _, future::Shared};
 use gpui::{
-    Action, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
-    Task, Window,
+    Action, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    KeyContext, Pixels, Task, Window,
 };
 use kk_workbench::Diagnostics;
 use language::{Buffer, Capability};
 use multi_buffer::MultiBuffer;
+use search::{BufferSearchBar, buffer_search::DivRegistrar};
 use ui::{IconButton, Tooltip, prelude::*};
+use workspace::ToolbarItemView as _;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 pub(super) struct KkOutput {
@@ -16,6 +18,7 @@ pub(super) struct KkOutput {
     categories: Vec<String>,
     buffer: Entity<Buffer>,
     editor: Entity<Editor>,
+    search_bar: Entity<BufferSearchBar>,
     focus: FocusHandle,
     position: DockPosition,
     cursor: (usize, usize),
@@ -42,11 +45,18 @@ impl KkOutput {
             editor.set_should_serialize(false, cx);
             editor
         });
+        let search_bar = cx.new(|cx| {
+            let mut search_bar = BufferSearchBar::new(None, window, cx);
+            search_bar.set_active_pane_item(Some(&editor), window, cx);
+            search_bar
+        });
+        cx.observe(&search_bar, |_, _, cx| cx.notify()).detach();
         Self {
             diagnostics,
             categories: categories.to_vec(),
             buffer,
             editor,
+            search_bar,
             focus: cx.focus_handle(),
             position: DockPosition::Bottom,
             cursor: (0, 0),
@@ -161,6 +171,14 @@ impl KkOutput {
         self.cursor = cursor;
         more
     }
+
+    fn clear(&mut self, cx: &mut Context<Self>) {
+        // Advance past buffered batches as well, so pending updates cannot restore old output.
+        self.cursor = self.diagnostics.end_cursor();
+        self.buffer.update(cx, |buffer, cx| {
+            buffer.set_text("", cx);
+        });
+    }
 }
 
 impl Focusable for KkOutput {
@@ -210,9 +228,21 @@ impl Panel for KkOutput {
 
 impl Render for KkOutput {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
+        let mut key_context = KeyContext::new_with_defaults(cx.platform_info().os);
+        key_context.add("KKWorkbenchOutput");
+        self.search_bar
+            .read(cx)
+            .contribute_context(&mut key_context, cx);
+        let mut registrar =
+            DivRegistrar::new(|this: &Self, _, _| Some(this.search_bar.clone()), cx);
+        BufferSearchBar::register(&mut registrar);
+
+        registrar
+            .into_div()
+            .flex()
+            .flex_col()
             .id("kk-output")
-            .key_context("KKWorkbenchOutput")
+            .key_context(key_context)
             .track_focus(&self.focus)
             .size_full()
             .child(
@@ -222,11 +252,38 @@ impl Render for KkOutput {
                     .py_1()
                     .child(Label::new("KK Workbench Output"))
                     .child(
-                        IconButton::new("close-output", IconName::Close)
-                            .tooltip(Tooltip::text("Close Output"))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(PanelEvent::Close))),
+                        h_flex()
+                            .child(
+                                IconButton::new("search-output", IconName::MagnifyingGlass)
+                                    .tooltip(Tooltip::text("Search Output"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.search_bar.update(cx, |search_bar, cx| {
+                                            search_bar.deploy(
+                                                &search::buffer_search::Deploy::find(),
+                                                None,
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    })),
+                            )
+                            .child(
+                                IconButton::new("clear-output", IconName::Trash)
+                                    .tooltip(Tooltip::text("Clear Output"))
+                                    .on_click(cx.listener(|this, _, _, cx| this.clear(cx))),
+                            )
+                            .child(
+                                IconButton::new("close-output", IconName::Close)
+                                    .tooltip(Tooltip::text("Close Output"))
+                                    .on_click(
+                                        cx.listener(|_, _, _, cx| cx.emit(PanelEvent::Close)),
+                                    ),
+                            ),
                     ),
             )
+            .when(!self.search_bar.read(cx).is_dismissed(), |this| {
+                this.child(self.search_bar.clone())
+            })
             .child(div().flex_1().min_h_0().child(self.editor.clone()))
     }
 }
@@ -330,6 +387,169 @@ mod tests {
             assert!(!buffer.read(cx).is_dirty());
             assert!(editor.read(cx).read_only(cx));
             assert!(focus.is_focused(window));
+        });
+
+        diagnostics.append_output(&large_output);
+        output.update(cx, |output, cx| {
+            assert!(output.synchronize(cx));
+            assert_ne!(output.cursor.1, 0);
+            output.clear(cx);
+            assert_eq!(buffer.read(cx).text(), "");
+        });
+        diagnostics.append_output("after clearing\n");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert_eq!(buffer.read(cx).text(), "after clearing\n");
+            assert!(editor.read(cx).read_only(cx));
+            assert!(!buffer.read(cx).is_dirty());
+            assert!(focus.is_focused(window));
+            assert!(diagnostics.read_since(0).1.contains("before opening"));
+            workspace.update(cx, |workspace, cx| {
+                workspace.close_panel::<KkOutput>(window, cx);
+                workspace.reveal_panel::<KkOutput>(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            buffer.read_with(cx, |buffer, _| buffer.text()),
+            "after clearing\n"
+        );
+    }
+
+    #[gpui::test(iterations = 3)]
+    async fn output_search_stays_in_panel_and_updates_after_append_and_clear(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            search::init(cx);
+            cx.bind_keys([
+                gpui::KeyBinding::new(
+                    "ctrl-f",
+                    search::buffer_search::Deploy::find(),
+                    Some("Editor"),
+                ),
+                gpui::KeyBinding::new("escape", editor::actions::Cancel, Some("Editor")),
+            ]);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/project", serde_json::json!({})).await;
+        let project = Project::test(fs, ["/project".as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |view, _| view.workspace().clone());
+        let output = cx.update(|window, cx| cx.new(|cx| KkOutput::new(&[], window, cx)));
+        let (diagnostics, editor, search_bar) = output.read_with(cx, |output, _| {
+            (
+                output.diagnostics.clone(),
+                output.editor.clone(),
+                output.search_bar.clone(),
+            )
+        });
+        let central_editor = cx.update(|window, cx| {
+            let buffer = cx.new(|cx| Buffer::local("central needle", cx));
+            let central_editor = cx.new(|cx| Editor::for_buffer(buffer, None, window, cx));
+            workspace.update(cx, |workspace, cx| {
+                workspace.add_item_to_active_pane(
+                    Box::new(central_editor.clone()),
+                    None,
+                    true,
+                    window,
+                    cx,
+                );
+                workspace.add_panel(output.clone(), window, cx);
+                workspace.focus_panel::<KkOutput>(window, cx);
+            });
+            central_editor
+        });
+        diagnostics.append_output("needle first\nneedle second\nNEEDLE third\nneedles\n");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-f");
+        cx.run_until_parked();
+        assert!(!search_bar.read_with(cx, |search_bar, _| search_bar.is_dismissed()));
+        search_bar
+            .update_in(cx, |bar, window, cx| {
+                bar.search(
+                    "needle",
+                    Some(search::SearchOptions::CASE_SENSITIVE | search::SearchOptions::WHOLE_WORD),
+                    false,
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("search output");
+        cx.run_until_parked();
+        editor.update(cx, |editor, cx| {
+            assert_eq!(editor.search_background_highlights(cx).len(), 2)
+        });
+        central_editor.update(cx, |editor, cx| {
+            assert!(editor.search_background_highlights(cx).is_empty())
+        });
+
+        let selection_before = editor.update(cx, |editor, cx| {
+            editor
+                .selections
+                .newest::<language::Point>(&editor.display_snapshot(cx))
+        });
+        cx.dispatch_action(search::SelectNextMatch);
+        cx.run_until_parked();
+        let selection_after = editor.update(cx, |editor, cx| {
+            editor
+                .selections
+                .newest::<language::Point>(&editor.display_snapshot(cx))
+        });
+        assert_ne!(selection_before.range(), selection_after.range());
+        cx.dispatch_action(search::SelectPreviousMatch);
+        cx.run_until_parked();
+        assert_eq!(
+            selection_before.range(),
+            editor.update(cx, |editor, cx| editor
+                .selections
+                .newest::<language::Point>(&editor.display_snapshot(cx))
+                .range())
+        );
+
+        diagnostics.append_output("needle new\n");
+        cx.run_until_parked();
+        editor.update(cx, |editor, cx| {
+            assert_eq!(editor.search_background_highlights(cx).len(), 3)
+        });
+        output.update(cx, |output, cx| output.clear(cx));
+        cx.run_until_parked();
+        editor.update(cx, |editor, cx| {
+            assert!(editor.search_background_highlights(cx).is_empty())
+        });
+        diagnostics.append_output("needle after clear\n");
+        cx.run_until_parked();
+        editor.update(cx, |editor, cx| {
+            assert_eq!(editor.search_background_highlights(cx).len(), 1)
+        });
+
+        search_bar
+            .update_in(cx, |bar, window, cx| {
+                bar.search(
+                    "n[a-z]+",
+                    Some(search::SearchOptions::REGEX | search::SearchOptions::CASE_SENSITIVE),
+                    false,
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("regex search output");
+        editor.update(cx, |editor, cx| {
+            assert_eq!(editor.search_background_highlights(cx).len(), 1)
+        });
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(search_bar.read(cx).is_dismissed());
+            assert!(editor.focus_handle(cx).is_focused(window));
+            assert!(editor.read(cx).read_only(cx));
         });
     }
 }
