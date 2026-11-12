@@ -671,6 +671,7 @@ mod tests {
                 .expect("working copy");
             let target = super::super::super::kk_diff::DiffTarget::change(revision);
             let repository = RepositoryView {
+                mode: HistoryMode::Lineage,
                 stale: false,
                 snapshot,
                 history,

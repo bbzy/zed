@@ -490,6 +490,9 @@ mod tests {
             assert!(editor.search_background_highlights(cx).is_empty())
         });
 
+        // Appending output leaves the caret past the matches; start the round trip on a match.
+        cx.dispatch_action(search::SelectNextMatch);
+        cx.run_until_parked();
         let selection_before = editor.update(cx, |editor, cx| {
             editor
                 .selections

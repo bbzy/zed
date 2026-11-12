@@ -230,6 +230,22 @@ impl Repository {
         &self.root
     }
 
+    pub(crate) fn discovered(
+        root: PathBuf,
+        executable: &Path,
+        diagnostics: Diagnostics,
+        performance_context: Option<PerformanceContext>,
+    ) -> Self {
+        Self {
+            root: root.into(),
+            executable: executable.to_owned().into(),
+            diagnostics,
+            performance_context,
+            lifetime: None,
+            remote: None,
+        }
+    }
+
     pub(crate) fn from_remote(
         client: crate::remote::Client,
         info: crate::remote::RepositoryInfo,

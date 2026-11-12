@@ -47,7 +47,11 @@ mod tree;
 use tree::{TreeRowId, TreeSelectionState};
 #[path = "kk_list_preview.rs"]
 mod list_preview;
+#[path = "kk_refresh.rs"]
+mod refresh;
+use futures::StreamExt as _;
 use list_preview::{ListPreviews, MutationPreviews};
+use refresh::{RefreshEvent, RefreshRequest, RepositoryRefresh};
 
 #[cfg(test)]
 #[path = "kk_remote_tests.rs"]
@@ -80,6 +84,7 @@ actions!(
 
 #[derive(Clone)]
 struct RepositoryView {
+    mode: HistoryMode,
     stale: bool,
     snapshot: Snapshot,
     history: HistoryPage,
@@ -88,7 +93,18 @@ struct RepositoryView {
     history_targets: Vec<Revision>,
 }
 
-#[derive(Clone)]
+impl RepositoryView {
+    fn same_content(&self, other: &Self) -> bool {
+        self.mode == other.mode
+            && self.stale == other.stale
+            && self.history == other.history
+            && self.expanded == other.expanded
+            && self.comparison == other.comparison
+            && self.history_targets == other.history_targets
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 enum RevisionFiles {
     Loading,
     Loaded(Vec<ChangedFile>),
@@ -247,6 +263,10 @@ pub struct KkPanel {
     refresh_queued: bool,
     error: Option<String>,
     refresh_task: Task<()>,
+    refresh_sequence: u64,
+    refreshing_repositories: HashSet<PathBuf>,
+    refresh_errors: HashMap<PathBuf, Vec<String>>,
+    discovery_errors: HashMap<PathBuf, Vec<String>>,
     load_tasks: HashMap<String, Task<()>>,
     model_generation: u64,
     buffer_subscriptions: HashMap<EntityId, Vec<Subscription>>,
@@ -260,6 +280,7 @@ pub struct KkPanel {
     pub(super) diff_display: Entity<super::kk_settings::DiffDisplayPreference>,
     pub(super) commit_information: Entity<CommitInformation>,
     tree_selection: TreeSelectionState,
+    tree_cache: HashMap<PathBuf, std::sync::Arc<tree::RepositoryTree>>,
     tree_revision: u64,
     tree_requested: Option<u64>,
     tree_task: Task<()>,
@@ -466,6 +487,10 @@ impl KkPanel {
                         refresh_queued: false,
                         error: None,
                         refresh_task: Task::ready(()),
+                        refresh_sequence: 0,
+                        refreshing_repositories: HashSet::new(),
+                        refresh_errors: HashMap::new(),
+                        discovery_errors: HashMap::new(),
                         load_tasks: HashMap::new(),
                         model_generation: 0,
                         buffer_subscriptions: HashMap::new(),
@@ -479,6 +504,7 @@ impl KkPanel {
                         diff_display,
                         commit_information,
                         tree_selection: TreeSelectionState::default(),
+                        tree_cache: HashMap::new(),
                         tree_revision: 0,
                         tree_requested: None,
                         tree_task: Task::ready(()),
@@ -780,403 +806,443 @@ impl KkPanel {
                 (identifier, path)
             })
             .collect();
-        let changing_history_mode = self.pending_history_mode.is_some();
-        let mode = self.pending_history_mode.unwrap_or(self.mode);
-        let executable = KkWorkbenchSettings::get_global(cx).executable_path.clone();
-        let history_limits = self.history_limits.clone();
-        let previous = self.repositories.clone();
-        let uncertain = self.uncertain_operations.clone();
+        let mode = self.mode;
         let (comparison_store, pending_writes, comparison_host) = self.comparison_state.reader();
-        let generation = self.model_generation;
-        let confirmed_list_previews = self.list_previews.confirmed();
-        let confirmed_mutations = self.mutation_previews.confirmed();
         let diagnostics = self.output.read(cx).diagnostics().clone();
         let performance = diagnostics.start("history.refresh", None, serde_json::Value::Null);
-        let performance_context = performance.context().cloned();
+        let request = RefreshRequest {
+            paths,
+            remote,
+            executable: KkWorkbenchSettings::get_global(cx).executable_path.clone(),
+            previous: self
+                .repositories
+                .iter()
+                .filter(|view| self.repository_is_open(view.snapshot.repository().root(), cx))
+                .cloned()
+                .collect(),
+            mode,
+            history_limits: self.history_limits.clone(),
+            uncertain: self.uncertain_operations.clone(),
+            comparison_store,
+            comparison_host,
+            diagnostics: diagnostics.clone(),
+            performance_context: performance.context().cloned(),
+        };
+        let generation = self.model_generation;
+        self.refresh_sequence += 1;
+        let sequence = self.refresh_sequence;
+        let confirmed_list_previews = self.list_previews.confirmed();
+        let confirmed_mutations = self.mutation_previews.confirmed();
         self.loading = true;
-        self.error = None;
+        self.refreshing_repositories = self
+            .repositories
+            .iter()
+            .map(|view| view.snapshot.repository().root().to_owned())
+            .collect();
+        let active_paths = request.paths.clone();
         self.refresh_task = cx.spawn(async move |this, cx| {
             pending_writes.await;
-            let (mut views, errors, settled, repository_paths, history_errors, loaded_comparisons) = cx
-                .background_spawn(async move {
-                    let mut views = Vec::new();
-                    let mut settled = Vec::new();
-                    let mut repositories = Vec::new();
-                    let mut repository_paths: HashMap<PathBuf, Vec<(EntityId, PathBuf)>> = HashMap::new();
-                    let mut errors = Vec::new();
-                    let mut history_errors = Vec::new();
-                    let mut loaded_comparisons = HashSet::new();
-                    for (worktree_id, path) in paths {
-                        let discovery = if let Some(remote) = &remote {
-                            match remote.discover(&path, &executable, diagnostics.clone()).await {
-                                Ok(discovery) => discovery,
-                                Err(error) => {
-                                    errors.push(format!("{}: {error:#}", path.display()));
-                                    continue;
-                                }
-                            }
-                        } else {
-                            discover_with_diagnostics(&path, &executable, diagnostics.clone(), performance_context.clone()).await
-                        };
-                        for repository in &discovery.repositories {
-                            repository_paths.entry(repository.root().to_owned()).or_default().push((worktree_id, path.clone()));
+            let (sender, mut events) = futures::channel::mpsc::unbounded();
+            let worker = cx.background_spawn(request.run(sender));
+            let mut completed = HashSet::new();
+            while let Some(event) = events.next().await {
+                let accepted = this
+                    .update(cx, |this, cx| {
+                        if this.refresh_sequence != sequence {
+                            return false;
+                        }
+                        if this.model_generation != generation {
+                            this.refresh(cx);
+                            return false;
                         }
 
-                        repositories.extend(discovery.repositories);
-                        errors.extend(
-                            discovery.errors.into_iter().map(|error| {
-                                format!("{}: {}", error.path.display(), error.message)
-                            }),
-                        );
-                    }
-
-                    for (root, receipt) in uncertain {
-                        let Some(repository) = repositories.iter().find(|repository| repository.root() == root) else { continue; };
-                        let receipt = match receipt.with_repository(repository) {
-                            Ok(receipt) => receipt,
-                            Err(error) => {
-                                errors.push(format!("{}: {error:#}", root.display()));
-                                continue;
-                            }
-                        };
-                        match receipt.status().await {
-                            Ok(PublicationStatus::Applied) => match receipt.synchronize().await {
-                                Ok(snapshot) => settled.push((root, true, snapshot)),
-                                Err(error) => log::error!("Unable to synchronize the published KK operation: {error:#}"),
-                            },
-                            Ok(PublicationStatus::Rejected) => match receipt.previous.repository().snapshot(false).await {
-                                Ok(snapshot) => settled.push((root, false, snapshot)),
-                                Err(error) => log::error!("Unable to reload the rejected KK operation: {error:#}"),
-                            },
-                            Ok(PublicationStatus::Unknown) => {}
-                            Err(error) => {
-                                log::error!("Unable to reconcile KK operation: {error:#}")
-                            }
-                        }
-                    }
-
-                    for repository in repositories {
-                        if views.iter().any(|view: &RepositoryView| {
-                            view.snapshot.repository().root() == repository.root()
-                        }) {
-                            continue;
-                        }
-
-                        let previous = previous
-                            .iter()
-                            .find(|view| view.snapshot.repository().root() == repository.root());
-                        let loaded = async {
-                            let snapshot = match repository.snapshot(true).await {
-                                Ok(snapshot) => snapshot,
-                                Err(error) if kk_workbench::is_stale_workspace(&error) => {
-                                    diagnostics.error(format!("{}: {error:#}", repository.root().display()));
-                                    let snapshot = repository.snapshot(false).await?;
-                                    let comparison = match previous {
-                                        Some(previous) => previous.comparison.clone(),
-                                        None => comparison_store
-                                            .read_kvp(&ComparisonState::key(repository.root(), comparison_host.as_deref()))?
-                                            .and_then(|text| ComparisonIntent::decode(&text))
-                                            .map(Comparison::pending),
-                                    };
-                                    return anyhow::Ok(RepositoryView {
-                                        stale: true,
-                                        snapshot,
-                                        history: previous.map(|previous| previous.history.clone()).unwrap_or(HistoryPage { revisions: Vec::new(), has_more: false }),
-                                        expanded: previous.map(|previous| previous.expanded.clone()).unwrap_or_default(),
-                                        comparison,
-                                        history_targets: previous.map(|previous| previous.history_targets.clone()).unwrap_or_default(),
-                                    });
-                                }
-                                Err(error) => return Err(error),
-                            };
-                            let limit = history_limits.get(repository.root()).copied().unwrap_or(50);
-                            let targets = if changing_history_mode {
-                                &[][..]
-                            } else {
-                                previous.map(|view| view.history_targets.as_slice()).unwrap_or_default()
-                            };
-                            let (history, history_targets) = snapshot.history_containing(mode, limit, targets).await?;
-                            let mut expanded = HashMap::new();
-                            let mut comparison = None;
-                            if let Some(previous) = previous {
-                                for revision in history.revisions.iter() {
-                                    let was_expanded = previous
-                                        .history
-                                        .revisions
-                                        .iter()
-                                        .chain(previous.history_targets.iter())
-                                        .any(|old| {
-                                            previous.expanded.contains_key(&old.full_commit_id)
-                                                && (old.full_commit_id == revision.full_commit_id
-                                                    || (old.full_change_id
-                                                        == revision.full_change_id
-                                                        && history
-                                                            .revisions
-                                                            .iter()
-                                                            .filter(|candidate| {
-                                                                candidate.full_change_id
-                                                                    == revision.full_change_id
-                                                            })
-                                                            .take(2)
-                                                            .count()
-                                                            == 1))
+                        match event {
+                            RefreshEvent::Discovered {
+                                worktree,
+                                path,
+                                roots,
+                                errors,
+                            } => {
+                                // Failed discovery cannot establish that cached repositories disappeared.
+                                if errors.is_empty() {
+                                    for paths in this.repository_paths.values_mut() {
+                                        paths.retain(|(identifier, previous)| {
+                                            *identifier != worktree || previous != &path
                                         });
-                                    if was_expanded {
-                                        let files = match snapshot
-                                            .changed_files(&DiffScope::Change(revision.full_commit_id.clone()))
-                                            .await
-                                        {
-                                            Ok(files) => RevisionFiles::Loaded(files),
-                                            Err(error) => RevisionFiles::Failed(format!("{error:#}")),
-                                        };
-                                        expanded.insert(
-                                            revision.full_commit_id.clone(),
-                                            files,
-                                        );
                                     }
+                                    this.discovery_errors.remove(&path);
+                                } else {
+                                    for error in &errors {
+                                        diagnostics.error(error);
+                                    }
+                                    this.discovery_errors.insert(path.clone(), errors);
                                 }
-                            }
-
-                            let intent = match previous {
-                                Some(previous) => previous
-                                    .comparison
-                                    .as_ref()
-                                    .map(|comparison| comparison.intent.clone()),
-                                None => comparison_store
-                                    .read_kvp(&ComparisonState::key(repository.root(), comparison_host.as_deref()))?
-                                    .and_then(|text| ComparisonIntent::decode(&text)),
-                            };
-                            if let Some(intent) = intent {
-                                match Comparison::load(&snapshot, intent.clone()).await {
-                                    Ok(loaded) => {
-                                        loaded_comparisons.insert(repository.root().to_owned());
-                                        comparison = Some(loaded);
+                                for root in roots {
+                                    if !completed.contains(&root) {
+                                        this.refreshing_repositories.insert(root.clone());
                                     }
-                                    Err(error) => {
-                                        errors.push(format!(
-                                            "{}: {error:#}",
-                                            repository.root().display()
-                                        ));
-                                        comparison = previous.and_then(|view| view.comparison.clone()).or_else(|| Some(Comparison::pending(intent)));
+                                    let paths = this.repository_paths.entry(root).or_default();
+                                    if !paths.contains(&(worktree, path.clone())) {
+                                        paths.push((worktree, path.clone()));
                                     }
-                                }
-                            }
-
-                            anyhow::Ok(RepositoryView {
-                                stale: false,
-                                snapshot,
-                                history,
-                                expanded,
-                                comparison,
-                                history_targets,
-                            })
-                        }
-                        .await;
-                        match loaded {
-                            Ok(mut view) => {
-                                view.snapshot = view.snapshot.with_performance_context(None);
-                                views.push(view);
-                            }
-                            Err(error) => {
-                                history_errors.push(repository.root().to_owned());
-                                errors.push(format!("{}: {error:#}", repository.root().display()));
-                                if let Some(previous) = previous {
-                                    let mut previous = previous.clone();
-                                    previous.history_targets.retain(|target| {
-                                        previous.history.revisions.iter().any(|revision| {
-                                            revision.full_commit_id == target.full_commit_id
-                                        })
+                                    paths.sort_by_key(|attachment| {
+                                        active_paths
+                                            .iter()
+                                            .position(|active| active == attachment)
+                                            .unwrap_or(usize::MAX)
                                     });
-                                    views.push(previous);
+                                }
+                            }
+                            RefreshEvent::Loaded(completion) => {
+                                let root = completion.root.clone();
+                                completed.insert(root.clone());
+                                this.refreshing_repositories.remove(&root);
+                                if !this.repository_is_open(&root, cx) {
+                                    return true;
+                                }
+
+                                let errors = this.apply_repository_refresh(
+                                    *completion,
+                                    &confirmed_list_previews,
+                                    &confirmed_mutations,
+                                    cx,
+                                );
+                                if errors.is_empty() {
+                                    this.refresh_errors.remove(&root);
+                                } else {
+                                    this.refresh_errors.insert(root, errors);
                                 }
                             }
                         }
-                    }
-
-                    (views, errors, settled, repository_paths, history_errors, loaded_comparisons)
-                })
-                .await;
-            this.update(cx, |this, cx| {
-                if this.model_generation != generation {
+                        this.update_refresh_errors();
+                        cx.notify();
+                        true
+                    })
+                    .log_err();
+                if accepted != Some(true) {
                     performance.finish("superseded", serde_json::Value::Null);
+                    return;
+                }
+            }
+            worker.await;
+            this.update(cx, |this, cx| {
+                if this.refresh_sequence != sequence {
+                    return;
+                }
+                if this.model_generation != generation {
                     this.refresh(cx);
                     return;
                 }
 
                 this.loading = false;
-                if this.reveal_selected
-                    && this.selected_change.as_ref().is_some_and(|(root, _, _)| history_errors.contains(root))
-                {
-                    this.reveal_selected = false;
-                    this.selected_change = this.selected_tree_revision().and_then(|(index, revision)| {
-                        Some((
-                            this.repositories.get(index)?.snapshot.repository().root().to_owned(),
-                            revision.full_change_id,
-                            revision.full_commit_id,
-                        ))
-                    });
+                this.refreshing_repositories.clear();
+                this.pending_history_mode = None;
+                for paths in this.repository_paths.values_mut() {
+                    paths.retain(|attachment| active_paths.contains(attachment));
                 }
-
-                if let Some(mode) = this.pending_history_mode.take() {
-                    let missing_repository = this.repositories.iter().any(|previous| {
-                        !views.iter().any(|view| view.snapshot.repository().root()
-                            == previous.snapshot.repository().root())
-                    });
-                    if !errors.is_empty() || views.iter().any(|view| view.stale) || missing_repository {
-                        let message = "Failed to change history mode. All repositories retain their previous history.";
-                        let diagnostics = this.output.read(cx).diagnostics();
-                        diagnostics.error(message);
-                        for error in &errors {
-                            diagnostics.error(error);
-                        }
-
-                        this.error = Some(if errors.is_empty() {
-                            message.to_owned()
-                        } else {
-                            format!("{message}\n{}", errors.join("\n"))
-                        });
-                        performance.finish("error", serde_json::Value::Null);
-                        cx.notify();
-                        return;
-                    }
-
-                    this.mode = mode;
-                    this.history_loads.clear();
-                    this.history_preference.set(mode, cx, Self::show_error);
-                }
-
-                this.history_loads.retain(|root, state| {
-                    if history_errors.contains(root) {
-                        *state = HistoryLoad::Failed;
-                        true
-                    } else {
-                        !views.iter().any(|view| view.snapshot.repository().root() == root)
-                    }
-                });
-                this.repository_paths = repository_paths;
+                this.discovery_errors
+                    .retain(|path, _| active_paths.iter().any(|(_, active)| active == path));
+                let open = this
+                    .repository_paths
+                    .iter()
+                    .filter(|(_, paths)| !paths.is_empty())
+                    .map(|(root, _)| root.clone())
+                    .collect::<HashSet<_>>();
+                this.repositories
+                    .retain(|view| open.contains(view.snapshot.repository().root()));
                 this.invalidate_closed_repositories(cx);
-                for view in &mut views {
-                    let root = view.snapshot.repository().root().to_owned();
-                    let lifetime = this.repository_lifetimes.entry(root).or_default().clone();
-                    view.snapshot = view.snapshot.with_lifetime(Some(lifetime));
-                }
-
-                for (root, applied, snapshot) in settled {
-                    this.list_previews.settle_uncertain(&root, applied, loaded_comparisons.contains(&root));
-                    let mutations_refreshed = views.iter().any(|view| view.snapshot.repository().root() == root
-                        && (view.comparison.is_none() || loaded_comparisons.contains(&root))
-                        && view.expanded.values().all(|files| matches!(files, RevisionFiles::Loaded(_))));
-                    this.mutation_previews.settle_uncertain(&root, applied, mutations_refreshed);
-                    this.uncertain_operations.remove(&root);
-                    if let Some(workspace) = this.workspace.upgrade() {
-                        let diffs = workspace.read(cx).items_of_type::<KkDiff>(cx).collect::<Vec<_>>();
-                        for diff in diffs {
-                            diff.update(cx, |diff, cx| diff.resolve_classification_uncertainty(&snapshot, applied, cx));
-                        }
-                        let multi_diffs = workspace.read(cx).items_of_type::<KkMultiDiff>(cx).collect::<Vec<_>>();
-                        for diff in multi_diffs {
-                            diff.update(cx, |diff, cx| diff.resolve_classification_uncertainty(&snapshot, applied, cx));
-                        }
-                    }
-
-                    if let Some(resumed) = this.write_queues.get_mut(&root).and_then(|queue| queue.resume(applied, &snapshot)) {
-                        for preview in resumed.rejected_previews {
-                            preview.model.update(cx, |model, _| model.remove(preview.id)).log_err();
-                        }
-
-                        if resumed.run {
-                            this.run_write_queue(root.clone(), cx);
-                        }
-                    }
-
-                    if this.operation_error.as_ref().is_some_and(|(path, _)| *path == root) {
-                        this.operation_error = if applied {
-                            None
-                        } else {
-                            Some((root, "The previous operation was not published. Select the changes again to retry.".into()))
-                        };
-                    }
-                }
-
-                for view in &views {
-                    let limit = this.history_limits.entry(view.snapshot.repository().root().to_owned()).or_insert(50);
-                    *limit = (*limit).max(view.history.revisions.len());
-                }
-
-                this.list_previews.refreshed(&confirmed_list_previews, &views, &loaded_comparisons);
-                this.mutation_previews.refreshed(&confirmed_mutations, &views, &loaded_comparisons);
-                this.repositories = views;
+                this.repository_paths.retain(|_, paths| !paths.is_empty());
                 this.tree_selection.update_roots(&this.repositories);
-                this.refresh_commit_emptiness(cx);
-                if let Some(workspace) = this.workspace.upgrade() {
-                    let diffs = workspace
-                        .read(cx)
-                        .items_of_type::<KkDiff>(cx)
-                        .collect::<Vec<_>>();
-                    let multi_diffs = workspace.read(cx).items_of_type::<KkMultiDiff>(cx).collect::<Vec<_>>();
-                    let blame = workspace
-                        .read(cx)
-                        .status_bar()
-                        .read(cx)
-                        .item_of_type::<super::kk_blame::KkBlameStatus>();
-                    for repository in &this.repositories {
-                        if repository.stale {
-                            continue;
-                        }
-
-                        if let Some(blame) = &blame {
-                            blame.update(cx, |blame, cx| {
-                                blame.refresh(&repository.snapshot, cx)
-                            });
-                        }
-
-                        for diff in &diffs {
-                            diff.update(cx, |diff, cx| {
-                                diff.refresh(repository.snapshot.clone(), cx)
-                            });
-                        }
-                        for diff in &multi_diffs {
-                            diff.update(cx, |diff, cx| diff.refresh(&repository.snapshot, cx));
-                        }
-
-                    }
-                }
-
-                for repository in &this.repositories {
-                    if let Some(comparison) = &repository.comparison {
-                        this.comparison_state.save(
-                            repository.snapshot.repository().root(),
-                            Some(&comparison.intent),
+                this.refresh_errors.retain(|root, _| open.contains(root));
+                this.update_refresh_errors();
+                if let Some((root, revision)) = this.pending_reveal.take() {
+                    if this
+                        .repositories
+                        .iter()
+                        .any(|repository| repository.snapshot.repository().root() == root)
+                    {
+                        this.reveal_revision(root, revision, cx);
+                    } else {
+                        this.show_error(
+                            "The repository for this diff is no longer open".into(),
                             cx,
-                            Self::show_error,
                         );
                     }
                 }
-
-                let diagnostics = this.output.read(cx).diagnostics();
-                diagnostics.log(format!("Loaded {} commits across {} repositories", this.repositories.iter().map(|view| view.history.revisions.len()).sum::<usize>(), this.repositories.len()));
-                for error in &errors {
-                    diagnostics.error(error);
-                }
-
-                performance.finish(if errors.is_empty() {
-                    "completed"
-                } else {
-                    "error"
-                }, serde_json::json!({"repositories": this.repositories.len(), "errors": errors.len()}));
-                this.error = (!errors.is_empty()).then(|| errors.join("\n"));
-                if let Some((root, revision)) = this.pending_reveal.take() {
-                    if this.repositories.iter().any(|repository| repository.snapshot.repository().root() == root) {
-                        this.reveal_revision(root, revision, cx);
-                    } else {
-                        this.show_error("The repository for this diff is no longer open".into(), cx);
-                    }
-                }
+                let errors = this
+                    .refresh_errors
+                    .values()
+                    .chain(this.discovery_errors.values())
+                    .map(Vec::len)
+                    .sum::<usize>();
+                performance.finish(
+                    if errors == 0 { "completed" } else { "error" },
+                    serde_json::json!({"repositories": this.repositories.len(), "errors": errors}),
+                );
                 cx.notify();
             })
             .log_err();
         });
         cx.notify();
+    }
+
+    fn update_refresh_errors(&mut self) {
+        let mut errors = self
+            .refresh_errors
+            .values()
+            .chain(self.discovery_errors.values())
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        errors.sort();
+        errors.dedup();
+        self.error = (!errors.is_empty()).then(|| errors.join("\n"));
+    }
+
+    fn apply_repository_refresh(
+        &mut self,
+        completion: RepositoryRefresh,
+        confirmed_list_previews: &HashSet<u64>,
+        confirmed_mutations: &HashSet<u64>,
+        cx: &mut Context<Self>,
+    ) -> Vec<String> {
+        let RepositoryRefresh {
+            root,
+            view,
+            mut errors,
+            settled,
+            loaded_comparisons,
+        } = completion;
+        let (mut views, history_errors) = match view {
+            Ok(mut view) => {
+                view.snapshot = view.snapshot.with_performance_context(None);
+                (vec![view], Vec::new())
+            }
+            Err(error) => {
+                errors.push(format!("{}: {error:#}", root.display()));
+                if let Some(previous) = self
+                    .repositories
+                    .iter_mut()
+                    .find(|view| view.snapshot.repository().root() == root)
+                {
+                    previous.history_targets.retain(|target| {
+                        previous
+                            .history
+                            .revisions
+                            .iter()
+                            .any(|revision| revision.full_commit_id == target.full_commit_id)
+                    });
+                }
+                (Vec::new(), vec![root])
+            }
+        };
+        for error in &errors {
+            self.output.read(cx).diagnostics().error(error);
+        }
+        if self.reveal_selected
+            && self
+                .selected_change
+                .as_ref()
+                .is_some_and(|(root, _, _)| history_errors.contains(root))
+        {
+            self.reveal_selected = false;
+            self.selected_change = self.selected_tree_revision().and_then(|(index, revision)| {
+                Some((
+                    self.repositories
+                        .get(index)?
+                        .snapshot
+                        .repository()
+                        .root()
+                        .to_owned(),
+                    revision.full_change_id,
+                    revision.full_commit_id,
+                ))
+            });
+        }
+
+        self.history_loads.retain(|root, state| {
+            if history_errors.contains(root) {
+                *state = HistoryLoad::Failed;
+                true
+            } else {
+                !views
+                    .iter()
+                    .any(|view| view.snapshot.repository().root() == root)
+            }
+        });
+        for view in &mut views {
+            let root = view.snapshot.repository().root().to_owned();
+            let lifetime = self.repository_lifetimes.entry(root).or_default().clone();
+            view.snapshot = view.snapshot.with_lifetime(Some(lifetime));
+        }
+
+        for (root, applied, snapshot) in settled {
+            self.list_previews
+                .settle_uncertain(&root, applied, loaded_comparisons.contains(&root));
+            let mutations_refreshed = views.iter().any(|view| {
+                view.snapshot.repository().root() == root
+                    && (view.comparison.is_none() || loaded_comparisons.contains(&root))
+                    && view
+                        .expanded
+                        .values()
+                        .all(|files| matches!(files, RevisionFiles::Loaded(_)))
+            });
+            self.mutation_previews
+                .settle_uncertain(&root, applied, mutations_refreshed);
+            self.uncertain_operations.remove(&root);
+            if let Some(workspace) = self.workspace.upgrade() {
+                let diffs = workspace
+                    .read(cx)
+                    .items_of_type::<KkDiff>(cx)
+                    .collect::<Vec<_>>();
+                for diff in diffs {
+                    diff.update(cx, |diff, cx| {
+                        diff.resolve_classification_uncertainty(&snapshot, applied, cx)
+                    });
+                }
+                let multi_diffs = workspace
+                    .read(cx)
+                    .items_of_type::<KkMultiDiff>(cx)
+                    .collect::<Vec<_>>();
+                for diff in multi_diffs {
+                    diff.update(cx, |diff, cx| {
+                        diff.resolve_classification_uncertainty(&snapshot, applied, cx)
+                    });
+                }
+            }
+
+            if let Some(resumed) = self
+                .write_queues
+                .get_mut(&root)
+                .and_then(|queue| queue.resume(applied, &snapshot))
+            {
+                for preview in resumed.rejected_previews {
+                    preview
+                        .model
+                        .update(cx, |model, _| model.remove(preview.id))
+                        .log_err();
+                }
+
+                if resumed.run {
+                    self.run_write_queue(root.clone(), cx);
+                }
+            }
+
+            if self
+                .operation_error
+                .as_ref()
+                .is_some_and(|(path, _)| *path == root)
+            {
+                self.operation_error = if applied {
+                    None
+                } else {
+                    Some((root, "The previous operation was not published. Select the changes again to retry.".into()))
+                };
+            }
+        }
+
+        for view in &views {
+            let limit = self
+                .history_limits
+                .entry(view.snapshot.repository().root().to_owned())
+                .or_insert(50);
+            *limit = (*limit).max(view.history.revisions.len());
+        }
+
+        self.list_previews
+            .refreshed(confirmed_list_previews, &views, &loaded_comparisons);
+        self.mutation_previews
+            .refreshed(confirmed_mutations, &views, &loaded_comparisons);
+        let changed = views.iter().any(|view| {
+            self.repositories
+                .iter()
+                .find(|previous| {
+                    previous.snapshot.repository().root() == view.snapshot.repository().root()
+                })
+                .is_none_or(|previous| !previous.same_content(view))
+        });
+        for view in &views {
+            if let Some(previous) = self.repositories.iter_mut().find(|previous| {
+                previous.snapshot.repository().root() == view.snapshot.repository().root()
+            }) {
+                *previous = view.clone();
+            } else {
+                let index = self
+                    .repositories
+                    .iter()
+                    .position(|previous| {
+                        previous.snapshot.repository().root() > view.snapshot.repository().root()
+                    })
+                    .unwrap_or(self.repositories.len());
+                self.repositories.insert(index, view.clone());
+            }
+        }
+        self.tree_selection.update_roots(&self.repositories);
+        if changed {
+            for view in &views {
+                self.refresh_repository_emptiness(Some(view.snapshot.repository().root()), cx);
+            }
+        }
+        if let Some(workspace) = self.workspace.upgrade() {
+            let diffs = workspace
+                .read(cx)
+                .items_of_type::<KkDiff>(cx)
+                .collect::<Vec<_>>();
+            let multi_diffs = workspace
+                .read(cx)
+                .items_of_type::<KkMultiDiff>(cx)
+                .collect::<Vec<_>>();
+            let blame = workspace
+                .read(cx)
+                .status_bar()
+                .read(cx)
+                .item_of_type::<super::kk_blame::KkBlameStatus>();
+            for repository in &views {
+                if repository.stale {
+                    continue;
+                }
+
+                if let Some(blame) = &blame {
+                    blame.update(cx, |blame, cx| blame.refresh(&repository.snapshot, cx));
+                }
+
+                for diff in &diffs {
+                    diff.update(cx, |diff, cx| diff.refresh(repository.snapshot.clone(), cx));
+                }
+                for diff in &multi_diffs {
+                    diff.update(cx, |diff, cx| diff.refresh(&repository.snapshot, cx));
+                }
+            }
+        }
+
+        for repository in &views {
+            if let Some(comparison) = &repository.comparison {
+                self.comparison_state.save(
+                    repository.snapshot.repository().root(),
+                    Some(&comparison.intent),
+                    cx,
+                    Self::show_error,
+                );
+            }
+        }
+        if self.pending_reveal.as_ref().is_some_and(|(root, _)| {
+            views
+                .iter()
+                .any(|view| view.snapshot.repository().root() == root)
+        }) && let Some((root, revision)) = self.pending_reveal.take()
+        {
+            if self
+                .repositories
+                .iter()
+                .any(|repository| repository.snapshot.repository().root() == root)
+            {
+                self.reveal_revision(root, revision, cx);
+            } else {
+                self.pending_reveal = Some((root, revision));
+            }
+        }
+        cx.notify();
+        errors
     }
 
     fn load_files(
@@ -1609,12 +1675,19 @@ impl KkPanel {
     }
 
     fn set_mode(&mut self, mode: HistoryMode, cx: &mut Context<Self>) {
-        if self.repositories.is_empty() || self.pending_history_mode.unwrap_or(self.mode) == mode {
+        if self.mode == mode
+            && self
+                .repositories
+                .iter()
+                .all(|repository| repository.mode == mode)
+        {
             return;
         }
 
         self.model_generation += 1;
+        self.mode = mode;
         self.pending_history_mode = Some(mode);
+        self.history_preference.set(mode, cx, Self::show_error);
         self.refresh(cx);
     }
 
@@ -2572,6 +2645,9 @@ impl KkPanel {
             .cloned()
             .collect::<Vec<_>>();
         for root in closed {
+            self.tree_cache.remove(&root);
+            self.refreshing_repositories.remove(&root);
+            self.refresh_errors.remove(&root);
             self.list_previews.forget_root(&root);
             self.mutation_previews.forget_root(&root);
             self.updating_stale.remove(&root);
@@ -3554,7 +3630,9 @@ mod tests {
     }
 
     #[gpui::test(iterations = 3)]
-    async fn kk_history_mode_switch_is_atomic_and_preserves_pagination(cx: &mut TestAppContext) {
+    async fn kk_history_mode_switch_updates_successful_repositories_and_preserves_pagination(
+        cx: &mut TestAppContext,
+    ) {
         cx.background_executor.allow_parking();
         let directories = cx
             .background_spawn(async {
@@ -3689,15 +3767,24 @@ mod tests {
         .expect("inject history failure");
         panel.update(cx, |panel, cx| {
             panel.set_mode(HistoryMode::Log, cx);
-            assert_eq!(panel.mode, HistoryMode::Lineage);
-            assert_eq!(panel.history_preference.mode, HistoryMode::Lineage);
+            assert_eq!(panel.mode, HistoryMode::Log);
+            assert_eq!(panel.history_preference.mode, HistoryMode::Log);
             assert_eq!(history_ids(panel), original);
         });
         cx.condition(&panel, |panel, _| !panel.loading).await;
-        panel.read_with(cx, |panel, cx| {
-            assert_eq!(panel.mode, HistoryMode::Lineage);
-            assert_eq!(panel.history_preference.mode, HistoryMode::Lineage);
-            assert_eq!(history_ids(panel), original);
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.mode, HistoryMode::Log);
+            assert_eq!(panel.history_preference.mode, HistoryMode::Log);
+            let histories = history_ids(panel);
+            for (index, view) in panel.repositories.iter().enumerate() {
+                if view.snapshot.repository().root() == roots[1] {
+                    assert_eq!(view.mode, HistoryMode::Lineage);
+                    assert_eq!(histories[index], original[index]);
+                } else {
+                    assert_eq!(view.mode, HistoryMode::Log);
+                    assert!(histories[index].len() > original[index].len());
+                }
+            }
             assert_eq!(panel.tree_selection.selected, selection);
             assert!(
                 panel
@@ -3710,24 +3797,15 @@ mod tests {
                 panel
                     .error
                     .as_ref()
-                    .is_some_and(|error| error.contains("Failed to change history mode"))
+                    .is_some_and(|error| error.contains("missing_function"))
             );
             assert!(
                 roots
                     .iter()
                     .all(|root| panel.history_limits.get(root) == Some(&100))
             );
-            assert!(
-                roots
-                    .iter()
-                    .all(|root| panel.history_loads.get(root) == Some(&HistoryLoad::Failed))
-            );
-            assert!(
-                db::kvp::KeyValueStore::global(cx)
-                    .read_kvp(&preference_key)
-                    .expect("preference")
-                    .is_none()
-            );
+            assert!(panel.history_loads.get(&roots[1]) == Some(&HistoryLoad::Failed));
+            assert!(!panel.history_loads.contains_key(&roots[0]));
         });
         let failing_root = roots[1].clone();
         cx.background_spawn(async move {
@@ -3811,10 +3889,17 @@ mod tests {
         panel.update(cx, |panel, cx| panel.set_mode(HistoryMode::Lineage, cx));
         cx.condition(&panel, |panel, _| !panel.loading).await;
         panel.read_with(cx, |panel, _| {
-            assert_eq!(panel.mode, HistoryMode::Log);
-            assert_eq!(panel.history_preference.mode, HistoryMode::Log);
-            assert_eq!(history_ids(panel), previous);
-            assert!(panel.error.is_some());
+            assert_eq!(panel.mode, HistoryMode::Lineage);
+            assert_eq!(panel.history_preference.mode, HistoryMode::Lineage);
+            for (index, view) in panel.repositories.iter().enumerate() {
+                if view.snapshot.repository().root() == roots[1] {
+                    assert_eq!(view.mode, HistoryMode::Log);
+                    assert_eq!(history_ids(panel)[index], previous[index]);
+                    assert!(view.stale);
+                } else {
+                    assert_eq!(view.mode, HistoryMode::Lineage);
+                }
+            }
         });
     }
 
@@ -3971,6 +4056,7 @@ mod tests {
         };
         panel.update(cx, |panel, _| {
             panel.repositories = vec![RepositoryView {
+                mode: HistoryMode::Lineage,
                 stale: false,
                 snapshot,
                 history,
@@ -4217,6 +4303,7 @@ mod tests {
         assert!(!buffer.read_with(cx, |buffer, _| buffer.is_dirty()));
         panel.update(cx, |panel, cx| {
             panel.repositories = vec![RepositoryView {
+                mode: HistoryMode::Lineage,
                 stale: false,
                 snapshot: panel
                     .bind_snapshot(snapshot.clone(), cx)

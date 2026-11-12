@@ -37,7 +37,7 @@ impl Category {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CategoryCommit {
     pub category: Category,
     pub revision: Revision,

@@ -28,6 +28,12 @@ struct MutationEffect {
 }
 
 impl MutationPreviews {
+    pub fn contains_root(&self, root: &Path) -> bool {
+        self.intents
+            .iter()
+            .any(|intent| intent.snapshot.repository().root() == root)
+    }
+
     pub fn file(&mut self, repository: &RepositoryView, request: &FileMutationRequest) -> u64 {
         let mut effects = vec![MutationEffect {
             target: request.target.clone(),
@@ -364,6 +370,12 @@ enum IntentState {
 }
 
 impl ListPreviews {
+    pub fn contains_root(&self, root: &Path) -> bool {
+        self.intents
+            .iter()
+            .any(|intent| intent.snapshot.repository().root() == root)
+    }
+
     #[cfg(test)]
     pub fn push(
         &mut self,

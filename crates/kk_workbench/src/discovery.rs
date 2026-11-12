@@ -49,11 +49,11 @@ pub async fn discover_with_diagnostics(
             continue;
         }
 
-        let mut has_repository = false;
+        let mut repository_root = None;
         for ancestor in canonical.ancestors() {
             match smol::fs::metadata(ancestor.join(".kk")).await {
                 Ok(_) => {
-                    has_repository = true;
+                    repository_root = Some(ancestor.to_owned());
                     break;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -67,31 +67,21 @@ pub async fn discover_with_diagnostics(
             }
         }
 
-        if has_repository {
-            match Repository::open_with_diagnostics(
-                &canonical,
-                executable,
-                diagnostics.clone(),
-                context.clone(),
-            )
-            .await
+        if let Some(root) = repository_root {
+            if !result
+                .repositories
+                .iter()
+                .any(|repository| repository.root() == root)
             {
-                Ok(repository) => {
-                    if !result
-                        .repositories
-                        .iter()
-                        .any(|existing| existing.root() == repository.root())
-                    {
-                        result.repositories.push(repository);
-                    }
-
-                    continue;
-                }
-                Err(error) => result.errors.push(DiscoveryError {
-                    path: canonical.clone(),
-                    message: format!("{error:#}"),
-                }),
+                // Repository commands run later so an unresponsive CLI cannot block discovery of its siblings.
+                result.repositories.push(Repository::discovered(
+                    root,
+                    executable,
+                    diagnostics.clone(),
+                    context.clone(),
+                ));
             }
+            continue;
         }
 
         let mut entries = match smol::fs::read_dir(&canonical).await {

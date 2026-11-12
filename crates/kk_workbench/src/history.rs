@@ -10,7 +10,7 @@ pub enum HistoryMode {
     Log,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Revision {
     pub change_id: String,
@@ -69,7 +69,7 @@ impl Revision {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct HistoryPage {
     pub revisions: Vec<Revision>,
     pub has_more: bool,

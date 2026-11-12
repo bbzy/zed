@@ -569,7 +569,7 @@ fn graph_keeps_divergent_commits_and_merge_lanes_distinct() -> Result<()> {
         );
         assert_eq!(
             revision_ids(&targets),
-            [left_revision.full_commit_id.clone()]
+            std::slice::from_ref(&left_revision.full_commit_id)
         );
         assert_eq!(
             revision_ids(&located_history.revisions).first(),
@@ -667,7 +667,10 @@ fn history_navigation_loads_branch_context_in_order_and_retains_targets() -> Res
             assert!(initial.has_more);
             assert!(!revision_ids(&initial.revisions).contains(&target.full_commit_id));
             let (history, resolved) = snapshot.history_containing(mode, 50, &targets).await?;
-            assert_eq!(revision_ids(&resolved), [target.full_commit_id.clone()]);
+            assert_eq!(
+                revision_ids(&resolved),
+                std::slice::from_ref(&target.full_commit_id)
+            );
             assert!(history.revisions.len() > 50);
             assert!(
                 revision_ids(&history.revisions).starts_with(&revision_ids(&initial.revisions))
@@ -959,4 +962,19 @@ fn conflict_titles_preserve_long_and_unverified_change_ids() -> Result<()> {
     source.details_incomplete = true;
     assert_eq!(input.title(0), "kkkkkkkkklmnopqrstuvwxyz");
     Ok(())
+}
+
+#[test]
+fn discovery_does_not_execute_repository_commands() -> Result<()> {
+    smol::block_on(async {
+        let container = tempfile::tempdir()?;
+        let first = container.path().join("first");
+        let second = container.path().join("second");
+        fs::create_dir_all(first.join(".kk"))?;
+        fs::create_dir_all(second.join(".kk"))?;
+        let discovery = discover(container.path(), Path::new("/missing-kk-executable")).await;
+        assert!(discovery.errors.is_empty(), "{:?}", discovery.errors);
+        assert_eq!(discovery.repositories.len(), 2);
+        Ok(())
+    })
 }

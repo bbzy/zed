@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, path::Path, sync::Arc};
 use util::ResultExt as _;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ComparisonIntent {
     version: u32,
     pub target_revset: String,
@@ -46,7 +46,7 @@ impl ComparisonIntent {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Comparison {
     pub intent: ComparisonIntent,
     pub files: Vec<ChangedFile>,
