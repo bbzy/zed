@@ -75,7 +75,6 @@ impl FileRow {
             .history
             .revisions
             .iter()
-            .chain(repository.located.iter())
             .chain(repository.comparison.iter().flat_map(|comparison| {
                 comparison
                     .categories
@@ -677,7 +676,7 @@ mod tests {
                 history,
                 expanded: HashMap::new(),
                 comparison: None,
-                located: None,
+                history_targets: Vec::new(),
             };
             let rows = panel
                 .file_order

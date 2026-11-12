@@ -85,7 +85,7 @@ struct RepositoryView {
     history: HistoryPage,
     expanded: HashMap<String, RevisionFiles>,
     comparison: Option<Comparison>,
-    located: Option<Revision>,
+    history_targets: Vec<Revision>,
 }
 
 #[derive(Clone)]
@@ -647,7 +647,13 @@ impl KkPanel {
             .expanded
             .entry(revision.full_commit_id.clone())
             .or_insert(RevisionFiles::Loading);
-        repository.located = Some(revision);
+        if !repository
+            .history_targets
+            .iter()
+            .any(|target| target.full_commit_id == revision.full_commit_id)
+        {
+            repository.history_targets.push(revision);
+        }
         self.reveal_selected = true;
         self.model_generation += 1;
         self.refresh(cx);
@@ -774,6 +780,7 @@ impl KkPanel {
                 (identifier, path)
             })
             .collect();
+        let changing_history_mode = self.pending_history_mode.is_some();
         let mode = self.pending_history_mode.unwrap_or(self.mode);
         let executable = KkWorkbenchSettings::get_global(cx).executable_path.clone();
         let history_limits = self.history_limits.clone();
@@ -877,28 +884,27 @@ impl KkPanel {
                                         history: previous.map(|previous| previous.history.clone()).unwrap_or(HistoryPage { revisions: Vec::new(), has_more: false }),
                                         expanded: previous.map(|previous| previous.expanded.clone()).unwrap_or_default(),
                                         comparison,
-                                        located: previous.and_then(|previous| previous.located.clone()),
+                                        history_targets: previous.map(|previous| previous.history_targets.clone()).unwrap_or_default(),
                                     });
                                 }
                                 Err(error) => return Err(error),
                             };
                             let limit = history_limits.get(repository.root()).copied().unwrap_or(50);
-                            let (history, located) = if let Some(revision) =
-                                previous.and_then(|view| view.located.as_ref())
-                            {
-                                snapshot.history_containing(mode, limit, revision).await?
+                            let targets = if changing_history_mode {
+                                &[][..]
                             } else {
-                                (snapshot.history(mode, limit).await?, None)
+                                previous.map(|view| view.history_targets.as_slice()).unwrap_or_default()
                             };
+                            let (history, history_targets) = snapshot.history_containing(mode, limit, targets).await?;
                             let mut expanded = HashMap::new();
                             let mut comparison = None;
                             if let Some(previous) = previous {
-                                for revision in history.revisions.iter().chain(located.iter()) {
+                                for revision in history.revisions.iter() {
                                     let was_expanded = previous
                                         .history
                                         .revisions
                                         .iter()
-                                        .chain(previous.located.iter())
+                                        .chain(previous.history_targets.iter())
                                         .any(|old| {
                                             previous.expanded.contains_key(&old.full_commit_id)
                                                 && (old.full_commit_id == revision.full_commit_id
@@ -907,7 +913,6 @@ impl KkPanel {
                                                         && history
                                                             .revisions
                                                             .iter()
-                                                            .chain(located.iter())
                                                             .filter(|candidate| {
                                                                 candidate.full_change_id
                                                                     == revision.full_change_id
@@ -963,7 +968,7 @@ impl KkPanel {
                                 history,
                                 expanded,
                                 comparison,
-                                located,
+                                history_targets,
                             })
                         }
                         .await;
@@ -976,7 +981,13 @@ impl KkPanel {
                                 history_errors.push(repository.root().to_owned());
                                 errors.push(format!("{}: {error:#}", repository.root().display()));
                                 if let Some(previous) = previous {
-                                    views.push(previous.clone());
+                                    let mut previous = previous.clone();
+                                    previous.history_targets.retain(|target| {
+                                        previous.history.revisions.iter().any(|revision| {
+                                            revision.full_commit_id == target.full_commit_id
+                                        })
+                                    });
+                                    views.push(previous);
                                 }
                             }
                         }
@@ -993,6 +1004,19 @@ impl KkPanel {
                 }
 
                 this.loading = false;
+                if this.reveal_selected
+                    && this.selected_change.as_ref().is_some_and(|(root, _, _)| history_errors.contains(root))
+                {
+                    this.reveal_selected = false;
+                    this.selected_change = this.selected_tree_revision().and_then(|(index, revision)| {
+                        Some((
+                            this.repositories.get(index)?.snapshot.repository().root().to_owned(),
+                            revision.full_change_id,
+                            revision.full_commit_id,
+                        ))
+                    });
+                }
+
                 if let Some(mode) = this.pending_history_mode.take() {
                     let missing_repository = this.repositories.iter().any(|previous| {
                         !views.iter().any(|view| view.snapshot.repository().root()
@@ -1297,13 +1321,7 @@ impl KkPanel {
             .iter()
             .enumerate()
             .find(|(_, repository)| repository.snapshot.repository().root() == root)?;
-        let revisions = || {
-            repository
-                .history
-                .revisions
-                .iter()
-                .chain(repository.located.iter())
-        };
+        let revisions = || repository.history.revisions.iter();
         let revision = revisions()
             .find(|revision| revision.full_commit_id == *commit_id)
             .or_else(|| {
@@ -3356,6 +3374,185 @@ mod tests {
     use std::path::Path;
     use workspace::{Item, MultiWorkspace};
 
+    fn revision_ids(revisions: &[Revision]) -> Vec<String> {
+        revisions
+            .iter()
+            .map(|revision| revision.full_commit_id.clone())
+            .collect()
+    }
+
+    #[gpui::test(iterations = 3)]
+    async fn kk_history_reveal_keeps_order_mode_and_branch_context(cx: &mut TestAppContext) {
+        cx.background_executor.allow_parking();
+        let (directory, target, middle, ancestor) = cx
+            .background_spawn(async {
+                let directory = tempfile::tempdir()?;
+                let root = directory.path();
+                run_kk(root, &["init", "."]).await?;
+                run_kk(root, &["describe", "-m", "base"]).await?;
+                run_kk(root, &["new", "-m", "branch middle"]).await?;
+                run_kk(root, &["new", "-m", "branch target"]).await?;
+                std::fs::write(root.join("file.txt"), "branch contents\n")?;
+                let repository = kk_workbench::Repository::open(root, Path::new("kk")).await?;
+                let snapshot = repository.snapshot(true).await?;
+                let target = snapshot.exact_revision("@").await?;
+                let middle = snapshot.exact_revision("@-").await?;
+                let ancestor = snapshot.exact_revision("@--").await?;
+                run_kk(
+                    root,
+                    &["new", &ancestor.full_commit_id, "-m", "current branch"],
+                )
+                .await?;
+                for index in 0..51 {
+                    run_kk(root, &["new", "-m", &format!("current {index}")]).await?;
+                }
+
+                run_kk(
+                    root,
+                    &[
+                        "config",
+                        "set",
+                        "--repo",
+                        "revsets.log",
+                        "first_ancestors(@)",
+                    ],
+                )
+                .await?;
+                anyhow::Ok((directory, target, middle, ancestor))
+            })
+            .await
+            .expect("repository");
+        let root = std::fs::canonicalize(directory.path()).expect("canonical root");
+        cx.update(|cx| {
+            let mut settings = SettingsStore::test(cx);
+            settings
+                .set_user_settings(r#"{"kk_workbench":{"auto_refresh":false}}"#, cx)
+                .expect("settings");
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            init(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(&root, serde_json::json!({})).await;
+        let project = Project::test(fs, [root.as_path()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |view, _| view.workspace().clone());
+        let panel = cx
+            .update(|window, cx| KkPanel::load(workspace.downgrade(), window.to_async(cx)))
+            .await
+            .expect("panel");
+        cx.condition(&panel, |panel, _| !panel.loading).await;
+        let ancestor_id = TreeRowId::Revision(root.clone(), ancestor.full_change_id.clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.focus_panel::<KkPanel>(window, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        for mode in [HistoryMode::Lineage, HistoryMode::Log] {
+            panel.update(cx, |panel, cx| panel.set_mode(mode, cx));
+            cx.condition(&panel, |panel, _| !panel.loading).await;
+            panel.read_with(cx, |panel, _| {
+                assert!(panel.error.is_none(), "{:?}", panel.error);
+                assert!(panel.repositories[0].history_targets.is_empty());
+                assert!(
+                    !revision_ids(&panel.repositories[0].history.revisions)
+                        .contains(&target.full_commit_id)
+                );
+            });
+            panel.update(cx, |panel, cx| {
+                panel.reveal_revision(root.clone(), target.clone(), cx);
+                panel.start_refresh(cx);
+                panel.reveal_revision(root.clone(), ancestor.clone(), cx);
+            });
+            cx.condition(&panel, |panel, _| !panel.loading).await;
+            let history = panel.update(cx, |panel, cx| {
+                assert!(panel.error.is_none(), "{:?}", panel.error);
+                assert_eq!(panel.mode, mode);
+                assert_eq!(panel.history_preference.mode, mode);
+                let repository = &panel.repositories[0];
+                assert!(repository.history.revisions.len() > 50);
+                assert!(revision_ids(&repository.history.revisions).contains(&target.full_commit_id));
+                assert!(revision_ids(&repository.history.revisions).contains(&middle.full_commit_id));
+                assert_ne!(revision_ids(&repository.history.revisions).first(), Some(&target.full_commit_id));
+                assert!(matches!(repository.expanded.get(&target.full_commit_id), Some(RevisionFiles::Loaded(files)) if files.iter().any(|file| file.path == "file.txt")));
+                let history = revision_ids(&repository.history.revisions);
+                panel.update_tree(cx);
+                assert_eq!(panel.tree_selection.selected, HashSet::from([ancestor_id.clone()]));
+                assert!(!panel.reveal_selected);
+                panel.refresh(cx);
+                history
+            });
+            cx.condition(&panel, |panel, _| !panel.loading).await;
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            panel.read_with(cx, |panel, _| {
+                assert!(panel.scroll_handle.0.borrow().base_handle.offset().y < gpui::px(0.));
+                assert_eq!(
+                    revision_ids(&panel.repositories[0].history.revisions),
+                    history
+                );
+                assert_eq!(
+                    panel.tree_selection.selected,
+                    HashSet::from([ancestor_id.clone()])
+                );
+            });
+            panel.update(cx, |panel, cx| {
+                panel.reveal_revision(root.clone(), target.clone(), cx);
+            });
+            cx.condition(&panel, |panel, _| !panel.loading).await;
+            panel.update(cx, |panel, cx| {
+                panel.update_tree(cx);
+                assert_eq!(
+                    panel.tree_selection.selected,
+                    HashSet::from([TreeRowId::Revision(
+                        root.clone(),
+                        target.full_change_id.clone()
+                    )])
+                );
+                assert_eq!(
+                    revision_ids(&panel.repositories[0].history.revisions),
+                    history
+                );
+            });
+        }
+
+        let mut missing = target.clone();
+        missing.full_change_id = "not-a-change-id".into();
+        missing.full_commit_id = "0000000000000000000000000000000000000001".into();
+        let (history, selection) = panel.update(cx, |panel, cx| {
+            let history = revision_ids(&panel.repositories[0].history.revisions);
+            let selection = panel.tree_selection.selected.clone();
+            panel.reveal_revision(root.clone(), missing, cx);
+            (history, selection)
+        });
+        cx.condition(&panel, |panel, _| !panel.loading).await;
+        panel.update(cx, |panel, cx| {
+            panel.update_tree(cx);
+            assert!(panel.error.is_some());
+            assert_eq!(
+                revision_ids(&panel.repositories[0].history.revisions),
+                history
+            );
+            assert_eq!(panel.tree_selection.selected, selection);
+            panel.refresh(cx);
+        });
+        cx.condition(&panel, |panel, _| !panel.loading).await;
+        panel.update(cx, |panel, cx| {
+            assert!(panel.error.is_none(), "{:?}", panel.error);
+            assert_eq!(
+                revision_ids(&panel.repositories[0].history.revisions),
+                history
+            );
+            panel.reveal_revision(root.clone(), ancestor, cx);
+        });
+        cx.condition(&panel, |panel, _| !panel.loading).await;
+        panel.update(cx, |panel, cx| {
+            panel.update_tree(cx);
+            assert!(panel.error.is_none(), "{:?}", panel.error);
+            assert_eq!(panel.tree_selection.selected, HashSet::from([ancestor_id]));
+        });
+    }
+
     #[gpui::test(iterations = 3)]
     async fn kk_history_mode_switch_is_atomic_and_preserves_pagination(cx: &mut TestAppContext) {
         cx.background_executor.allow_parking();
@@ -3782,7 +3979,7 @@ mod tests {
                     RevisionFiles::Loaded(vec![unchanged.clone()]),
                 )]),
                 comparison: None,
-                located: None,
+                history_targets: Vec::new(),
             }]
         });
         workspace.update_in(cx, |workspace, window, cx| {
@@ -4030,7 +4227,7 @@ mod tests {
                 },
                 expanded: HashMap::new(),
                 comparison: Some(comparison.clone()),
-                located: None,
+                history_targets: Vec::new(),
             }];
         });
         let opened_diff = cx

@@ -11,6 +11,13 @@ mod remote_tests;
 #[path = "transaction_tests.rs"]
 mod transaction_tests;
 
+fn revision_ids(revisions: &[Revision]) -> Vec<String> {
+    revisions
+        .iter()
+        .map(|revision| revision.full_commit_id.clone())
+        .collect()
+}
+
 struct Fixture {
     directory: TempDir,
 }
@@ -540,15 +547,33 @@ fn graph_keeps_divergent_commits_and_merge_lanes_distinct() -> Result<()> {
             .iter()
             .find(|revision| revision.full_change_id == left)
             .context("left revision missing")?;
-        let (located_history, outside) = snapshot
-            .history_containing(HistoryMode::Lineage, 50, left_revision)
+        let (located_history, targets) = snapshot
+            .history_containing(
+                HistoryMode::Lineage,
+                50,
+                std::slice::from_ref(left_revision),
+            )
             .await?;
-        assert_eq!(located_history.revisions.len(), lineage.revisions.len());
+        let expected = snapshot
+            .revisions(
+                Some(&format!(
+                    "first_ancestors(@) | first_ancestors({})",
+                    left_revision.full_commit_id
+                )),
+                100,
+            )
+            .await?;
         assert_eq!(
-            outside
-                .context("merge parent must remain outside the first-parent history")?
-                .full_commit_id,
-            left_revision.full_commit_id
+            revision_ids(&located_history.revisions),
+            revision_ids(&expected)
+        );
+        assert_eq!(
+            revision_ids(&targets),
+            [left_revision.full_commit_id.clone()]
+        );
+        assert_eq!(
+            revision_ids(&located_history.revisions).first(),
+            revision_ids(&revisions).first()
         );
 
         Ok(())
@@ -610,6 +635,96 @@ fn comparison_boundary_skips_only_exact_category_markers_and_survives_rewrites()
 }
 
 #[test]
+fn history_navigation_loads_branch_context_in_order_and_retains_targets() -> Result<()> {
+    smol::block_on(async {
+        let fixture = Fixture::create()?;
+        fixture.run(&["describe", "-m", "base"])?;
+        fixture.run(&["new", "-m", "branch middle"])?;
+        fixture.run(&["new", "-m", "branch target"])?;
+        let repository = fixture.repository().await?;
+        let branch = repository.snapshot(true).await?;
+        let target = branch.exact_revision("@").await?;
+        let middle = branch.exact_revision("@-").await?;
+        let base = branch.exact_revision("@--").await?;
+        fixture.run(&["new", &base.full_commit_id, "-m", "current branch"])?;
+        for index in 0..51 {
+            fixture.run(&["new", "-m", &format!("current {index}")])?;
+        }
+
+        let snapshot = repository.snapshot(true).await?;
+        let working = snapshot.exact_revision("@").await?;
+        let targets = [target.clone(), target.clone(), working.clone()];
+        for mode in [HistoryMode::Lineage, HistoryMode::Log] {
+            fixture.run(&[
+                "config",
+                "set",
+                "--repo",
+                "revsets.log",
+                "first_ancestors(@)",
+            ])?;
+            let initial = snapshot.history(mode, 50).await?;
+            assert_eq!(initial.revisions.len(), 50);
+            assert!(initial.has_more);
+            assert!(!revision_ids(&initial.revisions).contains(&target.full_commit_id));
+            let (history, resolved) = snapshot.history_containing(mode, 50, &targets).await?;
+            assert_eq!(revision_ids(&resolved), [target.full_commit_id.clone()]);
+            assert!(history.revisions.len() > 50);
+            assert!(
+                revision_ids(&history.revisions).starts_with(&revision_ids(&initial.revisions))
+            );
+            assert_eq!(
+                revision_ids(&history.revisions).first(),
+                Some(&working.full_commit_id)
+            );
+            let position = |revision: &Revision| {
+                history
+                    .revisions
+                    .iter()
+                    .position(|entry| entry.full_commit_id == revision.full_commit_id)
+                    .expect("branch context")
+            };
+            assert!(position(&target) > 0);
+            assert!(position(&target) < position(&middle));
+            assert!(position(&middle) < position(&base));
+            let unique = history
+                .revisions
+                .iter()
+                .map(|revision| &revision.full_commit_id)
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(unique.len(), history.revisions.len());
+
+            let (refreshed, retained) = snapshot
+                .history_containing(mode, history.revisions.len(), &resolved)
+                .await?;
+            assert_eq!(
+                revision_ids(&refreshed.revisions),
+                revision_ids(&history.revisions)
+            );
+            assert_eq!(revision_ids(&retained), revision_ids(&resolved));
+            let (more, _) = snapshot.history_containing(mode, 100, &retained).await?;
+            assert!(revision_ids(&more.revisions).starts_with(&revision_ids(&history.revisions)));
+            assert!(revision_ids(&more.revisions).contains(&middle.full_commit_id));
+            assert!(!more.has_more);
+        }
+
+        fixture.run(&[
+            "config",
+            "set",
+            "--repo",
+            "revsets.log",
+            "missing_function()",
+        ])?;
+        assert!(
+            snapshot
+                .history_containing(HistoryMode::Log, 50, &targets)
+                .await
+                .is_err()
+        );
+        Ok(())
+    })
+}
+
+#[test]
 fn history_pagination_loads_one_extra_revision_without_losing_order() -> Result<()> {
     smol::block_on(async {
         let fixture = Fixture::create()?;
@@ -629,11 +744,11 @@ fn history_pagination_loads_one_extra_revision_without_losing_order() -> Result<
         }
         assert!(!second.has_more);
         let target = second.revisions.last().context("root missing")?;
-        let (located_history, outside) = snapshot
-            .history_containing(HistoryMode::Lineage, 50, target)
+        let (located_history, targets) = snapshot
+            .history_containing(HistoryMode::Lineage, 50, std::slice::from_ref(target))
             .await?;
         assert_eq!(located_history.revisions.len(), 53);
-        assert!(outside.is_none());
+        assert!(targets.is_empty());
         assert_eq!(
             first
                 .revisions

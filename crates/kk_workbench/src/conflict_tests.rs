@@ -1,6 +1,22 @@
 use super::*;
 use crate::ConflictRole::{Base, Side};
 
+pub(super) fn stable_conflict_inputs(inputs: &[ConflictInput]) -> Vec<ConflictInput> {
+    inputs
+        .iter()
+        .cloned()
+        .map(|mut input| {
+            // New revisions can lengthen a source's unique display prefix without changing its identity.
+            if let Some(source) = &mut input.source {
+                source.change_id_prefix.clear();
+                source.display_change_id = None;
+            }
+
+            input
+        })
+        .collect()
+}
+
 pub(super) fn conflict_fixture(
     base: &[u8],
     left: &[u8],
@@ -51,8 +67,8 @@ fn conflict_restoration_preserves_other_paths_and_rejects_external_edits() -> Re
                 .await?
                 .snapshot;
             assert_eq!(
-                restored.file_conflict("@", path).await?.inputs,
-                conflict.inputs
+                stable_conflict_inputs(&restored.file_conflict("@", path).await?.inputs),
+                stable_conflict_inputs(&conflict.inputs)
             );
             assert_eq!(
                 restored.file_conflict("@", path).await?.materialized,
@@ -117,8 +133,8 @@ fn conflict_restoration_in_ancestor_preserves_descendant_edits() -> Result<()> {
             .await?
             .snapshot;
         assert_eq!(
-            restored.file_conflict(&target, "file.txt").await?.inputs,
-            conflict.inputs
+            stable_conflict_inputs(&restored.file_conflict(&target, "file.txt").await?.inputs),
+            stable_conflict_inputs(&conflict.inputs)
         );
         assert_eq!(
             fs::read(fixture.root().join("unselected.txt"))?,

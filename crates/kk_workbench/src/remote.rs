@@ -43,7 +43,7 @@ pub struct DiagnosticOutput {
     pub text: String,
 }
 
-const PROTOCOL_VERSION: u32 = 5;
+const PROTOCOL_VERSION: u32 = 6;
 
 pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     Ok(bincode::DefaultOptions::new().serialize(&(PROTOCOL_VERSION, value))?)
@@ -245,7 +245,7 @@ pub enum Read {
     HistoryContaining {
         mode: HistoryMode,
         limit: usize,
-        revision: Revision,
+        targets: Vec<Revision>,
     },
     CommitEmptiness {
         commits: Vec<String>,
@@ -990,8 +990,8 @@ impl Service {
             Read::HistoryContaining {
                 mode,
                 limit,
-                revision,
-            } => data(snapshot.history_containing(mode, limit, &revision).await?),
+                targets,
+            } => data(snapshot.history_containing(mode, limit, &targets).await?),
             Read::CommitEmptiness { commits } => data(snapshot.commit_emptiness(&commits).await?),
             Read::ComparisonCandidates => data(snapshot.comparison_candidates().await?),
             Read::ExactRevision { revset } => data(snapshot.exact_revision(&revset).await?),
@@ -1424,7 +1424,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("protocol version 2 (expected 5)"),
+                .contains("protocol version 2 (expected 6)"),
             "{error:#}"
         );
         let revision: Revision = serde_json::from_value(serde_json::json!({

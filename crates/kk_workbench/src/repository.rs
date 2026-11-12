@@ -761,8 +761,8 @@ impl Snapshot {
         &self,
         mode: HistoryMode,
         visible_limit: usize,
-        revision: &Revision,
-    ) -> Result<(HistoryPage, Option<Revision>)> {
+        targets: &[Revision],
+    ) -> Result<(HistoryPage, Vec<Revision>)> {
         if let Some(remote) = self.repository().remote() {
             return remote
                 .read(
@@ -770,40 +770,84 @@ impl Snapshot {
                     crate::remote::Read::HistoryContaining {
                         mode,
                         limit: visible_limit,
-                        revision: revision.clone(),
+                        targets: targets.to_vec(),
                     },
                 )
                 .await;
         }
 
-        let revision = self.resolve_revision(revision).await?;
+        let mut resolved = Vec::new();
+        for target in targets {
+            let revision = self.resolve_revision(target).await?;
+            if !resolved
+                .iter()
+                .any(|previous: &Revision| previous.full_commit_id == revision.full_commit_id)
+            {
+                resolved.push(revision);
+            }
+        }
+
         let mut limit = visible_limit.max(HISTORY_PAGE_SIZE);
         let mut history = self.history(mode, limit).await?;
-        let outside_lineage = mode == HistoryMode::Lineage
-            && self
-                .revisions(
-                    Some(&format!("{} & first_ancestors(@)", revision.full_commit_id)),
-                    1,
-                )
-                .await?
-                .is_empty();
-        loop {
-            if history
+        if resolved.iter().all(|target| {
+            history
                 .revisions
                 .iter()
-                .any(|candidate| candidate.full_commit_id == revision.full_commit_id)
+                .any(|revision| revision.full_commit_id == target.full_commit_id)
+        }) {
+            return Ok((history, Vec::new()));
+        }
+
+        let base = match mode {
+            HistoryMode::Lineage => "first_ancestors(@)".to_owned(),
+            HistoryMode::Log => String::from_utf8(
+                self.read(&["config".into(), "get".into(), "revsets.log".into()])
+                    .await?,
+            )?
+            .trim()
+            .to_owned(),
+        };
+        let mut revset = format!("({base})");
+        let mut history_targets = Vec::new();
+        for target in &resolved {
+            if self
+                .revisions(Some(&format!("{} & ({base})", target.full_commit_id)), 1)
+                .await?
+                .is_empty()
             {
-                return Ok((history, None));
+                let ancestors = match mode {
+                    HistoryMode::Lineage => "first_ancestors",
+                    HistoryMode::Log => "ancestors",
+                };
+                revset.push_str(&format!(" | {ancestors}({})", target.full_commit_id));
+                history_targets.push(target.clone());
+            }
+        }
+
+        loop {
+            let mut revisions = self
+                .revisions(Some(&revset), limit.saturating_add(1))
+                .await?;
+            let has_more = revisions.len() > limit;
+            revisions.truncate(limit);
+            history = HistoryPage {
+                revisions,
+                has_more,
+            };
+
+            if resolved.iter().all(|target| {
+                history
+                    .revisions
+                    .iter()
+                    .any(|revision| revision.full_commit_id == target.full_commit_id)
+            }) {
+                return Ok((history, history_targets));
             }
 
-            if outside_lineage || !history.has_more {
-                return Ok((history, Some(revision)));
-            }
-
+            ensure!(history.has_more, "Target commit is missing from history");
             limit = limit
                 .checked_add(HISTORY_PAGE_SIZE)
                 .context("History limit overflow")?;
-            history = self.history(mode, limit).await?;
         }
     }
 

@@ -669,7 +669,7 @@ mod tests {
                 history,
                 expanded: HashMap::new(),
                 comparison: None,
-                located: None,
+                history_targets: Vec::new(),
             }];
             panel.bind_snapshot(snapshot, cx).expect("bind repository")
         });

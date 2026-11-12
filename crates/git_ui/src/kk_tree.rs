@@ -382,11 +382,7 @@ impl KkPanel {
             }
 
             let root = repository.snapshot.repository().root().to_owned();
-            let revisions = repository
-                .history
-                .revisions
-                .iter()
-                .chain(repository.located.iter());
+            let revisions = repository.history.revisions.iter();
             let commits = revisions
                 .map(|revision| revision.full_commit_id.clone())
                 .collect::<HashSet<_>>();
@@ -575,7 +571,6 @@ impl KkPanel {
                     .history
                     .revisions
                     .iter()
-                    .chain(repository.located.iter())
                     .chain(repository.comparison.iter().flat_map(|comparison| {
                         comparison.categories.iter().map(|entry| &entry.revision)
                     }))
@@ -1802,7 +1797,7 @@ mod tests {
                 history,
                 comparison: Some(comparison),
                 expanded: HashMap::new(),
-                located: None,
+                history_targets: Vec::new(),
             },
         ))
     }
@@ -3397,7 +3392,7 @@ mod tests {
                             history,
                             expanded: HashMap::new(),
                             comparison: Some(comparison),
-                            located: None,
+                            history_targets: Vec::new(),
                         },
                     ))
                 })
@@ -4741,36 +4736,14 @@ impl TreeProjection {
             }
 
             let graph = history_graph(&repository.history.revisions, self.mode);
-            let revisions = repository
-                .located
-                .iter()
-                .chain(repository.history.revisions.iter());
-            let prefixes = repository
-                .located
-                .iter()
-                .map(|revision| kk_workbench::GraphRow {
-                    prefix: "◇".to_owned(),
-                    column: 0,
-                    incoming: Vec::new(),
-                    outgoing: Vec::new(),
-                    parents: Vec::new(),
-                    is_fork: revision.has_multiple_children,
-                    is_merge: revision.parent_commit_ids.len() > 1,
-                    omitted_parents: 0,
-                })
-                .chain(graph);
+            let revisions = repository.history.revisions.iter();
             let mut change_counts = HashMap::new();
-            for revision in repository
-                .history
-                .revisions
-                .iter()
-                .chain(repository.located.iter())
-            {
+            for revision in repository.history.revisions.iter() {
                 *change_counts
                     .entry(&revision.full_change_id)
                     .or_insert(0usize) += 1;
             }
-            for (revision, prefix) in revisions.zip(prefixes) {
+            for (revision, prefix) in revisions.zip(graph) {
                 let identity = if change_counts
                     .get(&revision.full_change_id)
                     .copied()

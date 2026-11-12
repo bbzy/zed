@@ -492,6 +492,43 @@ fn remote_diagnostics_wait_for_output_and_reset_after_reconnect() -> Result<()> 
 }
 
 #[test]
+fn remote_history_navigation_preserves_branch_context_and_order() -> Result<()> {
+    smol::block_on(async {
+        let fixture = changed_fixture()?;
+        fixture.run(&["new", "-m", "side branch"])?;
+        fixture.run(&["new", "-m", "target"])?;
+        let repository = fixture.repository().await?;
+        let branch = repository.snapshot(true).await?;
+        let target = branch.exact_revision("@").await?;
+        let middle = branch.exact_revision("@-").await?;
+        fixture.run(&["new", "@--", "-m", "current"])?;
+        fixture.run(&[
+            "config",
+            "set",
+            "--repo",
+            "revsets.log",
+            "first_ancestors(@)",
+        ])?;
+        let transport = ServiceTransport::new(&fixture)?;
+        let remote = transport.open().await?.snapshot(false).await?;
+        let local = repository.snapshot(false).await?;
+        for mode in [HistoryMode::Lineage, HistoryMode::Log] {
+            let targets = std::slice::from_ref(&target);
+            let result = remote.history_containing(mode, 50, targets).await?;
+            assert!(revision_ids(&result.0.revisions).contains(&target.full_commit_id));
+            assert!(revision_ids(&result.0.revisions).contains(&middle.full_commit_id));
+            assert_ne!(
+                revision_ids(&result.0.revisions).first(),
+                Some(&target.full_commit_id)
+            );
+            same_data(result, local.history_containing(mode, 50, targets).await?)?;
+        }
+
+        Ok(())
+    })
+}
+
+#[test]
 fn remote_repository_handles_read_and_publish_without_client_files_or_executable() -> Result<()> {
     smol::block_on(async {
         let fixture = changed_fixture()?;
@@ -513,10 +550,10 @@ fn remote_repository_handles_read_and_publish_without_client_files_or_executable
         )?;
         same_data(
             snapshot
-                .history_containing(HistoryMode::Lineage, 50, &working)
+                .history_containing(HistoryMode::Lineage, 50, std::slice::from_ref(&working))
                 .await?,
             local
-                .history_containing(HistoryMode::Lineage, 50, &working)
+                .history_containing(HistoryMode::Lineage, 50, std::slice::from_ref(&working))
                 .await?,
         )?;
         same_data(snapshot.exact_revision("@").await?, working.clone())?;
@@ -926,14 +963,14 @@ fn remote_conflict_resolution_preserves_exact_inputs_and_opaque_results() -> Res
                 .prepare_conflict_restoration(&conflict, &resolved_commit, &resolved_commit)
                 .await?;
             prepared.publish().await?;
+            let restored = repository
+                .snapshot(false)
+                .await?
+                .file_conflict("@", path)
+                .await?;
             assert_eq!(
-                repository
-                    .snapshot(false)
-                    .await?
-                    .file_conflict("@", path)
-                    .await?
-                    .inputs,
-                inputs
+                super::conflict_tests::stable_conflict_inputs(&restored.inputs),
+                super::conflict_tests::stable_conflict_inputs(&inputs)
             );
             assert_eq!(
                 before.file_conflict("@", path).await?.materialized,

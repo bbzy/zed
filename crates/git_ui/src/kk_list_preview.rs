@@ -39,7 +39,6 @@ impl MutationPreviews {
                 .history
                 .revisions
                 .iter()
-                .chain(repository.located.iter())
                 .chain(repository.comparison.iter().flat_map(|comparison| {
                     comparison.categories.iter().map(|entry| &entry.revision)
                 }))
@@ -104,7 +103,6 @@ impl MutationPreviews {
                 .history
                 .revisions
                 .iter()
-                .chain(repository.located.iter())
                 .chain(repository.comparison.iter().flat_map(|comparison| {
                     comparison.categories.iter().map(|entry| &entry.revision)
                 }))
@@ -294,7 +292,6 @@ impl MutationPreviews {
                         .history
                         .revisions
                         .iter()
-                        .chain(repository.located.iter())
                         .chain(repository.comparison.iter().flat_map(|comparison| {
                             comparison.categories.iter().map(|entry| &entry.revision)
                         }))
