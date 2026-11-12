@@ -711,9 +711,9 @@ impl Render for SoloDiffStyleToolbar {
             let show_status_icon =
                 GitPanelSettings::get_global(cx).status_style != StatusStyle::LabelColor;
             let controls = controls.downgrade();
-            let on_toggle = move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+            let on_toggle = move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
                 controls
-                    .update(cx, |controls, cx| controls.toggle_full_file(cx))
+                    .update(cx, |controls, cx| controls.toggle_full_file(window, cx))
                     .log_err();
             };
             let controls = if generic_style_controls {

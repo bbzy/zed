@@ -1,5 +1,8 @@
 use buffer_diff::BufferDiff;
-use editor::{DefaultDiffHunkRenderer, DiffHunkRenderer, Editor, EditorEvent, SplittableEditor};
+use editor::display_map::ToDisplayPoint as _;
+use editor::{
+    DefaultDiffHunkRenderer, DiffHunkRenderer, Editor, EditorEvent, RowExt as _, SplittableEditor,
+};
 use gpui::{
     App, AppContext as _, Context, Entity, Focusable as _, Render, ScrollHandle, Subscription,
     WeakEntity, Window,
@@ -74,13 +77,13 @@ impl KkDiffControls {
         editor: Entity<SplittableEditor>,
         showing_full_file: bool,
         workspace: WeakEntity<workspace::Workspace>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let controls = cx.weak_entity();
-        cx.defer({
+        cx.defer_in(window, {
             let workspace = workspace.clone();
-            let controls = controls.clone();
-            move |cx| {
+            move |controls, window, cx| {
                 let preference = workspace
                     .upgrade()
                     .and_then(|workspace| workspace.read(cx).panel::<super::kk_panel::KkPanel>(cx))
@@ -90,16 +93,13 @@ impl KkDiffControls {
                             panel.read(cx).diff_display.clone(),
                         )
                     });
-                if let Some((preference, display)) = preference
-                    && let Some(controls) = controls.upgrade()
-                {
-                    controls.update(cx, |controls: &mut Self, cx| {
-                        controls.bind_commit_information(preference, cx);
-                        controls.bind_diff_display(display, cx);
-                    });
+                if let Some((preference, display)) = preference {
+                    controls.bind_commit_information(preference, cx);
+                    controls.bind_diff_display(display, window, cx);
                 }
             }
         });
+        let window_handle = window.window_handle();
         let subscriptions = vec![
             cx.observe_new(move |panel: &mut super::kk_panel::KkPanel, _, cx| {
                 if !panel.is_for_workspace(&workspace) {
@@ -109,10 +109,14 @@ impl KkDiffControls {
                 let display = panel.diff_display.clone();
                 let controls = controls.clone();
                 cx.defer(move |cx| {
-                    controls
-                        .update(cx, |controls: &mut Self, cx| {
-                            controls.bind_commit_information(preference, cx);
-                            controls.bind_diff_display(display, cx);
+                    window_handle
+                        .update(cx, |_, window, cx| {
+                            controls
+                                .update(cx, |controls: &mut Self, cx| {
+                                    controls.bind_commit_information(preference, cx);
+                                    controls.bind_diff_display(display, window, cx);
+                                })
+                                .log_err();
                         })
                         .log_err();
                 });
@@ -332,6 +336,7 @@ impl KkDiffControls {
     fn bind_diff_display(
         &mut self,
         preference: Entity<super::kk_settings::DiffDisplayPreference>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.diff_display.as_ref() == Some(&preference) {
@@ -339,35 +344,94 @@ impl KkDiffControls {
         }
         let value = preference.read(cx).showing_full_file();
         if self.showing_full_file != value {
-            self.set_full_file(value, cx);
+            self.set_full_file(value, window, cx);
         }
-        self.diff_display_subscription = Some(cx.observe(&preference, |this, preference, cx| {
-            let value = preference.read(cx).showing_full_file();
-            if this.showing_full_file != value {
-                this.set_full_file(value, cx);
-            }
-            cx.notify();
-        }));
+        self.diff_display_subscription =
+            Some(
+                cx.observe_in(&preference, window, |this, preference, window, cx| {
+                    let value = preference.read(cx).showing_full_file();
+                    if this.showing_full_file != value {
+                        this.set_full_file(value, window, cx);
+                    }
+                    cx.notify();
+                }),
+            );
         self.diff_display = Some(preference);
     }
 
-    pub fn toggle_full_file(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_full_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let value = !self.showing_full_file;
         if let Some(preference) = self.diff_display.clone() {
             preference.update(cx, |preference, cx| preference.toggle(cx));
         }
-        self.set_full_file(value, cx);
+        self.set_full_file(value, window, cx);
     }
 
-    pub fn set_full_file(&mut self, showing_full_file: bool, cx: &mut Context<Self>) {
+    pub fn set_full_file(
+        &mut self,
+        showing_full_file: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let showing_full_file = self
             .diff_display
             .as_ref()
             .map_or(showing_full_file, |preference| {
                 preference.read(cx).showing_full_file()
             });
+        if self.showing_full_file == showing_full_file {
+            return;
+        }
+        let view_position = if showing_full_file {
+            let editors = {
+                let editor = self.editor.read(cx);
+                editor
+                    .lhs_editor()
+                    .into_iter()
+                    .chain([editor.rhs_editor()])
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            for editor in editors {
+                editor.update(cx, |editor, cx| editor.refresh_selection_anchors(cx));
+            }
+            let focused = self.editor.read(cx).focused_editor().clone();
+            let offset = focused.update(cx, |editor, cx| {
+                let snapshot = editor.snapshot(window, cx);
+                let cursor_row = editor
+                    .selections
+                    .newest_anchor()
+                    .head()
+                    .to_display_point(&snapshot.display_snapshot)
+                    .row()
+                    .as_f64();
+                let scroll_position = editor.scroll_position(cx);
+                gpui::point(scroll_position.x, scroll_position.y - cursor_row)
+            });
+            Some((focused, offset))
+        } else {
+            None
+        };
         self.showing_full_file = showing_full_file;
-        self.update_excerpts(true, cx);
+        // Expanding in place keeps selections and deleted-line anchors attached to their buffers.
+        self.update_excerpts(!showing_full_file, cx);
+        if let Some((focused, offset)) = view_position {
+            focused.update(cx, |editor, cx| {
+                let snapshot = editor.snapshot(window, cx);
+                let cursor_row = editor
+                    .selections
+                    .newest_anchor()
+                    .head()
+                    .to_display_point(&snapshot.display_snapshot)
+                    .row()
+                    .as_f64();
+                editor.set_scroll_position(
+                    gpui::point(offset.x, cursor_row + offset.y),
+                    window,
+                    cx,
+                );
+            });
+        }
         let right = self.editor.read(cx).rhs_editor().clone();
         right.update(cx, |editor, cx| {
             editor.set_allow_git_diff_scrollbar_markers(self.showing_full_file, cx);
@@ -852,6 +916,231 @@ impl DiffHunkRenderer for KkDiffHunkRenderer {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[gpui::test]
+    async fn kk_diff_full_file_expansion_preserves_cursor_and_viewport(cx: &mut TestAppContext) {
+        use editor::SelectionEffects;
+        use fs::FakeFs;
+        use gpui::VisualContext as _;
+        use language::{Capability, Selection};
+        use multi_buffer::MultiBuffer;
+        use project::Project;
+        use settings::SettingsStore;
+        use workspace::MultiWorkspace;
+
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.editor.minimum_split_diff_width = Some(0.0);
+                });
+            });
+        });
+        let project = Project::test(FakeFs::new(cx.executor()), [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |view, _| view.workspace().clone());
+        let original = (0..240)
+            .map(|row| format!("line {row}\n"))
+            .collect::<String>();
+        let modified = (0..240)
+            .map(|row| {
+                if row % 30 == 0 || row == 239 {
+                    format!("changed {row}\n")
+                } else {
+                    format!("line {row}\n")
+                }
+            })
+            .collect::<String>();
+        for file_count in [1, 2] {
+            for (style, left, deleted) in [
+                (settings::DiffViewStyle::Unified, false, false),
+                (settings::DiffViewStyle::Unified, false, true),
+                (settings::DiffViewStyle::Split, false, false),
+                (settings::DiffViewStyle::Split, true, false),
+            ] {
+                let buffers = (0..file_count)
+                    .map(|_| {
+                        let buffer = cx.new(|cx| Buffer::local(modified.clone(), cx));
+                        let diff = cx.new(|cx| {
+                            BufferDiff::new_with_base_text(
+                                &original,
+                                &buffer.read(cx).text_snapshot(),
+                                cx,
+                            )
+                        });
+                        (buffer, diff, true)
+                    })
+                    .collect::<Vec<_>>();
+                let (target, target_diff, _) = buffers.last().expect("last file").clone();
+                let editor = cx.new_window_entity(|window, cx| {
+                    let multibuffer = cx.new(|cx| {
+                        let mut buffer = MultiBuffer::new(Capability::ReadOnly);
+                        buffer.set_all_diff_hunks_expanded(cx);
+                        buffer
+                    });
+                    SplittableEditor::new(
+                        style,
+                        multibuffer,
+                        project.clone(),
+                        workspace.clone(),
+                        window,
+                        cx,
+                    )
+                });
+                let controls = cx.new_window_entity(|window, cx| {
+                    let mut controls = KkDiffControls::new(
+                        editor.clone(),
+                        false,
+                        workspace.downgrade(),
+                        window,
+                        cx,
+                    );
+                    let order = buffers
+                        .iter()
+                        .map(|(buffer, _, _)| buffer.read(cx).remote_id())
+                        .collect::<Vec<_>>();
+                    controls.set_order(order, cx);
+                    controls.set_buffers(buffers, cx);
+                    controls.update_excerpts(true, cx);
+                    controls
+                });
+                workspace.update_in(cx, |workspace, window, cx| {
+                    workspace.add_item_to_active_pane(
+                        Box::new(editor.clone()),
+                        None,
+                        true,
+                        window,
+                        cx,
+                    );
+                });
+                cx.run_until_parked();
+                for row in [0, 120, 239] {
+                    for (end_column, reversed) in [(1, false), (4, false), (4, true)] {
+                        controls.update_in(cx, |controls, window, cx| {
+                            controls.set_full_file(false, window, cx)
+                        });
+                        let focused = editor.update_in(cx, |editor, window, cx| {
+                            if style == settings::DiffViewStyle::Split {
+                                editor.split(window, cx);
+                            }
+                            if left {
+                                editor.lhs_editor().expect("left editor")
+                            } else {
+                                editor.rhs_editor()
+                            }
+                            .clone()
+                        });
+                        focused.update_in(cx, |editor, window, cx| {
+                            window.focus(&editor.focus_handle(cx), cx);
+                            let snapshot = editor.snapshot(window, cx);
+                            let source = snapshot.buffer_snapshot();
+                            let target_id = target.read(cx).remote_id();
+                            let source_id = if left {
+                                target_diff.read(cx).base_text(cx).remote_id()
+                            } else {
+                                target_id
+                            };
+                            let source_buffer =
+                                source.buffer_for_id(source_id).expect("selected file");
+                            let anchor_at = |column| {
+                                let anchor = source
+                                    .anchor_in_buffer(source_buffer.anchor_before(Point::new(
+                                        row,
+                                        if deleted { 0 } else { column },
+                                    )))
+                                    .expect("selection anchor");
+                                if deleted {
+                                    anchor.with_diff_base_anchor(
+                                        source
+                                            .diff_for_buffer_id(target_id)
+                                            .expect("diff")
+                                            .base_text()
+                                            .anchor_before(Point::new(row, column)),
+                                    )
+                                } else {
+                                    anchor
+                                }
+                            };
+                            let start = anchor_at(1);
+                            let end = anchor_at(end_column);
+                            editor.change_selections(
+                                SelectionEffects::no_scroll(),
+                                window,
+                                cx,
+                                |selections| {
+                                    selections.select(vec![Selection {
+                                        id: 1,
+                                        start,
+                                        end,
+                                        reversed,
+                                        goal: language::SelectionGoal::None,
+                                    }]);
+                                },
+                            );
+                            let cursor = editor.selections.newest_anchor().head();
+                            assert_eq!(cursor.diff_base_anchor().is_some(), deleted);
+                            let snapshot = editor.snapshot(window, cx);
+                            let cursor_row = cursor
+                                .to_display_point(&snapshot.display_snapshot)
+                                .row()
+                                .as_f64();
+                            editor.set_scroll_position(
+                                gpui::point(0., cursor_row - 5.25),
+                                window,
+                                cx,
+                            );
+                        });
+                        cx.run_until_parked();
+                        cx.update(|window, cx| window.draw(cx).clear(cx));
+                        let before = focused.update_in(cx, |editor, window, cx| {
+                            let snapshot = editor.snapshot(window, cx);
+                            let selections =
+                                editor.selections.all_anchors(&snapshot.display_snapshot);
+                            let cursor_row = editor
+                                .selections
+                                .newest_anchor()
+                                .head()
+                                .to_display_point(&snapshot.display_snapshot)
+                                .row()
+                                .as_f64();
+                            (selections, cursor_row - editor.scroll_position(cx).y)
+                        });
+                        controls.update_in(cx, |controls, window, cx| {
+                            controls.toggle_full_file(window, cx)
+                        });
+                        cx.run_until_parked();
+                        cx.update(|window, cx| window.draw(cx).clear(cx));
+                        focused.update_in(cx, |editor, window, cx| {
+                            let snapshot = editor.snapshot(window, cx);
+                            assert_eq!(editor.selections.all_anchors(&snapshot.display_snapshot), before.0, "{style:?}, left={left}, deleted={deleted}, files={file_count}, row={row}, reversed={reversed}");
+                            let cursor_row = editor.selections.newest_anchor().head().to_display_point(&snapshot.display_snapshot).row().as_f64();
+                            assert!((cursor_row - editor.scroll_position(cx).y - before.1).abs() < 0.01, "cursor moved on screen: {style:?}, left={left}, deleted={deleted}, files={file_count}, row={row}");
+                        });
+                        let expanded = controls
+                            .read_with(cx, |controls, cx| controls.capture_excerpt_layout(cx));
+                        assert_eq!(expanded.len(), file_count);
+                        assert!(
+                            expanded
+                                .iter()
+                                .all(|(_, ranges)| ranges == &[Point::zero()..Point::new(240, 0)])
+                        );
+                        controls.update_in(cx, |controls, window, cx| {
+                            controls.set_full_file(true, window, cx)
+                        });
+                        assert_eq!(
+                            controls
+                                .read_with(cx, |controls, cx| controls.capture_excerpt_layout(cx)),
+                            expanded
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[gpui::test]
     async fn kk_diff_review_uses_saved_contents_and_keeps_the_displayed_base(

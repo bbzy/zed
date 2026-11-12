@@ -514,8 +514,13 @@ impl KkMultiDiff {
         });
         let view = cx.weak_entity();
         let controls = cx.new(|cx| {
-            let mut controls =
-                KkDiffControls::new(editor.clone(), showing_full_file, workspace.downgrade(), cx);
+            let mut controls = KkDiffControls::new(
+                editor.clone(),
+                showing_full_file,
+                workspace.downgrade(),
+                window,
+                cx,
+            );
             controls.generic_style_controls = true;
             controls.aggregate = true;
             controls.comparison_view = Some(view);
@@ -1176,7 +1181,7 @@ impl Item for KkMultiDiff {
             );
             view.files = self.files.clone();
             view.controls.update(cx, |controls, cx| {
-                controls.set_full_file(full_file, cx);
+                controls.set_full_file(full_file, window, cx);
                 controls.restore_excerpt_layout(layout, cx);
             });
             view.editor.update(cx, |editor, cx| {
@@ -1424,7 +1429,7 @@ impl SerializableItem for KkMultiDiff {
                     entry.update(cx, |entry, cx| entry.refresh(view.snapshot.clone(), cx));
                 }
                 view.controls.update(cx, |controls, cx| {
-                    controls.set_full_file(saved.full_file, cx);
+                    controls.set_full_file(saved.full_file, window, cx);
                 });
                 view.editor.update(cx, |editor, cx| {
                     if (editor.diff_view_style() == settings::DiffViewStyle::Split) != saved.split {
@@ -1769,7 +1774,9 @@ pub(crate) mod tests {
                 view.entries.first().expect("review entry").clone(),
             )
         });
-        controls.update(cx, |controls, cx| controls.set_full_file(true, cx));
+        controls.update_in(cx, |controls, window, cx| {
+            controls.set_full_file(true, window, cx)
+        });
         editor.update_in(cx, |editor, window, cx| {
             if editor.diff_view_style() != settings::DiffViewStyle::Unified {
                 editor.toggle_split(&editor::ToggleSplitDiff, window, cx);
@@ -1814,7 +1821,9 @@ pub(crate) mod tests {
             entry.diff.read(cx).changed_row_counts() == (0, 0)
         })
         .await;
-        controls.update(cx, |controls, cx| controls.set_full_file(false, cx));
+        controls.update_in(cx, |controls, window, cx| {
+            controls.set_full_file(false, window, cx)
+        });
         cx.run_until_parked();
         editor.read_with(cx, |editor, cx| {
             let right = editor.rhs_editor().read(cx);
@@ -2546,10 +2555,10 @@ pub(crate) mod tests {
             })
             .await
             .expect("aggregate review");
-        view.update(cx, |view, cx| {
+        view.update_in(cx, |view, window, cx| {
             view.controls.update(cx, |controls, cx| {
                 if !controls.showing_full_file {
-                    controls.toggle_full_file(cx);
+                    controls.toggle_full_file(window, cx);
                 }
             })
         });
@@ -2597,9 +2606,9 @@ pub(crate) mod tests {
                 buffer("b.txt"),
             )
         });
-        controls.update(cx, |controls, cx| {
+        controls.update_in(cx, |controls, window, cx| {
             if !controls.showing_full_file {
-                controls.toggle_full_file(cx);
+                controls.toggle_full_file(window, cx);
             }
         });
         editor.update_in(cx, |editor, window, cx| {
@@ -2643,7 +2652,9 @@ pub(crate) mod tests {
                 .diff_review_text(cx)),
             expected
         );
-        controls.update(cx, |controls, cx| controls.toggle_full_file(cx));
+        controls.update_in(cx, |controls, window, cx| {
+            controls.toggle_full_file(window, cx)
+        });
         cx.run_until_parked();
         assert_eq!(
             editor.read_with(cx, |editor, cx| editor
@@ -2872,9 +2883,9 @@ pub(crate) mod tests {
             );
         });
         for _ in 0..2 {
-            view.update(cx, |view, cx| {
+            view.update_in(cx, |view, window, cx| {
                 view.controls
-                    .update(cx, |controls, cx| controls.toggle_full_file(cx))
+                    .update(cx, |controls, cx| controls.toggle_full_file(window, cx))
             });
         }
         std::fs::write(root.join("mixed.bin"), "now text\n").expect("replace binary");
@@ -3452,7 +3463,7 @@ pub(crate) mod tests {
         cx.run_until_parked();
         view.update_in(cx, |view, window, cx| {
             view.controls
-                .update(cx, |controls, cx| controls.toggle_full_file(cx));
+                .update(cx, |controls, cx| controls.toggle_full_file(window, cx));
             view.editor.update(cx, |editor, cx| {
                 let right = editor.rhs_editor().clone();
                 right.update(cx, |editor, cx| {

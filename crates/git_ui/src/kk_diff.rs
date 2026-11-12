@@ -1385,6 +1385,7 @@ impl KkDiff {
                 editor.clone(),
                 showing_full_file,
                 weak_workspace.clone(),
+                window,
                 cx,
             )
         });
@@ -2369,7 +2370,7 @@ impl Item for KkDiff {
                         view.snapshot = snapshot;
                         view.base_revision = base_revision;
                         view.controls.update(cx, |controls, cx| {
-                            controls.set_full_file(full_file, cx);
+                            controls.set_full_file(full_file, window, cx);
                             controls.restore_excerpt_layout(
                                 layout
                                     .into_iter()
@@ -3050,10 +3051,10 @@ mod tests {
                     );
                 });
                 for full_file in [true, false] {
-                    view.update(cx, |view, cx| {
+                    view.update_in(cx, |view, window, cx| {
                         view.controls.update(cx, |controls, cx| {
                             if controls.showing_full_file != full_file {
-                                controls.toggle_full_file(cx);
+                                controls.toggle_full_file(window, cx);
                             }
                         });
                     });
@@ -3215,13 +3216,13 @@ mod tests {
                     }
                 });
                 view.controls.update(cx, |controls, cx| {
-                    controls.set_full_file(true, cx);
+                    controls.set_full_file(true, window, cx);
                 });
                 view.editor.update(cx, |editor, cx| {
                     editor.toggle_split(&editor::ToggleSplitDiff, window, cx);
                 });
                 view.controls
-                    .update(cx, |controls, cx| controls.set_full_file(false, cx));
+                    .update(cx, |controls, cx| controls.set_full_file(false, window, cx));
                 assert!(!view.is_dirty(cx));
             });
         }
@@ -3742,7 +3743,7 @@ mod tests {
         let selected = view.update_in(cx, |view, window, cx| {
             view.controls.update(cx, |controls, cx| {
                 if controls.showing_full_file {
-                    controls.toggle_full_file(cx);
+                    controls.toggle_full_file(window, cx);
                 }
             });
             let right = view.editor.read(cx).rhs_editor().clone();
@@ -3851,9 +3852,9 @@ mod tests {
                 })
         });
         for expected in [true, false] {
-            view.update(cx, |view, cx| {
+            view.update_in(cx, |view, window, cx| {
                 view.controls
-                    .update(cx, |controls, cx| controls.toggle_full_file(cx));
+                    .update(cx, |controls, cx| controls.toggle_full_file(window, cx));
             });
             cx.run_until_parked();
             assert_eq!(
@@ -4308,7 +4309,9 @@ mod tests {
                 .expect("restored file"),
             original
         );
-        controls.update(cx, |controls, cx| controls.toggle_full_file(cx));
+        controls.update_in(cx, |controls, window, cx| {
+            controls.toggle_full_file(window, cx)
+        });
         editor.read_with(cx, |editor, cx| {
             assert!(
                 editor
@@ -4322,7 +4325,9 @@ mod tests {
                     >= 80
             )
         });
-        controls.update(cx, |controls, cx| controls.toggle_full_file(cx));
+        controls.update_in(cx, |controls, window, cx| {
+            controls.toggle_full_file(window, cx)
+        });
         assert!(!controls.read_with(cx, |controls, _| controls.showing_full_file));
         editor.read_with(cx, |editor, cx| {
             assert_eq!(
@@ -5652,9 +5657,9 @@ mod tests {
             workspace.update_in(cx, |workspace, window, cx| {
                 workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
             });
-            view.update(cx, |view, cx| {
+            view.update_in(cx, |view, window, cx| {
                 view.controls
-                    .update(cx, |controls, cx| controls.set_full_file(true, cx));
+                    .update(cx, |controls, cx| controls.set_full_file(true, window, cx));
             });
             cx.run_until_parked();
             let editor = view.read_with(cx, |view, cx| view.editor.read(cx).rhs_editor().clone());
