@@ -1486,6 +1486,15 @@ impl KkDiff {
         }
     }
 
+    pub(super) fn refresh_for_focus(
+        &mut self,
+        snapshot: Snapshot,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        self.refresh(snapshot, cx);
+        std::mem::replace(&mut self.refresh_task, Task::ready(()))
+    }
+
     pub(super) fn refresh(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
         if self
             .classification
@@ -1495,6 +1504,7 @@ impl KkDiff {
             || self.snapshot.as_ref().is_some_and(|previous| {
                 previous.operation() == snapshot.operation()
                     && previous.repository().check_lifetime().is_ok()
+                    && self.error.is_none()
             })
         {
             return;
@@ -2763,6 +2773,7 @@ pub(super) fn init_extension_suggestions_test(cx: &mut App) -> Arc<workspace::Ap
 mod tests {
     use super::*;
     use crate::kk_panel::remote_tests::run_kk;
+
     use editor::{
         ToPoint as _, display_map::DisplayRow, test::editor_lsp_test_context::EditorLspTestContext,
     };
@@ -5176,9 +5187,13 @@ mod tests {
             .scoped(&namespace)
             .write(item_id.to_string(), saved)
             .await?;
-        cx.update(|_, cx| cx.update_global::<SettingsStore, _>(|settings, cx| {
-            settings.set_user_settings(r#"{"kk_workbench":{"auto_refresh":false},"session":{"restore_unsaved_buffers":false}}"#, cx).expect("saved only settings");
-        }));
+        cx.update(|_, cx| {
+            cx.update_global::<SettingsStore, _>(|settings, cx| {
+                settings
+                    .set_user_settings(r#"{"session":{"restore_unsaved_buffers":false}}"#, cx)
+                    .expect("saved only settings");
+            })
+        });
         view.update_in(cx, |view, window, cx| {
             view.reload(project.clone(), window, cx)
         })
@@ -5435,6 +5450,16 @@ mod tests {
             );
         });
         assert!(view.read_with(cx, |view, _| view.error.is_none()));
+        view.update(cx, |view, cx| {
+            view.error = Some("Temporary diff read failure".into());
+            view.refresh_for_focus(latest.clone(), cx)
+        })
+        .await;
+        assert!(view.read_with(cx, |view, _| view.error.is_none()));
+        assert_eq!(
+            buffer.read_with(cx, |buffer, _| buffer.text()),
+            "new draft\nsaved\n"
+        );
         let lifetime = kk_workbench::RepositoryLifetime::default();
         let closed = initial.with_lifetime(Some(lifetime.clone()));
         let stale_refresh = view.update(cx, |view, cx| {

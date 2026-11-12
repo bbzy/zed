@@ -50,7 +50,7 @@ impl RemoteFixture {
             release_channel::init("0.0.0".parse().expect("test version"), cx);
             let mut settings = SettingsStore::test(cx);
             settings
-                .set_user_settings(r#"{"kk_workbench":{"auto_refresh":false}}"#, cx)
+                .set_user_settings(r#"{}"#, cx)
                 .expect("test settings");
             cx.set_global(settings);
             theme_settings::init(theme::LoadThemes::JustBase, cx);

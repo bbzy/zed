@@ -1775,9 +1775,7 @@ mod tests {
         let second_root = second.snapshot.repository().root().to_owned();
         cx.update(|cx| {
             let mut settings = SettingsStore::test(cx);
-            settings
-                .set_user_settings(r#"{"kk_workbench":{"auto_refresh":false}}"#, cx)
-                .expect("settings");
+            settings.set_user_settings(r#"{}"#, cx).expect("settings");
             cx.set_global(settings);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             init(cx);
@@ -3157,9 +3155,7 @@ mod tests {
         );
         cx.update(|cx| {
             let mut settings = SettingsStore::test(cx);
-            settings
-                .set_user_settings(r#"{"kk_workbench":{"auto_refresh":false}}"#, cx)
-                .expect("settings");
+            settings.set_user_settings(r#"{}"#, cx).expect("settings");
             cx.set_global(settings);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             editor::init(cx);
@@ -3578,9 +3574,7 @@ mod tests {
         let root = repository.snapshot.repository().root().to_owned();
         cx.update(|cx| {
             let mut settings = SettingsStore::test(cx);
-            settings
-                .set_user_settings(r#"{"kk_workbench":{"auto_refresh":false}}"#, cx)
-                .expect("settings");
+            settings.set_user_settings(r#"{}"#, cx).expect("settings");
             cx.set_global(settings);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             init(cx);

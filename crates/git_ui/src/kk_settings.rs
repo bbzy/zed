@@ -224,7 +224,6 @@ impl DiffDisplayPreference {
 pub struct KkWorkbenchSettings {
     pub dock: workspace::dock::DockPosition,
     pub executable_path: PathBuf,
-    pub auto_refresh: bool,
     pub blame: BlameSettings,
     pub debug: Vec<String>,
 }
@@ -249,7 +248,6 @@ impl Settings for KkWorkbenchSettings {
                 .executable_path
                 .unwrap_or_else(|| "kk".into())
                 .into(),
-            auto_refresh: content.auto_refresh.unwrap_or(true),
             blame: BlameSettings {
                 column_width: blame.column_width.unwrap_or(42).clamp(24, 80),
                 compact: blame.compact.unwrap_or(false),

@@ -744,8 +744,6 @@ pub struct KkWorkbenchSettingsContent {
     pub dock: Option<DockPosition>,
     /// Path to the KK executable.
     pub executable_path: Option<String>,
-    /// Refresh history and comparisons after saving a file or returning to Zed.
-    pub auto_refresh: Option<bool>,
     pub blame: Option<KkBlameSettingsContent>,
     /// Diagnostic categories: `copydiff` and `perf`.
     pub debug: Option<Vec<String>>,

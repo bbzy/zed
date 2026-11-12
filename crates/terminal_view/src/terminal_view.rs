@@ -1438,7 +1438,15 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn focus_out(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn focus_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.is_window_active() && window.focused(cx).is_some() {
+            let workspace = self.workspace.clone();
+            cx.defer(move |cx| {
+                workspace
+                    .update(cx, |_, cx| cx.emit(workspace::Event::TerminalFocusLost))
+                    .log_err();
+            });
+        }
         self.blink_manager.update(cx, BlinkManager::disable);
         self.terminal.update(cx, |terminal, _| {
             if !self.read_only {
@@ -3197,6 +3205,72 @@ mod tests {
             .unwrap();
 
         (project, workspace, window_handle)
+    }
+
+    #[gpui::test]
+    async fn terminal_focus_loss_notifies_workspace(cx: &mut TestAppContext) {
+        let (project, workspace, window) = init_test_with_window(cx).await;
+        let notifications = cx.new(|cx| {
+            cx.subscribe(&workspace, |count, _, event, cx| {
+                if matches!(event, workspace::Event::TerminalFocusLost) {
+                    *count += 1;
+                    cx.notify();
+                }
+            })
+            .detach();
+            0_usize
+        });
+        let (_, _, terminal) = add_display_only_terminal(&project, window, false, false, cx);
+        let other = cx
+            .update_window(window.into(), |_, window, cx| {
+                let editor = cx.new(|cx| editor::Editor::multi_line(window, cx));
+                workspace.update(cx, |workspace, cx| {
+                    workspace.add_item(
+                        workspace.active_pane().clone(),
+                        Box::new(editor.clone()),
+                        None,
+                        true,
+                        false,
+                        window,
+                        cx,
+                    );
+                    workspace.activate_item(&terminal, true, true, window, cx);
+                });
+                window.activate_window();
+                editor
+            })
+            .expect("activate simulated window");
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .expect("draw simulated window");
+        cx.run_until_parked();
+        assert_eq!(notifications.read_with(cx, |count, _| *count), 0);
+        cx.update_window(window.into(), |_, window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.activate_item(&other, true, true, window, cx)
+            });
+            window.draw(cx).clear(cx);
+        })
+        .expect("leave terminal");
+        cx.run_until_parked();
+        assert_eq!(notifications.read_with(cx, |count, _| *count), 1);
+        cx.update_window(window.into(), |_, window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.activate_item(&other, true, true, window, cx)
+            });
+            window.draw(cx).clear(cx);
+        })
+        .expect("same focus");
+        cx.run_until_parked();
+        assert_eq!(notifications.read_with(cx, |count, _| *count), 1);
+        cx.update_window(window.into(), |_, window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.activate_item(&terminal, true, true, window, cx)
+            });
+            window.draw(cx).clear(cx);
+        })
+        .expect("return to terminal");
+        cx.run_until_parked();
+        assert_eq!(notifications.read_with(cx, |count, _| *count), 1);
     }
 
     async fn init_remote_test(

@@ -49,9 +49,12 @@ use tree::{TreeRowId, TreeSelectionState};
 mod list_preview;
 #[path = "kk_refresh.rs"]
 mod refresh;
+#[path = "kk_refresh_demand.rs"]
+mod refresh_demand;
 use futures::StreamExt as _;
 use list_preview::{ListPreviews, MutationPreviews};
 use refresh::{RefreshEvent, RefreshRequest, RepositoryRefresh};
+use refresh_demand::RefreshDemand;
 
 #[cfg(test)]
 #[path = "kk_remote_tests.rs"]
@@ -261,6 +264,7 @@ pub struct KkPanel {
     updating_stale: HashSet<PathBuf>,
     loading: bool,
     refresh_queued: bool,
+    refresh_demand: RefreshDemand,
     error: Option<String>,
     refresh_task: Task<()>,
     refresh_sequence: u64,
@@ -485,6 +489,7 @@ impl KkPanel {
                         updating_stale: HashSet::new(),
                         loading: false,
                         refresh_queued: false,
+                        refresh_demand: RefreshDemand::new(window.window_handle()),
                         error: None,
                         refresh_task: Task::ready(()),
                         refresh_sequence: 0,
@@ -553,7 +558,7 @@ impl KkPanel {
                     let next = remote.read(cx).connection().is_some();
                     if next && !connected {
                         this.model_generation += 1;
-                        this.refresh(cx);
+                        this.invalidate_refresh(cx);
                     }
 
                     connected = next;
@@ -580,16 +585,13 @@ impl KkPanel {
                 ) {
                     this.model_generation += 1;
                     this.invalidate_closed_repositories(cx);
-                    this.refresh(cx);
+                    this.invalidate_refresh(cx);
                 }
             }));
         self._subscriptions
             .push(cx.observe_window_activation(window, |this, window, cx| {
-                if window.is_window_active()
-                    && !this.repositories.is_empty()
-                    && KkWorkbenchSettings::get_global(cx).auto_refresh
-                {
-                    this.refresh(cx);
+                if window.is_window_active() {
+                    this.invalidate_refresh(cx);
                 }
             }));
         let mut executable = KkWorkbenchSettings::get_global(cx).executable_path.clone();
@@ -602,9 +604,25 @@ impl KkPanel {
                 if executable != next {
                     executable = next;
                     this.model_generation += 1;
-                    this.refresh(cx);
+                    this.invalidate_refresh(cx);
                 }
             }));
+        self._subscriptions
+            .push(cx.on_focus_in(&self.focus.clone(), window, |this, _, cx| {
+                this.schedule_focused_refresh(cx)
+            }));
+        if let Some(workspace) = self.workspace.upgrade() {
+            self._subscriptions
+                .push(cx.subscribe(&workspace, |this, _, event, cx| match event {
+                    workspace::Event::TerminalFocusLost => this.invalidate_refresh(cx),
+                    workspace::Event::ItemAdded { .. }
+                    | workspace::Event::ActiveItemChanged
+                    | workspace::Event::PaneAdded(_)
+                    | workspace::Event::PaneRemoved => this.schedule_focused_refresh(cx),
+                    _ => {}
+                }));
+        }
+        self.schedule_focused_refresh(cx);
     }
 
     fn subscribe_buffer(&mut self, buffer: Entity<language::Buffer>, cx: &mut Context<Self>) {
@@ -614,8 +632,7 @@ impl KkPanel {
                 if let Some(file) = buffer.read(cx).file().cloned()
                     && let Some(path) = file.file_system_abs_path(cx) {
                     let canonical = canonical_local_path(file.as_ref(), &path);
-                    for repository in &this.repositories {
-                        let root = repository.snapshot.repository().root();
+                    for root in this.repository_lifetimes.keys() {
                         if let Ok(relative) = canonical.as_deref().unwrap_or(path.as_path()).strip_prefix(root)
                             && let Some(relative) = relative.to_str() {
                             if let Some(queue) = this.write_queues.get_mut(root) {
@@ -631,11 +648,8 @@ impl KkPanel {
                 }
             }
 
-            if matches!(event, language::BufferEvent::Saved)
-                && !this.repositories.is_empty()
-                && KkWorkbenchSettings::get_global(cx).auto_refresh
-            {
-                this.refresh(cx);
+            if matches!(event, language::BufferEvent::Saved) {
+                this.invalidate_refresh(cx);
             }
         });
         let release = cx.observe_release(&buffer, move |this, _, _| {
@@ -776,6 +790,15 @@ impl KkPanel {
     }
 
     fn start_refresh(&mut self, cx: &mut Context<Self>) {
+        self.refresh_demand.invalidate();
+        self.start_refresh_with_scope(true, cx);
+    }
+
+    fn start_refresh_with_scope(&mut self, refresh_open_diffs: bool, cx: &mut Context<Self>) {
+        let refresh_version = self.refresh_demand.version;
+        self.refresh_demand.requested = false;
+        self.refresh_demand.running_version = refresh_version;
+        self.refresh_demand.refresh_open_diffs = refresh_open_diffs;
         let Some(workspace) = self.workspace.upgrade() else {
             self.loading = false;
             self.pending_history_mode = None;
@@ -852,7 +875,13 @@ impl KkPanel {
                             return false;
                         }
                         if this.model_generation != generation {
-                            this.refresh(cx);
+                            if refresh_open_diffs {
+                                this.refresh(cx);
+                            } else {
+                                this.loading = false;
+                                this.refreshing_repositories.clear();
+                                this.schedule_focused_refresh(cx);
+                            }
                             return false;
                         }
 
@@ -930,7 +959,13 @@ impl KkPanel {
                     return;
                 }
                 if this.model_generation != generation {
-                    this.refresh(cx);
+                    if refresh_open_diffs {
+                        this.refresh(cx);
+                    } else {
+                        this.loading = false;
+                        this.refreshing_repositories.clear();
+                        this.schedule_focused_refresh(cx);
+                    }
                     return;
                 }
 
@@ -975,6 +1010,15 @@ impl KkPanel {
                     .chain(this.discovery_errors.values())
                     .map(Vec::len)
                     .sum::<usize>();
+                if errors == 0 {
+                    this.refresh_demand.list_version = refresh_version;
+                }
+                if errors == 0
+                    || this.refresh_demand.version != refresh_version
+                    || this.refresh_demand.requested
+                {
+                    this.schedule_focused_refresh(cx);
+                }
                 performance.finish(
                     if errors == 0 { "completed" } else { "error" },
                     serde_json::json!({"repositories": this.repositories.len(), "errors": errors}),
@@ -1183,7 +1227,17 @@ impl KkPanel {
                 self.refresh_repository_emptiness(Some(view.snapshot.repository().root()), cx);
             }
         }
-        if let Some(workspace) = self.workspace.upgrade() {
+        for view in &views {
+            if !view.stale {
+                self.refresh_demand.snapshots.insert(
+                    view.snapshot.repository().root().to_owned(),
+                    (self.refresh_demand.running_version, view.snapshot.clone()),
+                );
+            }
+        }
+        if self.refresh_demand.refresh_open_diffs
+            && let Some(workspace) = self.workspace.upgrade()
+        {
             let diffs = workspace
                 .read(cx)
                 .items_of_type::<KkDiff>(cx)
@@ -2645,6 +2699,7 @@ impl KkPanel {
             .cloned()
             .collect::<Vec<_>>();
         for root in closed {
+            self.refresh_demand.snapshots.remove(&root);
             self.tree_cache.remove(&root);
             self.refreshing_repositories.remove(&root);
             self.refresh_errors.remove(&root);
@@ -3178,8 +3233,8 @@ impl Panel for KkPanel {
         4
     }
     fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
-        if active && self.repositories.is_empty() && !self.loading {
-            self.refresh(cx);
+        if active {
+            self.schedule_focused_refresh(cx);
         }
     }
 }
@@ -3501,9 +3556,7 @@ mod tests {
         let root = std::fs::canonicalize(directory.path()).expect("canonical root");
         cx.update(|cx| {
             let mut settings = SettingsStore::test(cx);
-            settings
-                .set_user_settings(r#"{"kk_workbench":{"auto_refresh":false}}"#, cx)
-                .expect("settings");
+            settings.set_user_settings(r#"{}"#, cx).expect("settings");
             cx.set_global(settings);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             init(cx);
@@ -3669,9 +3722,7 @@ mod tests {
             .collect::<Vec<_>>();
         cx.update(|cx| {
             let mut settings = SettingsStore::test(cx);
-            settings
-                .set_user_settings(r#"{"kk_workbench":{"auto_refresh":false}}"#, cx)
-                .expect("settings");
+            settings.set_user_settings(r#"{}"#, cx).expect("settings");
             cx.set_global(settings);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             init(cx);

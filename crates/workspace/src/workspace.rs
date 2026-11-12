@@ -1493,6 +1493,7 @@ impl DelayedDebouncedEditAction {
 }
 
 pub enum Event {
+    TerminalFocusLost,
     PaneAdded(Entity<Pane>),
     PaneRemoved,
     ItemAdded {

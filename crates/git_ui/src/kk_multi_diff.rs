@@ -749,6 +749,23 @@ impl KkMultiDiff {
         }
     }
 
+    pub(super) fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
+    }
+
+    pub(super) fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    pub(super) fn refresh_for_focus(
+        &mut self,
+        snapshot: Snapshot,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        self.refresh(&snapshot, cx);
+        std::mem::replace(&mut self.refresh_task, Task::ready(()))
+    }
+
     pub fn refresh(&mut self, snapshot: &Snapshot, cx: &mut Context<Self>) {
         self.refresh_with_target(snapshot, None, cx);
     }
@@ -1621,6 +1638,87 @@ pub(crate) mod tests {
         })
         .await
         .expect("prepare nested repository")
+    }
+
+    #[gpui::test]
+    async fn diff_extension_suggestions_cover_kk_multi_diff_loading(cx: &mut TestAppContext) {
+        let directory = local_fixture(cx).await;
+        let app_state = cx.update(super::super::kk_diff::init_extension_suggestions_test);
+        let root = directory.path().join("repo");
+        std::fs::write(root.join("main.gleam"), "pub fn main() {}\n").unwrap();
+        std::fs::write(root.join("other.lua"), "print('hello')\n").unwrap();
+        let repository = kk_workbench::Repository::open(&root, Path::new("kk"))
+            .await
+            .unwrap();
+        let snapshot = repository.snapshot(true).await.unwrap();
+        let target = DiffTarget::change(&snapshot.exact_revision("@").await.unwrap());
+        let files = snapshot
+            .changed_files(&target.scope)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|file| file.path == "main.gleam" || file.path == "other.lua")
+            .collect::<Vec<_>>();
+        assert_eq!(files.len(), 2);
+        let fs = app_state.fs.as_fake();
+        fs.insert_tree(
+            &root,
+            json!({"main.gleam": "pub fn main() {}\n", "other.lua": "print('hello')\n"}),
+        )
+        .await;
+        let project = Project::test(fs, [root.as_path()], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(None, project, app_state, window, cx));
+        let view = cx
+            .update(|window, cx| {
+                KkMultiDiff::open(
+                    snapshot,
+                    target,
+                    files,
+                    true,
+                    workspace.downgrade(),
+                    DiffOpenMode::Open,
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        cx.condition(&view, |view, _| !view.loading).await;
+        cx.run_until_parked();
+        assert_eq!(
+            workspace
+                .read_with(cx, |workspace, _| workspace.notification_ids())
+                .len(),
+            1
+        );
+        let split = view.read_with(cx, |view, _| view.editor.clone());
+        split.update_in(cx, |split, window, cx| {
+            split.rhs_editor().update(cx, |editor, cx| {
+                let snapshot = editor.buffer().read(cx).snapshot(cx);
+                let excerpt = snapshot
+                    .excerpts()
+                    .find(|range| {
+                        snapshot
+                            .buffer_for_id(range.context.start.buffer_id)
+                            .unwrap()
+                            .file()
+                            .is_some_and(|file| file.path().as_unix_str() == "other.lua")
+                    })
+                    .unwrap();
+                let anchor = snapshot.anchor_in_excerpt(excerpt.context.start).unwrap();
+                editor.change_selections(Default::default(), window, cx, |selections| {
+                    selections.select_ranges([anchor..anchor]);
+                });
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            workspace
+                .read_with(cx, |workspace, _| workspace.notification_ids())
+                .len(),
+            2
+        );
     }
 
     #[gpui::test(iterations = 3)]

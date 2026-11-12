@@ -2898,7 +2898,9 @@ mod tests {
 
         cx.update(|_, cx| {
             cx.update_global::<SettingsStore, _>(|settings, cx| {
-                settings.set_user_settings(r#"{"kk_workbench":{"auto_refresh":false},"session":{"restore_unsaved_buffers":false}}"#, cx).expect("saved-only session settings");
+                settings
+                    .set_user_settings(r#"{"session":{"restore_unsaved_buffers":false}}"#, cx)
+                    .expect("saved-only session settings");
             });
         });
         view.update(cx, |view, cx| {
