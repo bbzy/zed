@@ -659,11 +659,15 @@ impl KkDiffControls {
             .gap_1p5()
             .flex_wrap()
             .child(
-                ui::Button::new("ignore-trim-whitespace", "Ignore Trim Whitespace")
-                    .toggle_state(ignore_trim_whitespace)
-                    .tooltip(Tooltip::text(
-                        "Ignore changes in leading and trailing spaces and tabs",
-                    ))
+                IconButton::new("ignore-trim-whitespace", IconName::Space)
+                    .aria_label("Toggle Trim Whitespace Changes")
+                    .icon_size(IconSize::Small)
+                    .toggle_state(!ignore_trim_whitespace)
+                    .tooltip(Tooltip::text(if ignore_trim_whitespace {
+                        "Show Trim Whitespace Changes"
+                    } else {
+                        "Ignore Trim Whitespace"
+                    }))
                     .on_click({
                         let controls = controls.clone();
                         move |_, _, cx| {
