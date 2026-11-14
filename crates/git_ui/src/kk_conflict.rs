@@ -1467,6 +1467,30 @@ impl Item for KkConflict {
     fn to_item_events(event: &EditorEvent, callback: &mut dyn FnMut(ItemEvent)) {
         Editor::to_item_events(event, callback);
     }
+    fn set_nav_history(
+        &mut self,
+        history: workspace::ItemNavHistory,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editor
+            .update(cx, |editor, _| editor.set_nav_history(Some(history)));
+    }
+    fn deactivated(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor
+            .update(cx, |editor, cx| editor.deactivated(window, cx));
+    }
+    fn navigate(
+        &mut self,
+        data: Arc<dyn std::any::Any + Send>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.editor.update(cx, |editor, cx| {
+            window.focus(&editor.focus_handle(cx), cx);
+            editor.navigate(data, window, cx)
+        })
+    }
     fn telemetry_event_text(&self) -> Option<&'static str> {
         Some("KK Conflict Opened")
     }
@@ -3030,6 +3054,150 @@ mod tests {
         assert!(store.scoped(&namespace).keys()?.is_empty());
         assert!(store.read_kvp(&draft_key)?.is_some());
         Ok(())
+    }
+
+    #[gpui::test(iterations = 3)]
+    async fn kk_conflict_comparison_preserves_navigation_history(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/repository", serde_json::json!({})).await;
+        let project = Project::test(fs, [Path::new("/repository")], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |workspace, _| workspace.workspace().clone());
+        let context = "context line\n".repeat(100);
+
+        for path in ["first.txt", "second.txt"] {
+            let draft = ConflictDraft::open(FileConflict {
+                repository_root: "/repository".into(),
+                path: path.into(),
+                change_id: "change".into(),
+                commit_id: "commit".into(),
+                immutable: true,
+                inputs: [
+                    (ConflictRole::Base, 0, "base\n"),
+                    (ConflictRole::Side, 0, "left\n"),
+                    (ConflictRole::Side, 1, "right\n"),
+                ]
+                .into_iter()
+                .map(|(role, index, text)| ConflictInput {
+                    role,
+                    index,
+                    id: Some(format!("{role:?}-{index}")),
+                    executable: false,
+                    bytes: format!("{context}{text}").into_bytes(),
+                    source: None,
+                })
+                .collect(),
+                materialized: format!(
+                    "{context}<<<<<<< conflict 1\n+++++++ left\nleft\n------- base\nbase\n+++++++ right\nright\n>>>>>>> conflict 1\n"
+                )
+                .into_bytes(),
+                marker_length: 7,
+                binary: false,
+            })
+            .expect("conflict draft");
+            let buffer = cx.new(|cx| Buffer::local(draft.editor_text(), cx));
+            let view = cx.new_window_entity(|window, cx| {
+                KkConflict::new(
+                    None,
+                    draft,
+                    format!("navigation-{path}"),
+                    buffer.clone(),
+                    project.clone(),
+                    workspace.downgrade(),
+                    None,
+                    window,
+                    cx,
+                )
+            });
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
+            });
+            buffer.update(cx, |buffer, cx| {
+                buffer.edit([(0..0, "unsaved\n")], None, cx)
+            });
+            cx.run_until_parked();
+            let editor = view.read_with(cx, |view, _| view.editor.clone());
+            editor.update_in(cx, |editor, window, cx| {
+                editor.change_selections(
+                    editor::SelectionEffects::no_scroll().nav_history(false),
+                    window,
+                    cx,
+                    |selections| selections.select_ranges([Point::new(30, 2)..Point::new(30, 2)]),
+                );
+                editor.set_scroll_position(gpui::point(0., 20.), window, cx);
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let scroll = editor.update(cx, |editor, cx| editor.scroll_position(cx));
+            assert!(scroll.y > 0., "conflict must be scrolled before comparison");
+            let text = buffer.read_with(cx, |buffer, _| buffer.text());
+            view.update_in(cx, |view, window, cx| {
+                view.compare_input(ConflictRole::Side, 1, window, cx);
+            });
+            cx.run_until_parked();
+            let comparison = workspace.read_with(cx, |workspace, cx| {
+                workspace
+                    .active_item_as::<super::super::kk_diff::KkDiff>(cx)
+                    .expect("active comparison")
+            });
+
+            for _ in 0..2 {
+                editor.update_in(cx, |editor, window, cx| {
+                    editor.change_selections(
+                        editor::SelectionEffects::no_scroll().nav_history(false),
+                        window,
+                        cx,
+                        |selections| selections.select_ranges([Point::new(0, 0)..Point::new(0, 0)]),
+                    );
+                    editor.set_scroll_position(gpui::point(0., 0.), window, cx);
+                });
+                workspace
+                    .update_in(cx, |workspace, window, cx| {
+                        workspace.go_back(workspace.active_pane().downgrade(), window, cx)
+                    })
+                    .await
+                    .expect("back to conflict");
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                workspace.read_with(cx, |workspace, cx| {
+                    assert_eq!(
+                        workspace.active_item_as::<KkConflict>(cx),
+                        Some(view.clone())
+                    );
+                });
+                editor.update_in(cx, |editor, window, cx| {
+                    assert!(editor.focus_handle(cx).is_focused(window));
+                    let snapshot = editor.snapshot(window, cx);
+                    assert_eq!(
+                        editor
+                            .selections
+                            .newest::<Point>(&snapshot.display_snapshot)
+                            .head(),
+                        Point::new(30, 2)
+                    );
+                    assert_eq!(editor.scroll_position(cx), scroll);
+                });
+                assert_eq!(buffer.read_with(cx, |buffer, _| buffer.text()), text);
+                view.read_with(cx, |view, cx| assert!(view.is_dirty(cx)));
+                workspace
+                    .update_in(cx, |workspace, window, cx| {
+                        workspace.go_forward(workspace.active_pane().downgrade(), window, cx)
+                    })
+                    .await
+                    .expect("forward to comparison");
+                workspace.read_with(cx, |workspace, cx| {
+                    assert_eq!(
+                        workspace.active_item_as::<super::super::kk_diff::KkDiff>(cx),
+                        Some(comparison.clone())
+                    );
+                });
+            }
+        }
     }
 
     #[gpui::test(iterations = 3)]
