@@ -27,7 +27,7 @@ use project::{
 use serde::{Deserialize, Serialize};
 use settings::Settings;
 use std::{any::TypeId, cell::RefCell, collections::HashSet, rc::Rc, sync::Arc};
-use ui::{Button, ListItem, prelude::*};
+use ui::{Button, ListItem, TintColor, prelude::*};
 use util::ResultExt as _;
 use workspace::{
     Item, ItemId, ModalView, SerializableItem, Workspace, WorkspaceId,
@@ -1010,6 +1010,9 @@ impl KkConflict {
                             .child(Label::new(title.clone()).size(LabelSize::Small))
                             .child(
                                 Button::new(("accept-conflict", offset), label)
+                                    .style(ButtonStyle::Tinted(TintColor::Accent))
+                                    .size(ButtonSize::Compact)
+                                    .label_size(LabelSize::Small)
                                     .disabled(disabled)
                                     .tooltip(super::commit_metadata::tooltip_with_prefix(metadata.clone().unwrap_or_else(|| vec![(String::new(), detail.clone(), Color::Muted)]), change_id_prefix.clone()))
                                     .on_click(move |_, window, cx| {
@@ -1026,7 +1029,11 @@ impl KkConflict {
                                     }),
                             )
                             .when(matches!(choice, ConflictChoice::Input(role, index) if role != ConflictRole::Base || index != 0), |row| {
-                                row.child(Button::new(("compare-input", offset), "Compare").on_click(move |_, window, cx| {
+                                row.child(Button::new(("compare-input", offset), "Compare")
+                                    .style(ButtonStyle::Outlined)
+                                    .size(ButtonSize::Compact)
+                                    .label_size(LabelSize::Small)
+                                    .on_click(move |_, window, cx| {
                                     if let ConflictChoice::Input(role, index) = choice {
                                         compare.update(cx, |view, cx| view.compare_input(role, index, window, cx)).log_err();
                                     }
