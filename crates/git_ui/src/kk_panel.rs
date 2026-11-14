@@ -600,22 +600,14 @@ impl KkPanel {
                     this.invalidate_refresh(cx);
                 }
             }));
-        self._subscriptions
-            .push(cx.on_focus_in(&self.focus.clone(), window, |this, _, cx| {
-                this.schedule_focused_refresh(cx)
-            }));
         if let Some(workspace) = self.workspace.upgrade() {
             self._subscriptions
                 .push(cx.subscribe(&workspace, |this, _, event, cx| match event {
                     workspace::Event::TerminalFocusLost => this.invalidate_refresh(cx),
-                    workspace::Event::ItemAdded { .. }
-                    | workspace::Event::ActiveItemChanged
-                    | workspace::Event::PaneAdded(_)
-                    | workspace::Event::PaneRemoved => this.schedule_focused_refresh(cx),
                     _ => {}
                 }));
         }
-        self.schedule_focused_refresh(cx);
+        self.schedule_open_views_refresh(cx);
     }
 
     fn subscribe_buffer(&mut self, buffer: Entity<language::Buffer>, cx: &mut Context<Self>) {
@@ -785,14 +777,11 @@ impl KkPanel {
 
     fn start_refresh(&mut self, cx: &mut Context<Self>) {
         self.refresh_demand.invalidate();
-        self.start_refresh_with_scope(true, cx);
+        self.start_pending_refresh(cx);
     }
 
-    fn start_refresh_with_scope(&mut self, refresh_open_diffs: bool, cx: &mut Context<Self>) {
+    fn start_pending_refresh(&mut self, cx: &mut Context<Self>) {
         let refresh_version = self.refresh_demand.version;
-        self.refresh_demand.requested = false;
-        self.refresh_demand.running_version = refresh_version;
-        self.refresh_demand.refresh_open_diffs = refresh_open_diffs;
         let Some(workspace) = self.workspace.upgrade() else {
             self.loading = false;
             self.pending_history_mode = None;
@@ -869,13 +858,7 @@ impl KkPanel {
                             return false;
                         }
                         if this.model_generation != generation {
-                            if refresh_open_diffs {
-                                this.refresh(cx);
-                            } else {
-                                this.loading = false;
-                                this.refreshing_repositories.clear();
-                                this.schedule_focused_refresh(cx);
-                            }
+                            this.refresh(cx);
                             return false;
                         }
 
@@ -928,7 +911,7 @@ impl KkPanel {
                                     *completion,
                                     &confirmed_list_previews,
                                     &confirmed_mutations,
-                                    refresh_open_diffs,
+                                    true,
                                     cx,
                                 );
                                 if errors.is_empty() {
@@ -954,13 +937,7 @@ impl KkPanel {
                     return;
                 }
                 if this.model_generation != generation {
-                    if refresh_open_diffs {
-                        this.refresh(cx);
-                    } else {
-                        this.loading = false;
-                        this.refreshing_repositories.clear();
-                        this.schedule_focused_refresh(cx);
-                    }
+                    this.refresh(cx);
                     return;
                 }
 
@@ -1008,11 +985,8 @@ impl KkPanel {
                 if errors == 0 {
                     this.refresh_demand.list_version = refresh_version;
                 }
-                if errors == 0
-                    || this.refresh_demand.version != refresh_version
-                    || this.refresh_demand.requested
-                {
-                    this.schedule_focused_refresh(cx);
+                if this.refresh_demand.version != refresh_version {
+                    this.schedule_open_views_refresh(cx);
                 }
                 performance.finish(
                     if errors == 0 { "completed" } else { "error" },
@@ -1058,7 +1032,6 @@ impl KkPanel {
             performance_context: None,
         };
         self.loading = true;
-        self.refresh_demand.refresh_open_diffs = true;
         self.refreshing_repositories.insert(root.clone());
         let repository = previous.snapshot.repository().clone();
         let sequence = self.refresh_sequence;
@@ -1109,7 +1082,7 @@ impl KkPanel {
                         this.refresh_errors.insert(root, errors);
                     }
                     this.update_refresh_errors();
-                    this.schedule_focused_refresh(cx);
+                    this.schedule_open_views_refresh(cx);
                     cx.notify();
                 }
             })
@@ -1323,14 +1296,6 @@ impl KkPanel {
         if changed {
             for view in &views {
                 self.refresh_repository_emptiness(Some(view.snapshot.repository().root()), cx);
-            }
-        }
-        for view in &views {
-            if !view.stale {
-                self.refresh_demand.snapshots.insert(
-                    view.snapshot.repository().root().to_owned(),
-                    (self.refresh_demand.running_version, view.snapshot.clone()),
-                );
             }
         }
         if refresh_open_diffs && let Some(workspace) = self.workspace.upgrade() {
@@ -2881,7 +2846,6 @@ impl KkPanel {
             .cloned()
             .collect::<Vec<_>>();
         for root in closed {
-            self.refresh_demand.snapshots.remove(&root);
             self.tree_cache.remove(&root);
             self.refreshing_repositories.remove(&root);
             self.refresh_errors.remove(&root);
@@ -3512,7 +3476,7 @@ impl Panel for KkPanel {
     }
     fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
         if active {
-            self.schedule_focused_refresh(cx);
+            self.schedule_open_views_refresh(cx);
         }
     }
 }

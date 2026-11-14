@@ -1729,12 +1729,18 @@ impl KkDiff {
         }
     }
 
-    pub(super) fn refresh_for_focus(
+    #[cfg(test)]
+    pub(super) fn refresh_and_wait(
         &mut self,
         snapshot: Snapshot,
         cx: &mut Context<Self>,
     ) -> Task<()> {
         self.refresh(snapshot, cx);
+        self.pending_refresh()
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_refresh(&mut self) -> Task<()> {
         std::mem::replace(&mut self.refresh_task, Task::ready(()))
     }
 
@@ -3529,9 +3535,7 @@ mod tests {
             .await
             .expect("historical multi-file view");
         multi
-            .update(cx, |multi, cx| {
-                multi.refresh_for_focus(snapshot.clone(), cx)
-            })
+            .update(cx, |multi, cx| multi.refresh_and_wait(snapshot.clone(), cx))
             .await;
         let identifier = view.entity_id();
         let buffer = view.read_with(cx, |view, _| view.buffer.clone());
@@ -6013,7 +6017,7 @@ mod tests {
         let draft_version = buffer.read_with(cx, |buffer, _| buffer.version());
         view.update(cx, |view, cx| {
             view.error = Some("Temporary diff read failure".into());
-            view.refresh_for_focus(latest.clone(), cx)
+            view.refresh_and_wait(latest.clone(), cx)
         })
         .await;
         assert!(view.read_with(cx, |view, _| view.error.is_none()));

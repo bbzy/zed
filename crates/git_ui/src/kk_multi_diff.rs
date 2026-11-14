@@ -776,20 +776,28 @@ impl KkMultiDiff {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn snapshot(&self) -> &Snapshot {
         &self.snapshot
     }
 
+    #[cfg(test)]
     pub(super) fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
 
-    pub(super) fn refresh_for_focus(
+    #[cfg(test)]
+    pub(super) fn refresh_and_wait(
         &mut self,
         snapshot: Snapshot,
         cx: &mut Context<Self>,
     ) -> Task<()> {
         self.refresh(&snapshot, cx);
+        self.pending_refresh()
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_refresh(&mut self) -> Task<()> {
         std::mem::replace(&mut self.refresh_task, Task::ready(()))
     }
 
