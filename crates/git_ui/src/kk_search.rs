@@ -62,6 +62,7 @@ pub(super) struct DiffSearch {
     history_draft: String,
     completed_query: String,
     generation: u64,
+    load_sequence: u64,
     loading: bool,
     data_valid: bool,
     searching: bool,
@@ -155,6 +156,7 @@ impl DiffSearch {
             history_draft: String::new(),
             completed_query: String::new(),
             generation: 0,
+            load_sequence: 0,
             loading: true,
             data_valid: false,
             searching: false,
@@ -172,10 +174,29 @@ impl DiffSearch {
 
     fn load(&mut self, cx: &mut Context<Self>) {
         self.generation += 1;
+        self.load_sequence += 1;
+        let sequence = self.load_sequence;
         self.cancelled.store(true, Ordering::Relaxed);
         self.loading = true;
         self.data_valid = false;
         self.error = None;
+        let read = kk_workbench::remote::Read::SearchData {
+            scope: self.target.scope.clone(),
+        };
+        let cached = self
+            .snapshot
+            .cached::<(Vec<ChangedLine>, Vec<ChangedFile>)>(&read)
+            .or_else(|| self.snapshot.previously_cached(&read).map(|(_, data)| data));
+        if let Some((lines, files)) = cached {
+            self.lines = Arc::new(lines);
+            self.files = files
+                .into_iter()
+                .map(|file| (file.path.clone(), file))
+                .collect();
+            self.data_valid = true;
+            self.loading = false;
+            self.search(cx);
+        }
         let snapshot = self.snapshot.clone();
         let performance = snapshot.repository().diagnostics().start("background.searchLoad", None, serde_json::json!({"root": snapshot.repository().root(), "panel": cx.entity_id().as_u64()}));
         let snapshot = snapshot.with_performance_context(performance.context().cloned());
@@ -201,18 +222,26 @@ impl DiffSearch {
                 serde_json::json!({"boundary": "search data loaded"}),
             );
             this.update(cx, |this, cx| {
+                if this.load_sequence != sequence {
+                    return;
+                }
                 this.loading = false;
                 match loaded {
                     Ok((lines, files, history, target)) => {
+                        let data_changed = !this.data_valid || *this.lines != lines;
                         this.data_valid = true;
                         this.target = target;
-                        this.lines = Arc::new(lines);
+                        if data_changed {
+                            this.lines = Arc::new(lines);
+                        }
                         this.files = files
                             .into_iter()
                             .map(|file| (file.path.clone(), file))
                             .collect();
                         this.history = history;
-                        this.search(cx);
+                        if data_changed {
+                            this.search(cx);
+                        }
                     }
                     Err(error) => this.error = Some(format!("{error:#}")),
                 }
@@ -387,7 +416,11 @@ impl DiffSearch {
     }
 
     fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.loading || !self.data_valid || self.searching || self.error.is_some() {
+        if self.loading
+            || !self.data_valid
+            || self.searching
+            || self.completed_query != self.query.read(cx).text(cx)
+        {
             return;
         }
 
@@ -621,6 +654,52 @@ mod tests {
     use settings::SettingsStore;
     use std::path::Path;
     use workspace::MultiWorkspace;
+
+    #[gpui::test(iterations = 3)]
+    async fn kk_cache_search_data_is_available_before_background_load(cx: &mut TestAppContext) {
+        let directory = crate::kk_multi_diff::tests::local_fixture(cx).await;
+        let root = directory.path().join("repo");
+        let (snapshot, revision) = cx
+            .background_spawn(async move {
+                let snapshot = Repository::open(&root, Path::new("kk"))
+                    .await?
+                    .snapshot(true)
+                    .await?;
+                let revision = snapshot.exact_revision("@").await?;
+                snapshot
+                    .search_data(&kk_workbench::DiffScope::Change(
+                        revision.full_commit_id.clone(),
+                    ))
+                    .await?;
+                anyhow::Ok((snapshot, revision))
+            })
+            .await
+            .expect("cached search");
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/project", serde_json::json!({})).await;
+        let project = Project::test(fs, [Path::new("/project")], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |view, _| view.workspace().clone());
+        let search = cx.new_window_entity(|window, cx| {
+            let mut search = DiffSearch::new(
+                snapshot,
+                DiffTarget::change(&revision),
+                Some("new".into()),
+                workspace.downgrade(),
+                window,
+                cx,
+            );
+            search.load(cx);
+            assert!(!search.loading);
+            assert!(search.data_valid);
+            assert!(!search.lines.is_empty());
+            search
+        });
+        cx.condition(&search, |search, _| !search.loading && !search.searching)
+            .await;
+        assert!(search.read_with(cx, |search, _| search.error.is_none()));
+    }
 
     #[gpui::test(iterations = 3)]
     async fn kk_remote_search_navigation_resolves_rewritten_history_and_missing_results(

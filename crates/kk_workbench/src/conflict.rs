@@ -261,7 +261,7 @@ impl Snapshot {
         })
     }
 
-    pub async fn conflicted_paths(&self, revision: &str) -> Result<Vec<String>> {
+    pub(crate) async fn conflicted_paths_uncached(&self, revision: &str) -> Result<Vec<String>> {
         if let Some(remote) = self.repository().remote() {
             return remote
                 .read(
@@ -291,7 +291,11 @@ impl Snapshot {
         Ok(paths)
     }
 
-    pub async fn file_conflict(&self, revision: &str, path: &str) -> Result<FileConflict> {
+    pub(crate) async fn file_conflict_uncached(
+        &self,
+        revision: &str,
+        path: &str,
+    ) -> Result<FileConflict> {
         if let Some(remote) = self.repository().remote() {
             return remote
                 .read(

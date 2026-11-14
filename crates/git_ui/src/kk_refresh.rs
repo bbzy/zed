@@ -125,9 +125,12 @@ impl RefreshRequest {
         futures::join!(discover, load);
     }
 
-    async fn load(&self, repository: Repository, reopen: bool) -> RefreshEvent {
+    pub(super) async fn load(&self, repository: Repository, reopen: bool) -> RefreshEvent {
         let root = repository.root().to_owned();
-        let repository = if reopen {
+        let repository = if reopen
+            && (repository.is_remote()
+                || !repository.matches_source(&self.executable, self.remote.as_ref()))
+        {
             let opened = if let Some(remote) = &self.remote {
                 remote
                     .open(&root, &self.executable, self.diagnostics.clone())
@@ -212,6 +215,13 @@ impl RefreshRequest {
                             .map(Comparison::pending),
                     };
                     return anyhow::Ok(RepositoryView {
+                        history_snapshot: previous.map(|previous| {
+                            previous
+                                .history_snapshot
+                                .as_ref()
+                                .unwrap_or(&previous.snapshot)
+                                .clone()
+                        }),
                         stale: true,
                         mode: previous.map(|previous| previous.mode).unwrap_or(mode),
                         snapshot,
@@ -231,6 +241,14 @@ impl RefreshRequest {
                     });
                 }
                 Err(error) => return Err(error),
+            };
+            let snapshot = if let Some(lifetime) = previous
+                .and_then(|view| view.snapshot.repository().lifetime())
+                .filter(|lifetime| lifetime.check().is_ok())
+            {
+                snapshot.with_lifetime(Some(lifetime.clone()))
+            } else {
+                snapshot
             };
             let limit = history_limits.get(repository.root()).copied().unwrap_or(50);
             let targets = if previous.is_some_and(|previous| previous.mode != mode) {
@@ -306,6 +324,7 @@ impl RefreshRequest {
             }
 
             anyhow::Ok(RepositoryView {
+                history_snapshot: None,
                 stale: false,
                 mode,
                 snapshot,

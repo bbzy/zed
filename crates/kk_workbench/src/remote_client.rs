@@ -41,6 +41,10 @@ impl Client {
         Self(transport)
     }
 
+    pub(crate) fn cache_identity(&self) -> usize {
+        Arc::as_ptr(&self.0) as *const () as usize
+    }
+
     pub(crate) fn same_connection(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }

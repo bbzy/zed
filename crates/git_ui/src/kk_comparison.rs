@@ -46,14 +46,27 @@ impl ComparisonIntent {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Comparison {
+    pub snapshot: Option<Snapshot>,
     pub intent: ComparisonIntent,
     pub files: Vec<ChangedFile>,
     pub categories: Vec<CategoryCommit>,
     pub sources: HashSet<String>,
     base_revset: String,
 }
+
+impl PartialEq for Comparison {
+    fn eq(&self, other: &Self) -> bool {
+        self.intent == other.intent
+            && self.files == other.files
+            && self.categories == other.categories
+            && self.sources == other.sources
+            && self.base_revset == other.base_revset
+    }
+}
+
+impl Eq for Comparison {}
 
 impl Comparison {
     pub fn new(revision: &Revision) -> Self {
@@ -68,12 +81,68 @@ impl Comparison {
 
     pub fn pending(intent: ComparisonIntent) -> Self {
         Self {
+            snapshot: None,
             base_revset: intent.target_revset.clone(),
             intent,
             files: Vec::new(),
             categories: Vec::new(),
             sources: HashSet::new(),
         }
+    }
+
+    pub fn cached(snapshot: &Snapshot, mut intent: ComparisonIntent) -> Option<Self> {
+        use kk_workbench::{ComparisonBoundary, remote::Read};
+        let boundary: ComparisonBoundary = snapshot.cached(&Read::ComparisonBoundary {
+            target: intent.target_revset.clone(),
+            range_start: intent.range_start_change_id.clone(),
+        })?;
+        let categories = match &boundary.range_start {
+            Some(range_start) => snapshot.cached(&Read::CategoryCommits {
+                range_start: range_start.clone(),
+            })?,
+            None => Vec::new(),
+        };
+        let revisions: Vec<Revision> = snapshot.cached(&Read::Revisions {
+            revset: Some(format!("({})..@", boundary.base_revset)),
+            limit: usize::MAX,
+        })?;
+        let mut sources = revisions
+            .into_iter()
+            .map(|revision| revision.full_commit_id)
+            .collect::<HashSet<_>>();
+        sources.extend(
+            categories
+                .iter()
+                .map(|category: &CategoryCommit| category.revision.full_commit_id.clone()),
+        );
+        intent.range_start_display_id = boundary
+            .range_start
+            .as_ref()
+            .map(|revision| revision.change_id.clone());
+        intent.range_start_change_id = boundary.range_start.map(|revision| revision.full_change_id);
+        let files = snapshot.cached(&Read::ChangedFiles {
+            scope: DiffScope::Comparison {
+                base: boundary.base_revset.clone(),
+                target: "@".into(),
+            },
+        })?;
+        Some(Self {
+            snapshot: Some(snapshot.clone()),
+            intent,
+            files,
+            categories,
+            sources,
+            base_revset: boundary.base_revset,
+        })
+    }
+
+    pub fn previously_cached(snapshot: &Snapshot, intent: ComparisonIntent) -> Option<Self> {
+        let (previous, _): (_, kk_workbench::ComparisonBoundary) =
+            snapshot.previously_cached(&kk_workbench::remote::Read::ComparisonBoundary {
+                target: intent.target_revset.clone(),
+                range_start: intent.range_start_change_id.clone(),
+            })?;
+        Self::cached(&previous, intent)
     }
 
     pub async fn load(snapshot: &Snapshot, mut intent: ComparisonIntent) -> anyhow::Result<Self> {
@@ -105,6 +174,7 @@ impl Comparison {
             .map(|revision| revision.change_id.clone());
         intent.range_start_change_id = boundary.range_start.map(|revision| revision.full_change_id);
         let mut comparison = Self {
+            snapshot: Some(snapshot.clone()),
             intent,
             files: Vec::new(),
             categories,

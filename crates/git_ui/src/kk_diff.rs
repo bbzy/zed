@@ -126,7 +126,7 @@ pub(super) struct CopyTabDiff {
     pub text: String,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub(super) struct DiffTarget {
     pub scope: DiffScope,
     pub identity: String,
@@ -1092,7 +1092,10 @@ impl KkDiff {
                             }
                         });
                     }
-                    if let Some(historical) = historical {
+                    let content_changed = historical.as_ref().is_some_and(|historical| {
+                        buffer.read_with(cx, |buffer, _| buffer.text() != *historical)
+                    });
+                    if content_changed && let Some(historical) = historical {
                         let edits = buffer
                             .read_with(cx, |buffer, cx| buffer.diff(historical, cx))
                             .await;
@@ -1103,6 +1106,14 @@ impl KkDiff {
                     }
 
                     existing.update(cx, |view, cx| {
+                        let base_changed = view.base != base;
+                        let presentation_changed = content_changed
+                            || base_changed
+                            || view.target != target
+                            || view.file != file_for_view
+                            || view.base_revision != base_revision
+                            || view.error.is_some()
+                            || view.classification.is_some();
                         view.refresh_generation += 1;
                         view.refresh_task = Task::ready(());
                         view.error = None;
@@ -1111,6 +1122,9 @@ impl KkDiff {
                         view.preview_task = Task::ready(());
                         view.target = target;
                         view.file = file_for_view;
+                        if !presentation_changed {
+                            return;
+                        }
                         cx.emit(EditorEvent::TitleChanged);
                         view.controls.update(cx, |controls, cx| {
                             controls.status = Some(file_status(&view.file));
@@ -1118,13 +1132,15 @@ impl KkDiff {
                         });
                         view.base = base;
                         view.base_revision = base_revision;
-                        view.update_task = view.diff.update(cx, |diff, cx| {
-                            diff.set_base_text(
-                                view.base.clone(),
-                                buffer.read(cx).snapshot().text,
-                                cx,
-                            )
-                        });
+                        if base_changed || content_changed {
+                            view.update_task = view.diff.update(cx, |diff, cx| {
+                                diff.set_base_text(
+                                    view.base.clone(),
+                                    buffer.read(cx).snapshot().text,
+                                    cx,
+                                )
+                            });
+                        }
                         cx.notify();
                     });
                     workspace.update_in(cx, |workspace, window, cx| {
@@ -1799,9 +1815,14 @@ impl KkDiff {
             let result = async {
                 let (snapshot, target, file, contents) = result?;
                 let edits = if let Some(text) = contents.historical {
-                    let edits =
-                        this.read_with(cx, |this, cx| this.buffer.read(cx).diff(text, cx))?;
-                    Some(edits.await)
+                    let edits = this.read_with(cx, |this, cx| {
+                        let buffer = this.buffer.read(cx);
+                        (buffer.text() != text).then(|| buffer.diff(text, cx))
+                    })?;
+                    match edits {
+                        Some(edits) => Some(edits.await),
+                        None => None,
+                    }
                 } else {
                     None
                 };
@@ -1815,6 +1836,15 @@ impl KkDiff {
                         return;
                     }
 
+                    let content_changed = edits.is_some();
+                    let base_changed = this.base != contents.base;
+                    let presentation_changed = content_changed
+                        || base_changed
+                        || this.target != target
+                        || this.file != file
+                        || this.base_revision != contents.base_revision
+                        || this.error.is_some()
+                        || this.classification.is_some();
                     if let Some(edits) = edits {
                         this.buffer.update(cx, |buffer, cx| {
                             if !buffer.is_dirty() {
@@ -1828,6 +1858,9 @@ impl KkDiff {
                     this.classification = None;
                     this.target = target;
                     this.file = file;
+                    if !presentation_changed {
+                        return;
+                    }
                     cx.emit(EditorEvent::TitleChanged);
                     this.controls.update(cx, |controls, cx| {
                         controls.status = Some(file_status(&this.file));
@@ -1836,13 +1869,15 @@ impl KkDiff {
                     this.base = contents.base;
                     this.base_revision = contents.base_revision;
                     this.error = None;
-                    this.update_task = this.diff.update(cx, |diff, cx| {
-                        diff.set_base_text(
-                            this.base.clone(),
-                            this.buffer.read(cx).snapshot().text,
-                            cx,
-                        )
-                    });
+                    if base_changed || content_changed {
+                        this.update_task = this.diff.update(cx, |diff, cx| {
+                            diff.set_base_text(
+                                this.base.clone(),
+                                this.buffer.read(cx).snapshot().text,
+                                cx,
+                            )
+                        });
+                    }
                     cx.notify();
                 })?;
                 anyhow::Ok(())
@@ -2282,23 +2317,7 @@ impl KkDiff {
         self.render_classification_preview(cx);
         if finished && !uncertain {
             if let Some(snapshot) = latest {
-                cx.spawn(async move |this, cx| {
-                    let result = cx
-                        .background_spawn(
-                            async move { snapshot.repository().snapshot(false).await },
-                        )
-                        .await;
-                    this.update(cx, |this, cx| match result {
-                        Ok(snapshot) => this.refresh(snapshot, cx),
-                        Err(error) => {
-                            this.error =
-                                Some(format!("Could not refresh classification: {error:#}"));
-                            cx.notify();
-                        }
-                    })
-                    .log_err();
-                })
-                .detach();
+                self.refresh(snapshot, cx);
             } else {
                 self.classification = None;
             }
@@ -5989,12 +6008,23 @@ mod tests {
             );
         });
         assert!(view.read_with(cx, |view, _| view.error.is_none()));
+        let base_version =
+            diff.read_with(cx, |diff, cx| diff.base_text_buffer().read(cx).version());
+        let draft_version = buffer.read_with(cx, |buffer, _| buffer.version());
         view.update(cx, |view, cx| {
             view.error = Some("Temporary diff read failure".into());
             view.refresh_for_focus(latest.clone(), cx)
         })
         .await;
         assert!(view.read_with(cx, |view, _| view.error.is_none()));
+        assert_eq!(
+            diff.read_with(cx, |diff, cx| diff.base_text_buffer().read(cx).version()),
+            base_version
+        );
+        assert_eq!(
+            buffer.read_with(cx, |buffer, _| buffer.version()),
+            draft_version
+        );
         assert_eq!(
             buffer.read_with(cx, |buffer, _| buffer.text()),
             "new draft\nsaved\n"

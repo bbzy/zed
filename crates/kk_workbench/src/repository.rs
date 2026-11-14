@@ -23,6 +23,7 @@ pub fn is_stale_workspace(error: &anyhow::Error) -> bool {
 #[derive(Clone, Debug)]
 pub struct Repository {
     root: Arc<Path>,
+    pub(crate) read_cache: Arc<crate::read_cache::ReadCache>,
     executable: Arc<Path>,
     diagnostics: Diagnostics,
     performance_context: Option<PerformanceContext>,
@@ -36,6 +37,7 @@ pub struct RepositoryLifetime(Arc<LifetimeState>);
 #[derive(Debug)]
 struct LifetimeState {
     active: AtomicBool,
+    read_cache: Arc<crate::read_cache::ReadCache>,
     id: u128,
     openings: Arc<crate::opening::DiffOpenings>,
     closed: smol::channel::Receiver<()>,
@@ -68,6 +70,7 @@ impl RepositoryLifetime {
         let (close, closed) = smol::channel::bounded(1);
         Self(Arc::new(LifetimeState {
             active: AtomicBool::new(true),
+            read_cache: Arc::default(),
             id: uuid::Uuid::new_v4().as_u128(),
             openings,
             closed,
@@ -82,6 +85,7 @@ impl RepositoryLifetime {
 
     pub fn invalidate(&self) {
         self.0.active.store(false, Ordering::Release);
+        self.0.read_cache.clear();
         self.0
             .close
             .lock()
@@ -218,12 +222,23 @@ impl Repository {
 
         Ok(Self {
             root: root.into(),
+            read_cache: Arc::default(),
             executable: executable.to_owned().into(),
             diagnostics,
             performance_context,
             lifetime: None,
             remote: None,
         })
+    }
+
+    pub(crate) fn remote_cache_identity(&self) -> Option<usize> {
+        self.remote
+            .as_ref()
+            .map(|remote| remote.client.cache_identity())
+    }
+
+    pub(crate) fn executable(&self) -> &Path {
+        &self.executable
     }
 
     pub fn root(&self) -> &Path {
@@ -238,6 +253,7 @@ impl Repository {
     ) -> Self {
         Self {
             root: root.into(),
+            read_cache: Arc::default(),
             executable: executable.to_owned().into(),
             diagnostics,
             performance_context,
@@ -254,6 +270,7 @@ impl Repository {
     ) -> Self {
         Self {
             root: info.root.into(),
+            read_cache: Arc::default(),
             executable: executable.to_owned().into(),
             diagnostics,
             performance_context: None,
@@ -263,6 +280,20 @@ impl Repository {
                 id: info.id,
             })),
         }
+    }
+
+    pub fn matches_source(
+        &self,
+        executable: &Path,
+        remote: Option<&crate::remote::Client>,
+    ) -> bool {
+        self.executable.as_ref() == executable
+            && self.check_lifetime().is_ok()
+            && match (&self.remote, remote) {
+                (None, None) => true,
+                (Some(repository), Some(client)) => repository.client.same_connection(client),
+                _ => false,
+            }
     }
 
     pub fn is_remote(&self) -> bool {
@@ -552,6 +583,13 @@ impl Snapshot {
             lifetime.bind_remote(remote);
         }
 
+        if let Some(lifetime) = &lifetime {
+            lifetime
+                .0
+                .read_cache
+                .extend(&snapshot.repository.read_cache);
+            snapshot.repository.read_cache = lifetime.0.read_cache.clone();
+        }
         snapshot.repository.lifetime = lifetime;
         snapshot
     }
@@ -570,7 +608,11 @@ impl Snapshot {
         }
     }
 
-    pub async fn current_file_path(&self, revision: &str, path: &str) -> Result<Option<String>> {
+    pub(crate) async fn current_file_path_uncached(
+        &self,
+        revision: &str,
+        path: &str,
+    ) -> Result<Option<String>> {
         if let Some(remote) = self.repository().remote() {
             return remote
                 .read(
@@ -637,7 +679,11 @@ impl Snapshot {
         Ok(self.repository.command(&command_arguments).await?.stdout)
     }
 
-    pub async fn revisions(&self, revset: Option<&str>, limit: usize) -> Result<Vec<Revision>> {
+    pub(crate) async fn revisions_uncached(
+        &self,
+        revset: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Revision>> {
         if let Some(remote) = self.repository().remote() {
             return remote
                 .read(
@@ -665,7 +711,11 @@ impl Snapshot {
         parse_records(&self.read(&arguments).await?)
     }
 
-    pub async fn history(&self, mode: HistoryMode, visible_limit: usize) -> Result<HistoryPage> {
+    pub(crate) async fn history_uncached(
+        &self,
+        mode: HistoryMode,
+        visible_limit: usize,
+    ) -> Result<HistoryPage> {
         if let Some(remote) = self.repository().remote() {
             return remote
                 .read(
@@ -692,7 +742,10 @@ impl Snapshot {
         })
     }
 
-    pub async fn commit_emptiness(&self, commit_ids: &[String]) -> Result<HashMap<String, bool>> {
+    pub(crate) async fn commit_emptiness_uncached(
+        &self,
+        commit_ids: &[String],
+    ) -> Result<HashMap<String, bool>> {
         if let Some(remote) = self.repository().remote() {
             return remote
                 .read(
@@ -739,7 +792,7 @@ impl Snapshot {
         Ok(results)
     }
 
-    pub async fn comparison_candidates(&self) -> Result<Vec<Revision>> {
+    pub(crate) async fn comparison_candidates_uncached(&self) -> Result<Vec<Revision>> {
         if let Some(remote) = self.repository().remote() {
             return remote
                 .read(self, crate::remote::Read::ComparisonCandidates)
@@ -749,7 +802,7 @@ impl Snapshot {
         self.revisions(Some("(ancestors(@, 50) | mutable() | bookmarks() | remote_bookmarks() | tags() | root()) ~ @"), 50).await
     }
 
-    pub async fn resolve_revision(&self, previous: &Revision) -> Result<Revision> {
+    pub(crate) async fn resolve_revision_uncached(&self, previous: &Revision) -> Result<Revision> {
         if let Some(remote) = self.repository().remote() {
             return remote
                 .read(
@@ -773,7 +826,7 @@ impl Snapshot {
         revisions.pop().context("Change is no longer available")
     }
 
-    pub async fn history_containing(
+    pub(crate) async fn history_containing_uncached(
         &self,
         mode: HistoryMode,
         visible_limit: usize,
@@ -867,7 +920,7 @@ impl Snapshot {
         }
     }
 
-    pub async fn search_revisions(
+    pub(crate) async fn search_revisions_uncached(
         &self,
         query: &str,
         scope: Option<&str>,
@@ -949,7 +1002,7 @@ impl Snapshot {
         Ok(crate::history::rank_revisions(matches, query))
     }
 
-    pub async fn comparison_boundary(
+    pub(crate) async fn comparison_boundary_uncached(
         &self,
         target: &str,
         range_start: Option<&str>,
@@ -1030,7 +1083,10 @@ impl Snapshot {
         })
     }
 
-    pub async fn changed_files(&self, scope: &DiffScope) -> Result<Vec<ChangedFile>> {
+    pub(crate) async fn changed_files_uncached(
+        &self,
+        scope: &DiffScope,
+    ) -> Result<Vec<ChangedFile>> {
         if let Some(remote) = self.repository().remote() {
             return remote
                 .read(
@@ -1067,7 +1123,11 @@ impl Snapshot {
         Ok(files)
     }
 
-    pub async fn diff(&self, scope: &DiffScope, path: Option<&str>) -> Result<Vec<u8>> {
+    pub(crate) async fn diff_uncached(
+        &self,
+        scope: &DiffScope,
+        path: Option<&str>,
+    ) -> Result<Vec<u8>> {
         if let Some(remote) = self.repository().remote() {
             return remote
                 .read(
@@ -1090,7 +1150,11 @@ impl Snapshot {
         self.read(&arguments).await
     }
 
-    pub async fn file_content(&self, revision: &str, path: &str) -> Result<Vec<u8>> {
+    pub(crate) async fn file_content_uncached(
+        &self,
+        revision: &str,
+        path: &str,
+    ) -> Result<Vec<u8>> {
         if let Some(remote) = self.repository().remote() {
             return remote
                 .read(
@@ -1114,7 +1178,7 @@ impl Snapshot {
         .await
     }
 
-    pub async fn file_content_if_exists(
+    pub(crate) async fn file_content_if_exists_uncached(
         &self,
         revision: &str,
         path: &str,
@@ -1153,7 +1217,7 @@ impl Snapshot {
         }
     }
 
-    pub async fn search_data(
+    pub(crate) async fn search_data_uncached(
         &self,
         scope: &DiffScope,
     ) -> Result<(Vec<crate::ChangedLine>, Vec<ChangedFile>)> {

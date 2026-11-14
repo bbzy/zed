@@ -239,7 +239,11 @@ impl Snapshot {
         }
     }
 
-    pub async fn annotate(&self, revision: &str, path: &str) -> Result<Vec<BlameLine>> {
+    pub(crate) async fn annotate_uncached(
+        &self,
+        revision: &str,
+        path: &str,
+    ) -> Result<Vec<BlameLine>> {
         if let Some(remote) = self.repository().remote() {
             return remote
                 .read(
@@ -270,7 +274,11 @@ impl Snapshot {
         )
     }
 
-    pub async fn file_information(&self, revision: &str, path: &str) -> Result<FileInformation> {
+    pub(crate) async fn file_information_uncached(
+        &self,
+        revision: &str,
+        path: &str,
+    ) -> Result<FileInformation> {
         if let Some(remote) = self.repository().remote() {
             return remote
                 .read(

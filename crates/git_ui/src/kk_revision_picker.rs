@@ -89,9 +89,47 @@ impl PickerDelegate for RevisionDelegate {
         let snapshot = self.snapshot.clone();
         let purpose = self.purpose;
         let selected = self.matches.get(self.selected_index).cloned();
+        if self.query != query {
+            self.matches.clear();
+            self.selected_index = 0;
+        }
         self.query = query.clone();
         self.error = None;
+        let read = if query.trim().is_empty() {
+            match purpose {
+                Purpose::Compare => kk_workbench::remote::Read::ComparisonCandidates,
+                Purpose::Find => kk_workbench::remote::Read::Revisions {
+                    revset: Some("..@".into()),
+                    limit: 20,
+                },
+            }
+        } else {
+            kk_workbench::remote::Read::SearchRevisions {
+                query: query.clone(),
+                scope: (purpose == Purpose::Find).then(|| "..@".into()),
+                working_copy: purpose == Purpose::Find,
+                limit: if purpose == Purpose::Find { 20 } else { 50 },
+            }
+        };
+        if let Some(matches) = snapshot.cached::<Vec<Revision>>(&read) {
+            self.selected_index = selected
+                .as_ref()
+                .and_then(|selected| selection_index(&matches, selected))
+                .unwrap_or(0);
+            self.matches = matches;
+            self.loading = false;
+            cx.notify();
+            return Task::ready(());
+        }
+        if let Some((_, matches)) = snapshot.previously_cached::<Vec<Revision>>(&read) {
+            self.selected_index = selected
+                .as_ref()
+                .and_then(|selected| selection_index(&matches, selected))
+                .unwrap_or(0);
+            self.matches = matches;
+        }
         self.loading = true;
+        cx.notify();
         cx.spawn_in(window, async move |picker, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -130,6 +168,17 @@ impl PickerDelegate for RevisionDelegate {
                     }
 
                     let (matches, error) = result;
+                    if error.is_some() {
+                        delegate.error = error;
+                        delegate.loading = false;
+                        cx.notify();
+                        return;
+                    }
+                    let selected = delegate
+                        .matches
+                        .get(delegate.selected_index)
+                        .cloned()
+                        .or(selected);
                     delegate.selected_index = selected
                         .as_ref()
                         .and_then(|selected| selection_index(&matches, selected))
@@ -144,11 +193,6 @@ impl PickerDelegate for RevisionDelegate {
     }
 
     fn confirm(&mut self, _: bool, window: &mut Window, cx: &mut Context<Picker<Self>>) {
-        // Old results remain visible during a query, but must not confirm a different query.
-        if self.loading {
-            return;
-        }
-
         if let Some(revision) = self.matches.get(self.selected_index) {
             (self.confirm)(
                 self.snapshot.repository().root().to_owned(),
@@ -281,4 +325,49 @@ fn selection_index(matches: &[Revision], selected: &Revision) -> Option<usize> {
             let (index, _) = matching_changes.next()?;
             matching_changes.next().is_none().then_some(index)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test(iterations = 3)]
+    async fn kk_cache_picker_shows_matches_before_any_background_work(cx: &mut TestAppContext) {
+        let directory = crate::kk_multi_diff::tests::local_fixture(cx).await;
+        let root = directory.path().join("repo");
+        let (snapshot, query) = cx
+            .background_spawn(async move {
+                let snapshot = kk_workbench::Repository::open(&root, std::path::Path::new("kk"))
+                    .await?
+                    .snapshot(true)
+                    .await?;
+                let candidates = snapshot.comparison_candidates().await?;
+                let query = candidates
+                    .first()
+                    .expect("comparison candidate")
+                    .change_id
+                    .clone();
+                snapshot.search_revisions(&query, None, false, 50).await?;
+                snapshot
+                    .search_revisions("missing-query", None, false, 50)
+                    .await?;
+                anyhow::Ok((snapshot, query))
+            })
+            .await
+            .expect("cached candidates");
+        cx.update(editor::init);
+        let cx = cx.add_empty_window();
+        let picker = cx.new_window_entity(|window, cx| {
+            new(snapshot, Purpose::Compare, window, cx, |_, _, _, _| {})
+        });
+        for query in ["", query.as_str(), "missing-query", ""] {
+            picker.update_in(cx, |picker, window, cx| {
+                let task = picker.delegate.update_matches(query.into(), window, cx);
+                assert!(!picker.delegate.loading);
+                assert_eq!(picker.delegate.matches.is_empty(), query == "missing-query");
+                task.detach();
+            });
+        }
+    }
 }

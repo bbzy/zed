@@ -625,6 +625,10 @@ impl KkMultiDiff {
         }
     }
 
+    pub(super) fn diff_entries(&self) -> &[Entity<KkDiff>] {
+        &self.entries
+    }
+
     fn set_entries(&mut self, mut entries: Vec<Entity<KkDiff>>, cx: &mut Context<Self>) {
         for entry in &self.entries {
             if entries
@@ -649,9 +653,26 @@ impl KkMultiDiff {
                 }
             }
         }
+        if self.entries == entries {
+            return;
+        }
         self._entry_subscriptions = entries
             .iter()
-            .map(|entry| cx.observe(entry, |_, _, cx| cx.notify()))
+            .map(|entry| {
+                cx.observe(entry, |this, _, cx| {
+                    if this.pending_target.is_some()
+                        && this.refresh_snapshot.is_none()
+                        && this
+                            .entries
+                            .iter()
+                            .all(|entry| !entry.read(cx).has_pending_classification())
+                    {
+                        let snapshot = this.snapshot.clone();
+                        this.refresh_with_target(&snapshot, None, cx);
+                    }
+                    cx.notify();
+                })
+            })
             .collect();
         for old in &self.entries {
             if !entries
@@ -782,17 +803,6 @@ impl KkMultiDiff {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .entries
-            .iter()
-            .any(|entry| entry.read(cx).has_pending_classification())
-        {
-            self.error = Some(
-                "Wait for the pending KK operation before changing the comparison base".into(),
-            );
-            cx.notify();
-            return;
-        }
         let target = super::kk_comparison::Comparison::new(&revision).diff_target();
         let snapshot = self
             .refresh_snapshot
@@ -811,6 +821,25 @@ impl KkMultiDiff {
         let requested_retarget = target.is_some();
         let target = target.or_else(|| self.pending_target.clone());
         let retarget = target.is_some();
+        if retarget
+            && self
+                .entries
+                .iter()
+                .any(|entry| entry.read(cx).has_pending_classification())
+        {
+            self.refresh_generation += 1;
+            self.refresh_task = Task::ready(());
+            self.refresh_snapshot = None;
+            self.pending_target = target;
+            self.loading = true;
+            self.error = None;
+            cx.notify();
+            return;
+        }
+        let capture_queued = retarget
+            && self.loading
+            && self.pending_target.is_some()
+            && self.refresh_snapshot.is_none();
         if self.snapshot.repository().root() != snapshot.repository().root()
             || (!requested_retarget
                 && self.refresh_snapshot.as_ref().is_some_and(|refresh| {
@@ -860,6 +889,11 @@ impl KkMultiDiff {
                 let (snapshot, target, mut files) = cx
                     .background_spawn(async move {
                         snapshot.repository().check_lifetime()?;
+                        let snapshot = if capture_queued {
+                            snapshot.repository().snapshot(false).await?
+                        } else {
+                            snapshot
+                        };
                         if retarget && let Some(intent) = target.comparison.clone() {
                             let comparison =
                                 super::kk_comparison::Comparison::load(&snapshot, intent).await?;
@@ -989,6 +1023,7 @@ impl KkMultiDiff {
                 }
                 this.update(cx, |this, cx| {
                     if this.refresh_generation == generation {
+                        let presentation_changed = this.loading || this.files != files || this.target != target || this.error.is_some();
                         this.loading = false;
                         this.files = files;
                         this.snapshot = snapshot;
@@ -997,6 +1032,10 @@ impl KkMultiDiff {
                         this.pending_target = None;
                         this.error = None;
                         this.set_entries(entries, cx);
+                        if presentation_changed {
+                            cx.emit(EditorEvent::TitleChanged);
+                            cx.notify();
+                        }
                     }
                 })?;
                 anyhow::Ok(())
@@ -1644,6 +1683,101 @@ pub(crate) mod tests {
         })
         .await
         .expect("prepare nested repository")
+    }
+
+    #[gpui::test(iterations = 3)]
+    async fn kk_cache_comparison_base_queues_latest_choice_behind_pending_projection(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = local_fixture(cx).await;
+        let root = directory.path().join("repo");
+        let (snapshot, parent, root_revision, comparison) = cx
+            .background_spawn(async move {
+                let snapshot = kk_workbench::Repository::open(&root, std::path::Path::new("kk"))
+                    .await?
+                    .snapshot(true)
+                    .await?;
+                let parent = snapshot.exact_revision("@-").await?;
+                let root_revision = snapshot.exact_revision("root()").await?;
+                let comparison = super::super::kk_comparison::Comparison::load(
+                    &snapshot,
+                    super::super::kk_comparison::Comparison::new(&parent).intent,
+                )
+                .await?;
+                anyhow::Ok((snapshot, parent, root_revision, comparison))
+            })
+            .await
+            .expect("comparison fixture");
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            snapshot.repository().root(),
+            serde_json::json!({"a.txt":"new a\n"}),
+        )
+        .await;
+        let project = Project::test(fs, [snapshot.repository().root()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |view, _| view.workspace().clone());
+        let view = cx
+            .update(|window, cx| {
+                KkMultiDiff::open(
+                    snapshot,
+                    comparison.diff_target(),
+                    comparison.files.clone(),
+                    true,
+                    workspace.downgrade(),
+                    DiffOpenMode::Open,
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("aggregate");
+        cx.condition(&view, |view, _| !view.loading).await;
+        let entry = view.read_with(cx, |view, cx| {
+            view.entries
+                .iter()
+                .find(|entry| entry.read(cx).file.path == "a.txt")
+                .expect("text entry")
+                .clone()
+        });
+        let preview = entry
+            .update(cx, |entry, cx| {
+                entry.preview_whole_file(kk_workbench::TransferDirection::Backward, cx)
+            })
+            .expect("pending projection");
+        let count = view.read_with(cx, |view, _| view.entries.len());
+        view.update_in(cx, |view, window, cx| {
+            view.set_comparison_base(root_revision, window, cx);
+            view.set_comparison_base(parent.clone(), window, cx);
+            assert!(view.error.is_none());
+            assert!(view.pending_target.is_some());
+            assert!(view.refresh_snapshot.is_none());
+            assert_eq!(view.entries.len(), count);
+        });
+        entry.update(cx, |entry, cx| {
+            entry.finish_classification_preview(
+                preview.id,
+                Err(super::super::kk_classification::ClassificationFailure {
+                    message: "injected rejection".into(),
+                    uncertain: false,
+                }),
+                cx,
+            )
+        });
+        cx.condition(&view, |view, _| {
+            !view.loading && view.pending_target.is_none()
+        })
+        .await;
+        view.read_with(cx, |view, _| {
+            assert!(view.error.is_none(), "{:?}", view.error);
+            assert_eq!(
+                view.target.identity,
+                super::super::kk_comparison::Comparison::new(&parent)
+                    .diff_target()
+                    .identity
+            );
+        });
     }
 
     #[gpui::test]

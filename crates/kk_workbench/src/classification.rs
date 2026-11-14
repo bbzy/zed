@@ -501,7 +501,10 @@ impl Snapshot {
         Ok((String::from_utf8(original)?, String::from_utf8(modified)?))
     }
 
-    pub async fn category_commits(&self, range_start: &Revision) -> Result<Vec<CategoryCommit>> {
+    pub(crate) async fn category_commits_uncached(
+        &self,
+        range_start: &Revision,
+    ) -> Result<Vec<CategoryCommit>> {
         if let Some(remote) = self.repository().remote() {
             return remote
                 .read(
@@ -541,7 +544,7 @@ impl Snapshot {
         Ok(commits)
     }
 
-    pub async fn exact_revision(&self, revset: &str) -> Result<Revision> {
+    pub(crate) async fn exact_revision_uncached(&self, revset: &str) -> Result<Revision> {
         if let Some(remote) = self.repository().remote() {
             return remote
                 .read(

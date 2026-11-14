@@ -138,6 +138,58 @@ impl BlameState {
         let enabled = self.enabled;
         let executable = KkWorkbenchSettings::get_global(cx).executable_path.clone();
         let diagnostics = self.diagnostics.clone();
+        if let BlameTarget::WorkingFile { absolute, .. } = &target
+            && let Some(snapshot) = &self.snapshot
+            && let Ok(relative) = absolute.strip_prefix(snapshot.repository().root())
+            && let Some(path) = relative.to_str()
+        {
+            let query = kk_workbench::remote::Read::Annotate {
+                revision: "@".into(),
+                path: path.into(),
+            };
+            let cached = snapshot
+                .cached::<Vec<BlameLine>>(&query)
+                .map(|lines| (snapshot.clone(), lines))
+                .or_else(|| snapshot.previously_cached(&query));
+            if let Some((source, lines)) = cached
+                && let Some(bytes) =
+                    source.cached::<Vec<u8>>(&kk_workbench::remote::Read::FileContent {
+                        revision: "@".into(),
+                        path: path.into(),
+                    })
+                && let Ok(mut text) = String::from_utf8(bytes)
+            {
+                language::LineEnding::normalize(&mut text);
+                if text == buffer.read(cx).text() {
+                    self.lines = Arc::new(lines);
+                    self.snapshot = Some(source);
+                    self.path = path.into();
+                    self.annotated_snapshot = Some(buffer.read(cx).snapshot());
+                    self.stale = false;
+                }
+            }
+        }
+        let previous_repository = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.repository().clone());
+        if let BlameTarget::Revision {
+            snapshot,
+            revision,
+            path,
+            ..
+        } = &target
+            && let Some(lines) =
+                snapshot.cached::<Vec<BlameLine>>(&kk_workbench::remote::Read::Annotate {
+                    revision: revision.clone(),
+                    path: path.clone(),
+                })
+        {
+            self.lines = Arc::new(lines);
+            self.snapshot = Some(snapshot.clone());
+            self.path = path.clone();
+            self.annotated_snapshot = Some(buffer.read(cx).snapshot());
+        }
         self.loading = true;
         self.error = None;
         self.task = cx.spawn(async move |this, cx| {
@@ -147,7 +199,19 @@ impl BlameState {
                         BlameTarget::WorkingFile { absolute, remote } => {
                             let directory =
                                 absolute.parent().context("File has no parent directory")?;
-                            let repository = if let Some(remote) = remote {
+                            let lifetime = previous_repository
+                                .as_ref()
+                                .and_then(|repository| repository.lifetime())
+                                .filter(|lifetime| lifetime.check().is_ok())
+                                .cloned();
+                            let repository = if let Some(previous) =
+                                previous_repository.filter(|repository| {
+                                    !repository.is_remote()
+                                        && absolute.starts_with(repository.root())
+                                        && repository.matches_source(&executable, remote.as_ref())
+                                }) {
+                                previous
+                            } else if let Some(remote) = remote {
                                 remote.open(directory, &executable, diagnostics).await?
                             } else {
                                 Repository::open_with_diagnostics(
@@ -160,7 +224,7 @@ impl BlameState {
                             };
                             let path = repository.relative_file_path(&absolute).await?;
                             (
-                                repository.snapshot(true).await?,
+                                repository.snapshot(true).await?.with_lifetime(lifetime),
                                 "@".to_owned(),
                                 path,
                                 false,
@@ -229,7 +293,9 @@ impl BlameState {
                     this.annotated_snapshot = Some(buffer.read(cx).snapshot());
                     this.snapshot = Some(snapshot);
                     this.path = path;
-                    this.lines = Arc::new(lines);
+                    if *this.lines != lines {
+                        this.lines = Arc::new(lines);
+                    }
                     this.error = None;
                     cx.notify();
                 })?;
@@ -240,7 +306,14 @@ impl BlameState {
                 this.update(cx, |this, cx| {
                     if generation == this.generation {
                         this.loading = false;
-                        this.stale = true;
+                        this.stale = this.buffer.upgrade().is_none_or(|buffer| {
+                            let buffer = buffer.read(cx);
+                            buffer.is_dirty()
+                                || this
+                                    .annotated_snapshot
+                                    .as_ref()
+                                    .is_none_or(|snapshot| snapshot.version() != &buffer.version())
+                        });
                         this.error = Some(format!("Could not load blame: {error:#}"));
                         cx.notify();
                     }
@@ -634,26 +707,36 @@ impl KkBlameStatus {
         target: BlameTarget,
         cx: &mut Context<Self>,
     ) -> Entity<BlameState> {
-        let state = self
-            .states
-            .get(&buffer.entity_id())
-            .and_then(WeakEntity::upgrade)
-            .unwrap_or_else(|| {
-                let diagnostics = self
-                    .workspace
-                    .upgrade()
-                    .and_then(|workspace| workspace.read(cx).panel::<super::kk_panel::KkPanel>(cx))
-                    .map(|panel| panel.read(cx).diagnostics(cx))
-                    .unwrap_or_else(|| match &target {
-                        BlameTarget::Revision { snapshot, .. } => {
-                            snapshot.repository().diagnostics().clone()
-                        }
-                        BlameTarget::WorkingFile { .. } => Diagnostics::default(),
+        let state =
+            self.states
+                .get(&buffer.entity_id())
+                .and_then(WeakEntity::upgrade)
+                .unwrap_or_else(|| {
+                    let panel = self.workspace.upgrade().and_then(|workspace| {
+                        workspace.read(cx).panel::<super::kk_panel::KkPanel>(cx)
                     });
-                let state = cx.new(|cx| BlameState::new(target, buffer, diagnostics, cx));
-                self.states.insert(buffer.entity_id(), state.downgrade());
-                state
-            });
+                    let snapshot = panel.as_ref().and_then(|panel| match &target {
+                        BlameTarget::WorkingFile { absolute, .. } => {
+                            panel.read(cx).snapshot_for_path(absolute)
+                        }
+                        BlameTarget::Revision { snapshot, .. } => Some(snapshot.clone()),
+                    });
+                    let diagnostics = panel
+                        .map(|panel| panel.read(cx).diagnostics(cx))
+                        .unwrap_or_else(|| match &target {
+                            BlameTarget::Revision { snapshot, .. } => {
+                                snapshot.repository().diagnostics().clone()
+                            }
+                            BlameTarget::WorkingFile { .. } => Diagnostics::default(),
+                        });
+                    let state = cx.new(|cx| {
+                        let mut state = BlameState::new(target, buffer, diagnostics, cx);
+                        state.snapshot = snapshot;
+                        state
+                    });
+                    self.states.insert(buffer.entity_id(), state.downgrade());
+                    state
+                });
         editor.update(cx, |editor, cx| {
             let workspace = self.workspace.clone();
             let mut previous_error = None;
@@ -865,7 +948,7 @@ impl KkBlameStatus {
         let editor = editor.read(cx);
         let state = editor.addon::<BlameAddon>()?.state.clone();
         let data = state.read(cx);
-        if !data.enabled || data.stale || data.loading || data.error.is_some() {
+        if !data.enabled || data.stale {
             return None;
         }
 
@@ -1380,6 +1463,28 @@ mod tests {
             assert!(!state.lines.is_empty());
             assert!(!state.stale);
         });
+        {
+            let (target, snapshot) = state.read_with(cx, |state, _| {
+                (state.target.clone(), state.snapshot.clone())
+            });
+            let reopened = cx.new(|cx| {
+                let mut state = BlameState::new(target, &buffer, Diagnostics::default(), cx);
+                state.snapshot = snapshot;
+                state
+            });
+            reopened
+                .update(cx, |state, cx| {
+                    state.enabled = true;
+                    state.load(cx);
+                    assert!(
+                        !state.lines.is_empty(),
+                        "cached annotations appear before the remote snapshot command finishes"
+                    );
+                    assert!(!state.stale);
+                    std::mem::replace(&mut state.task, Task::ready(()))
+                })
+                .await;
+        }
         buffer.update(cx, |buffer, cx| {
             buffer.edit([(0..buffer.len(), "saved again\n")], None, cx);
         });

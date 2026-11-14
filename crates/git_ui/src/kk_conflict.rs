@@ -67,6 +67,7 @@ pub(super) struct KkConflict {
     pending_reason: ConflictEditReason,
     update_scheduled: bool,
     applying: bool,
+    metadata_pending: bool,
     history_changed: bool,
     error: Option<String>,
     _subscriptions: Vec<Subscription>,
@@ -124,6 +125,68 @@ impl KkConflict {
         window: &mut Window,
         cx: &mut App,
     ) -> Task<Result<()>> {
+        let cached = snapshot
+            .cached::<FileConflict>(&kk_workbench::remote::Read::FileConflict {
+                revision: revision.clone(),
+                path: path.clone(),
+            })
+            .filter(|conflict| !conflict.binary);
+        let preview = cached.as_ref().map(|conflict| {
+            Self::open_loaded(
+                snapshot.clone(),
+                conflict.clone(),
+                false,
+                true,
+                panel.clone(),
+                workspace.clone(),
+                window,
+                cx,
+            )
+        });
+        let activate = preview.is_none();
+        window.spawn(cx, async move |cx| {
+            let opening = snapshot.repository().begin_diff_opening().await?;
+            let source = snapshot.clone();
+            let read = cx.background_spawn(async move { source.file_conflict(&revision, &path).await });
+            if let Some(preview) = preview {
+                preview.await?;
+            }
+            let conflict = match read.await {
+                Ok(conflict) => conflict,
+                Err(error) => {
+                    if let Some(cached) = cached
+                        && let Some(workspace) = workspace.upgrade()
+                    {
+                        let views = workspace.read_with(cx, |workspace, cx| workspace.items_of_type::<Self>(cx).collect::<Vec<_>>());
+                        for view in views {
+                            view.update(cx, |view, cx| {
+                                if view.metadata_pending && view.draft.conflict.repository_root == cached.repository_root && view.draft.conflict.commit_id == cached.commit_id && view.draft.conflict.path == cached.path {
+                                    view.error = Some(format!("Could not verify conflict status: {error:#}. Your draft was retained."));
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    }
+                    return Err(error);
+                }
+            };
+            snapshot.repository().check_lifetime()?;
+            // Release the read barrier before any modal input or automatic resolution.
+            drop(opening);
+            cx.update(|window, cx| Self::open_loaded(snapshot, conflict, true, activate, panel, workspace, window, cx))?.await
+        })
+    }
+
+    fn open_loaded(
+        snapshot: Snapshot,
+        conflict: FileConflict,
+        validated: bool,
+        activate: bool,
+        panel: WeakEntity<KkPanel>,
+        workspace: WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Task<Result<()>> {
         let Some(workspace) = workspace.upgrade() else {
             return Task::ready(Err(anyhow::anyhow!("Workspace was closed")));
         };
@@ -138,15 +201,8 @@ impl KkConflict {
             .map(|options| options.host_key());
         let store = KeyValueStore::global(cx);
         window.spawn(cx, async move |cx| {
-            let opening = snapshot.repository().begin_diff_opening().await?;
             let repository = snapshot.repository().clone();
-            let source = snapshot.clone();
-            let conflict = cx
-                .background_spawn(async move { source.file_conflict(&revision, &path).await })
-                .await?;
             repository.check_lifetime()?;
-            // A queued write may be yielding to this read; release it before user input or writes.
-            drop(opening);
             if conflict.binary {
                 ensure!(
                     !conflict.immutable,
@@ -188,6 +244,12 @@ impl KkConflict {
             if let Some(existing) = existing {
                 existing
                     .update(cx, |view, cx| {
+                        view.metadata_pending = !validated;
+                        if view.error.as_ref().is_some_and(|error| {
+                            error.starts_with("Could not verify conflict status:")
+                        }) {
+                            view.error = None;
+                        }
                         view.operation = snapshot.operation().to_owned();
                         view.snapshot = Some(snapshot);
                         Self::refresh_metadata(&mut view.draft, &conflict);
@@ -196,8 +258,13 @@ impl KkConflict {
                     .await?;
                 repository.check_lifetime()?;
                 workspace.update_in(cx, |workspace, window, cx| {
-                    workspace.activate_item(&existing, true, true, window, cx);
-                    existing.update(cx, |view, cx| view.apply_completed(window, cx));
+                    if activate {
+                        workspace.activate_item(&existing, true, true, window, cx);
+                    }
+                    existing.update(cx, |view, cx| {
+                        view.apply_completed(window, cx);
+                        cx.notify();
+                    });
                 })?;
                 return Ok(());
             }
@@ -290,9 +357,18 @@ impl KkConflict {
                         cx,
                     );
                     view.saved_version = stored.saved_version;
+                    view.metadata_pending = !validated;
                     view
                 });
-                workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
+                if activate {
+                    workspace.add_item_to_active_pane(
+                        Box::new(view.clone()),
+                        None,
+                        true,
+                        window,
+                        cx,
+                    );
+                }
                 view.update(cx, |view, cx| {
                     view.refresh_blocks(window, cx);
                     view.navigate(true, window, cx);
@@ -396,6 +472,7 @@ impl KkConflict {
             pending_reason: ConflictEditReason::Edit,
             update_scheduled: false,
             applying: false,
+            metadata_pending: false,
             history_changed: false,
             error: None,
             _subscriptions: vec![subscription],
@@ -557,7 +634,8 @@ impl KkConflict {
     }
 
     fn apply_completed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.draft.conflicts.is_empty()
+        if !self.metadata_pending
+            && self.draft.conflicts.is_empty()
             && !self.draft.conflict.immutable
             && self.draft.applied_digest.is_none()
             && !self.applying
@@ -642,6 +720,9 @@ impl KkConflict {
     }
 
     fn apply(&mut self, deleted: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.metadata_pending {
+            return;
+        }
         if self.applying || self.draft.applied_digest.is_some() {
             return;
         }
@@ -1249,7 +1330,13 @@ impl Focusable for KkConflict {
 
 impl Render for KkConflict {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let status = if self.applying {
+        let status = if self.metadata_pending {
+            if self.error.is_some() {
+                "Conflict status is not verified".into()
+            } else {
+                "Checking conflict status…".into()
+            }
+        } else if self.applying {
             "Applying resolution…".into()
         } else if self.draft.has_newer_edits() {
             "Applied · newer edits have not been applied".into()
@@ -1310,6 +1397,7 @@ impl Render for KkConflict {
                         Button::new("apply-conflict", "Apply Resolution")
                             .disabled(
                                 self.applying
+                                    || self.metadata_pending
                                     || self.draft.conflict.immutable
                                     || self.draft.applied_digest.is_some()
                                     || !self.draft.conflicts.is_empty(),
@@ -1332,6 +1420,7 @@ impl Render for KkConflict {
                         Button::new("delete-conflict", "Delete File")
                             .disabled(
                                 self.applying
+                                    || self.metadata_pending
                                     || self.draft.conflict.immutable
                                     || self.draft.applied_digest.is_some(),
                             )

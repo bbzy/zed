@@ -8,6 +8,7 @@ mod file_mutation;
 mod history;
 mod opening;
 mod preview;
+mod read_cache;
 pub mod remote;
 mod remote_client;
 mod repository;

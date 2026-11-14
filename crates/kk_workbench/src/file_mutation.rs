@@ -38,7 +38,7 @@ impl PreparedFileMutation {
 }
 
 impl Snapshot {
-    pub async fn file_edit(&self, revision: &str, path: &str) -> Result<FileEdit> {
+    pub(crate) async fn file_edit_uncached(&self, revision: &str, path: &str) -> Result<FileEdit> {
         if let Some(remote) = self.repository().remote() {
             return remote
                 .read(

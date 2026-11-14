@@ -1820,6 +1820,7 @@ mod tests {
                 },
                 &HashSet::new(),
                 &HashSet::new(),
+                false,
                 cx,
             );
             panel.update_tree(cx);
@@ -1850,6 +1851,7 @@ mod tests {
                 },
                 &HashSet::new(),
                 &HashSet::new(),
+                false,
                 cx,
             );
             panel.update_tree(cx);
@@ -1875,6 +1877,7 @@ mod tests {
                 },
                 &HashSet::new(),
                 &HashSet::new(),
+                false,
                 cx,
             );
             panel.update_tree(cx);
@@ -1964,6 +1967,7 @@ mod tests {
         Ok((
             directory,
             RepositoryView {
+                history_snapshot: None,
                 mode: HistoryMode::Lineage,
                 stale: false,
                 snapshot,
@@ -2328,6 +2332,30 @@ mod tests {
             .into_iter()
             .find(|file| file.path == "file.txt")
             .expect("file");
+        let aggregate = cx
+            .update(|window, cx| {
+                KkMultiDiff::open(
+                    snapshot.clone(),
+                    super::super::super::kk_diff::DiffTarget::change(&source),
+                    vec![file.clone()],
+                    false,
+                    workspace.downgrade(),
+                    DiffOpenMode::Open,
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("source aggregate");
+        cx.condition(&aggregate, |aggregate, _| !aggregate.loading)
+            .await;
+        let source_diff = aggregate.read_with(cx, |aggregate, _| {
+            aggregate
+                .diff_entries()
+                .first()
+                .expect("loaded source diff")
+                .clone()
+        });
         if reject_move {
             std::fs::write(fixture.root.join("file.txt"), "external edit\n")
                 .expect("external change");
@@ -2349,6 +2377,10 @@ mod tests {
                 Vec::new(),
                 cx,
             );
+            assert!(
+                source_diff.read(cx).has_pending_classification(),
+                "aggregate source projects the transfer before any remote request completes"
+            );
             let mut rows = Vec::new();
             panel.mutation_previews.project(
                 &panel.repositories[0],
@@ -2365,6 +2397,8 @@ mod tests {
         });
         let outcome = moved.await;
         assert_eq!(outcome.is_err(), reject_move);
+        cx.condition(&source_diff, |diff, _| !diff.has_pending_classification())
+            .await;
         cx.condition(&panel, |panel, _| {
             panel.file_batches.is_empty() && panel.pending_writes == 0 && !panel.loading
         })
@@ -3558,6 +3592,7 @@ mod tests {
                     anyhow::Ok((
                         directory,
                         RepositoryView {
+                            history_snapshot: None,
                             mode: HistoryMode::Lineage,
                             stale: false,
                             snapshot,
@@ -4820,7 +4855,7 @@ impl TreeProjection {
             // Reuse presentation while advancing write preconditions to the latest snapshot.
             for row in &mut current_rows {
                 if let TreeRowKind::File(file) = &mut row.kind {
-                    file.snapshot = repository.snapshot.clone();
+                    file.snapshot = repository.snapshot_for_target(&file.target);
                 }
             }
             if reusable {

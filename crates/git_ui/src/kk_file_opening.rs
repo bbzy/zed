@@ -664,6 +664,7 @@ mod tests {
             .expect("panel");
         let snapshot = panel.update(cx, |panel, cx| {
             panel.repositories = vec![super::super::RepositoryView {
+                history_snapshot: None,
                 mode: kk_workbench::HistoryMode::Lineage,
                 stale: false,
                 snapshot: snapshot.clone(),

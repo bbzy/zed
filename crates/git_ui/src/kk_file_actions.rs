@@ -108,7 +108,7 @@ impl FileRow {
                 source: source_identity,
                 path: file.path.clone(),
             },
-            snapshot: repository.snapshot.clone(),
+            snapshot: repository.snapshot_for_target(&target),
             target,
             file,
             working_copy,
@@ -671,6 +671,7 @@ mod tests {
                 .expect("working copy");
             let target = super::super::super::kk_diff::DiffTarget::change(revision);
             let repository = RepositoryView {
+                history_snapshot: None,
                 mode: HistoryMode::Lineage,
                 stale: false,
                 snapshot,

@@ -219,6 +219,7 @@ impl FileMutationRequest {
 }
 
 pub(super) struct FileMutationJob {
+    pub previews: Vec<QueuedPreview>,
     pub request: FileMutationRequest,
     pub preview_id: Option<u64>,
     completions: Rc<RefCell<Vec<oneshot::Sender<Result<Snapshot, ClassificationFailure>>>>>,
@@ -232,6 +233,7 @@ impl FileMutationJob {
         dependencies: Vec<WriteDependency>,
     ) -> Self {
         Self {
+            previews: Vec::new(),
             request,
             preview_id: None,
             completions: Rc::new(RefCell::new(vec![completion])),

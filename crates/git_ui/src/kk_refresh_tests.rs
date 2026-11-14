@@ -262,6 +262,7 @@ async fn kk_refresh_cached_repositories_load_before_discovery_finishes(cx: &mut 
         .expect("repository");
     let snapshot = repository.snapshot(true).await.expect("snapshot");
     request.previous.push(RepositoryView {
+        history_snapshot: None,
         mode: HistoryMode::Lineage,
         stale: false,
         snapshot,

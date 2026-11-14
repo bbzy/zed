@@ -50,7 +50,7 @@ mod list_preview;
 mod refresh;
 #[path = "kk_refresh_demand.rs"]
 mod refresh_demand;
-use futures::StreamExt as _;
+use futures::{FutureExt as _, StreamExt as _};
 use list_preview::{ListPreviews, MutationPreviews};
 use refresh::{RefreshEvent, RefreshRequest, RepositoryRefresh};
 use refresh_demand::RefreshDemand;
@@ -86,6 +86,7 @@ actions!(
 
 #[derive(Clone)]
 struct RepositoryView {
+    history_snapshot: Option<Snapshot>,
     mode: HistoryMode,
     stale: bool,
     snapshot: Snapshot,
@@ -96,6 +97,20 @@ struct RepositoryView {
 }
 
 impl RepositoryView {
+    fn snapshot_for_target(&self, target: &super::kk_diff::DiffTarget) -> Snapshot {
+        if let Some(comparison) = &self.comparison
+            && (matches!(target.scope, DiffScope::Comparison { .. })
+                || matches!(&target.scope, DiffScope::Change(commit) if comparison.sources.contains(commit)))
+            && let Some(snapshot) = &comparison.snapshot
+        {
+            return snapshot.clone();
+        }
+        self.history_snapshot
+            .as_ref()
+            .unwrap_or(&self.snapshot)
+            .clone()
+    }
+
     fn same_content(&self, other: &Self) -> bool {
         self.mode == other.mode
             && self.stale == other.stale
@@ -234,6 +249,7 @@ pub struct KkPanel {
     refresh_queued: bool,
     refresh_demand: RefreshDemand,
     error: Option<String>,
+    refresh_error: Option<String>,
     refresh_task: Task<()>,
     refresh_sequence: u64,
     refreshing_repositories: HashSet<PathBuf>,
@@ -399,6 +415,14 @@ pub fn init(cx: &mut App) {
 }
 
 impl KkPanel {
+    pub(super) fn snapshot_for_path(&self, path: &Path) -> Option<Snapshot> {
+        self.repositories
+            .iter()
+            .filter(|view| path.starts_with(view.snapshot.repository().root()))
+            .max_by_key(|view| view.snapshot.repository().root().components().count())
+            .map(|view| view.snapshot.clone())
+    }
+
     pub(super) fn diagnostics(&self, cx: &App) -> kk_workbench::Diagnostics {
         self.output.read(cx).diagnostics().clone()
     }
@@ -459,6 +483,7 @@ impl KkPanel {
                         refresh_queued: false,
                         refresh_demand: RefreshDemand::new(window.window_handle()),
                         error: None,
+                        refresh_error: None,
                         refresh_task: Task::ready(()),
                         refresh_sequence: 0,
                         refreshing_repositories: HashSet::new(),
@@ -740,6 +765,7 @@ impl KkPanel {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.error = self.refresh_error.clone();
         self.loading = true;
         if !self.refresh_queued {
             self.refresh_queued = true;
@@ -902,6 +928,7 @@ impl KkPanel {
                                     *completion,
                                     &confirmed_list_previews,
                                     &confirmed_mutations,
+                                    refresh_open_diffs,
                                     cx,
                                 );
                                 if errors.is_empty() {
@@ -998,6 +1025,99 @@ impl KkPanel {
         cx.notify();
     }
 
+    fn refresh_repository(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        let Some(previous) = self
+            .repositories
+            .iter()
+            .find(|view| view.snapshot.repository().root() == root)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let remote = workspace
+            .read(cx)
+            .project()
+            .read(cx)
+            .kk_workbench_client(cx);
+        let (comparison_store, pending_writes, comparison_host) = self.comparison_state.reader();
+        let mode = self.mode;
+        let request = RefreshRequest {
+            paths: Vec::new(),
+            remote,
+            executable: KkWorkbenchSettings::get_global(cx).executable_path.clone(),
+            previous: vec![previous.clone()],
+            mode,
+            history_limits: self.history_limits.clone(),
+            uncertain: self.uncertain_operations.clone(),
+            comparison_store,
+            comparison_host,
+            diagnostics: self.diagnostics(cx),
+            performance_context: None,
+        };
+        self.loading = true;
+        self.refresh_demand.refresh_open_diffs = true;
+        self.refreshing_repositories.insert(root.clone());
+        let repository = previous.snapshot.repository().clone();
+        let sequence = self.refresh_sequence;
+        let confirmed_previews = self.list_previews.confirmed();
+        let confirmed_mutations = self.mutation_previews.confirmed();
+        let key = format!("refresh:{}", root.display());
+        let task_key = key.clone();
+        let task = cx.spawn(async move |this, cx| {
+            pending_writes.await;
+            let event = cx
+                .background_spawn(async move { request.load(repository, true).await })
+                .await;
+            this.update(cx, |this, cx| {
+                this.load_tasks.remove(&task_key);
+                if this.refresh_sequence != sequence {
+                    return;
+                }
+                this.refreshing_repositories.remove(&root);
+                this.loading = !this.refreshing_repositories.is_empty();
+                if !this.repository_is_open(&root, cx) {
+                    cx.notify();
+                    return;
+                }
+                if this.mode != mode
+                    || this
+                        .repositories
+                        .iter()
+                        .find(|view| view.snapshot.repository().root() == root)
+                        .is_some_and(|view| {
+                            view.snapshot.operation() != previous.snapshot.operation()
+                                || !view.same_content(&previous)
+                        })
+                {
+                    this.refresh_repository(root, cx);
+                    return;
+                }
+                if let RefreshEvent::Loaded(completion) = event {
+                    let errors = this.apply_repository_refresh(
+                        *completion,
+                        &confirmed_previews,
+                        &confirmed_mutations,
+                        true,
+                        cx,
+                    );
+                    if errors.is_empty() {
+                        this.refresh_errors.remove(&root);
+                    } else {
+                        this.refresh_errors.insert(root, errors);
+                    }
+                    this.update_refresh_errors();
+                    this.schedule_focused_refresh(cx);
+                    cx.notify();
+                }
+            })
+            .log_err();
+        });
+        self.load_tasks.insert(key, task);
+    }
+
     fn update_refresh_errors(&mut self) {
         let mut errors = self
             .refresh_errors
@@ -1008,7 +1128,11 @@ impl KkPanel {
             .collect::<Vec<_>>();
         errors.sort();
         errors.dedup();
-        self.error = (!errors.is_empty()).then(|| errors.join("\n"));
+        let error = (!errors.is_empty()).then(|| errors.join("\n"));
+        if self.error.is_none() || self.error == self.refresh_error {
+            self.error = error.clone();
+        }
+        self.refresh_error = error;
     }
 
     fn apply_repository_refresh(
@@ -1016,6 +1140,7 @@ impl KkPanel {
         completion: RepositoryRefresh,
         confirmed_list_previews: &HashSet<u64>,
         confirmed_mutations: &HashSet<u64>,
+        refresh_open_diffs: bool,
         cx: &mut Context<Self>,
     ) -> Vec<String> {
         let RepositoryRefresh {
@@ -1085,7 +1210,12 @@ impl KkPanel {
         for view in &mut views {
             let root = view.snapshot.repository().root().to_owned();
             let lifetime = self.repository_lifetimes.entry(root).or_default().clone();
-            view.snapshot = view.snapshot.with_lifetime(Some(lifetime));
+            view.snapshot = view.snapshot.with_lifetime(Some(lifetime.clone()));
+            if let Some(comparison) = &mut view.comparison
+                && let Some(snapshot) = &comparison.snapshot
+            {
+                comparison.snapshot = Some(snapshot.with_lifetime(Some(lifetime)));
+            }
         }
 
         for (root, applied, snapshot) in settled {
@@ -1203,9 +1333,7 @@ impl KkPanel {
                 );
             }
         }
-        if self.refresh_demand.refresh_open_diffs
-            && let Some(workspace) = self.workspace.upgrade()
-        {
+        if refresh_open_diffs && let Some(workspace) = self.workspace.upgrade() {
             let diffs = workspace
                 .read(cx)
                 .items_of_type::<KkDiff>(cx)
@@ -1278,7 +1406,15 @@ impl KkPanel {
         let Some(repository) = self.repositories.get_mut(repository_index) else {
             return;
         };
-        let snapshot = repository.snapshot.clone();
+        let snapshot = if comparison {
+            repository.snapshot.clone()
+        } else {
+            repository
+                .history_snapshot
+                .as_ref()
+                .unwrap_or(&repository.snapshot)
+                .clone()
+        };
         let root = snapshot.repository().root().to_owned();
         let operation = snapshot.operation().to_owned();
         self.selected_change = Some((
@@ -1292,6 +1428,7 @@ impl KkPanel {
             format!("commit:{}:{}", root.display(), revision.full_commit_id)
         };
         if comparison {
+            self.load_tasks.remove(&key);
             let comparison = Comparison::new(&revision);
             self.comparison_state.save(
                 repository.snapshot.repository().root(),
@@ -1299,7 +1436,15 @@ impl KkPanel {
                 cx,
                 Self::show_error,
             );
-            repository.comparison = Some(comparison);
+            if let Some(cached) = Comparison::cached(&snapshot, comparison.intent.clone()) {
+                repository.comparison = Some(cached);
+                cx.notify();
+                return;
+            }
+            repository.comparison = Some(
+                Comparison::previously_cached(&snapshot, comparison.intent.clone())
+                    .unwrap_or(comparison),
+            );
         } else {
             if repository
                 .expanded
@@ -1311,15 +1456,22 @@ impl KkPanel {
                 return;
             }
 
+            if let Some(files) = snapshot.cached(&kk_workbench::remote::Read::ChangedFiles {
+                scope: DiffScope::Change(revision.full_commit_id.clone()),
+            }) {
+                repository.expanded.insert(
+                    revision.full_commit_id.clone(),
+                    RevisionFiles::Loaded(files),
+                );
+                cx.notify();
+                return;
+            }
             repository
                 .expanded
                 .insert(revision.full_commit_id.clone(), RevisionFiles::Loading);
         }
 
-        let intent = repository
-            .comparison
-            .as_ref()
-            .map(|comparison| comparison.intent.clone());
+        let intent = comparison.then(|| Comparison::new(&revision).intent);
         let task_key = key.clone();
         let task = cx.spawn(async move |this, cx| {
             let revision_for_read = revision.clone();
@@ -1343,7 +1495,11 @@ impl KkPanel {
                 this.load_tasks.remove(&task_key);
                 let Some(repository) = this.repositories.iter_mut().find(|repository| {
                     repository.snapshot.repository().root() == root
-                        && repository.snapshot.operation() == operation
+                        && (repository.snapshot.operation() == operation
+                            || repository
+                                .history_snapshot
+                                .as_ref()
+                                .is_some_and(|snapshot| snapshot.operation() == operation))
                 }) else {
                     return;
                 };
@@ -1708,6 +1864,34 @@ impl KkPanel {
 
         self.model_generation += 1;
         self.mode = mode;
+        for repository in &mut self.repositories {
+            let limit = self
+                .history_limits
+                .get(repository.snapshot.repository().root())
+                .copied()
+                .unwrap_or(50);
+            let query = kk_workbench::remote::Read::HistoryContaining {
+                mode,
+                limit,
+                targets: Vec::new(),
+            };
+            let cached = repository
+                .snapshot
+                .cached::<(HistoryPage, Vec<Revision>)>(&query)
+                .map(|data| (None, data))
+                .or_else(|| {
+                    repository
+                        .snapshot
+                        .previously_cached(&query)
+                        .map(|(snapshot, data)| (Some(snapshot), data))
+                });
+            if let Some((snapshot, (history, targets))) = cached {
+                repository.history = history;
+                repository.history_targets = targets;
+                repository.history_snapshot = snapshot;
+                repository.mode = mode;
+            }
+        }
         self.pending_history_mode = Some(mode);
         self.history_preference.set(mode, cx, Self::show_error);
         self.refresh(cx);
@@ -1749,7 +1933,7 @@ impl KkPanel {
         let Some(repository) = self.repositories.get(repository_index) else {
             return;
         };
-        let snapshot = repository.snapshot.clone();
+        let snapshot = repository.snapshot_for_target(&target);
         self.error = None;
         cx.notify();
         if file.has_conflict {
@@ -2081,6 +2265,22 @@ impl KkPanel {
         })
     }
 
+    fn open_diff_views(&self, cx: &App) -> Vec<Entity<KkDiff>> {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return Vec::new();
+        };
+        let workspace = workspace.read(cx);
+        let mut views = workspace.items_of_type::<KkDiff>(cx).collect::<Vec<_>>();
+        for aggregate in workspace.items_of_type::<KkMultiDiff>(cx) {
+            for entry in aggregate.read(cx).diff_entries() {
+                if !views.contains(entry) {
+                    views.push(entry.clone());
+                }
+            }
+        }
+        views
+    }
+
     fn classify_files_result(
         &mut self,
         snapshot: Snapshot,
@@ -2092,10 +2292,8 @@ impl KkPanel {
     ) -> Task<Result<Snapshot, ClassificationFailure>> {
         let mut previews = Vec::new();
         let mut views = Vec::new();
-        if let Some(direction) = self.classification_direction(&snapshot, &target, category)
-            && let Some(workspace) = self.workspace.upgrade()
-        {
-            let opened: Vec<_> = workspace.read(cx).items_of_type::<KkDiff>(cx).collect();
+        if let Some(direction) = self.classification_direction(&snapshot, &target, category) {
+            let opened = self.open_diff_views(cx);
             for file in files.iter().filter(|file| file.ranges.is_none()) {
                 for view in &opened {
                     if !view
@@ -2300,6 +2498,7 @@ impl KkPanel {
         ));
         self.pending_writes += 1;
         self.pending_status = "Splitting out…";
+        self.error = self.refresh_error.clone();
         self.operation_error = None;
         cx.notify();
         let start = self
@@ -2406,7 +2605,7 @@ impl KkPanel {
                             };
                             (result, original, completions, previews)
                         }
-                        RepositoryJob::File(job) => {
+                        RepositoryJob::File(mut job) => {
                             let mut request = job.request.clone();
                             request.snapshot = request.snapshot.with_performance_context(execution.context().cloned());
                             let original = request.snapshot.clone();
@@ -2440,7 +2639,7 @@ impl KkPanel {
                                 let published_snapshot = publication.as_ref().map(|publication| publication.snapshot.clone());
                                 anyhow::Ok(ClassificationCompletion { snapshot: published_snapshot.clone().unwrap_or(snapshot), publication, published_snapshot })
                             }.await;
-                            (result, original, job.take_completions(), Vec::new())
+                            (result, original, job.take_completions(), std::mem::take(&mut job.previews))
                         }
                         RepositoryJob::Edit(job) => {
                             let original = job.snapshot.clone();
@@ -2533,7 +2732,7 @@ impl KkPanel {
                                     this.pending_writes = this.pending_writes.saturating_sub(1);
                                     if !list_previews.is_empty() || !mutation_previews.is_empty() {
                                         this.model_generation += 1;
-                                        this.refresh(cx);
+                                        this.refresh_repository(root.clone(), cx);
                                     }
                                     cx.notify();
                                 }
@@ -2577,7 +2776,7 @@ impl KkPanel {
                     self.uncertain_operations
                         .insert(root.clone(), result.receipt);
                     self.operation_error = Some((
-                        root,
+                        root.clone(),
                         format!(
                             "The operation was published, but the workspace could not be synchronized: {error}"
                         ),
@@ -2585,7 +2784,7 @@ impl KkPanel {
                 }
 
                 self.model_generation += 1;
-                self.refresh(cx);
+                self.refresh_repository(root, cx);
             }
             Err(error) => {
                 self.diagnostics(cx)
@@ -2599,7 +2798,7 @@ impl KkPanel {
                     Some((root.clone(), format!("{}: {error:#}", root.display())));
                 if error.downcast_ref::<UncertainPublication>().is_none() {
                     self.model_generation += 1;
-                    self.refresh(cx);
+                    self.refresh_repository(root, cx);
                 }
             }
         }
@@ -3014,6 +3213,45 @@ impl KkPanel {
             }));
         }
 
+        let mut views = Vec::new();
+        let mut previews = Vec::new();
+        if let FileMutationAction::Move(direction) = request.action {
+            let direction = match direction {
+                FileMoveDirection::Parent => kk_workbench::TransferDirection::Backward,
+                FileMoveDirection::Child => kk_workbench::TransferDirection::Forward,
+            };
+            for view in self.open_diff_views(cx) {
+                if view.read(cx).has_pending_classification()
+                    || !view.read(cx).matches_classification(
+                        &request.snapshot,
+                        &request.target,
+                        &request.file,
+                    )
+                {
+                    continue;
+                }
+                match view.update(cx, |view, cx| view.preview_whole_file(direction, cx)) {
+                    Ok(preview) => {
+                        views.push((view.downgrade(), preview.id));
+                        previews.push(preview);
+                    }
+                    Err(error) => {
+                        let failure = ClassificationFailure {
+                            message: format!("{error:#}"),
+                            uncertain: false,
+                        };
+                        for (view, id) in views {
+                            view.update(cx, |view, cx| {
+                                view.finish_classification_preview(id, Err(failure.clone()), cx)
+                            })
+                            .log_err();
+                        }
+                        self.show_error(failure.message.clone(), cx);
+                        return Task::ready(Err(failure));
+                    }
+                }
+            }
+        }
         let (completion, completed) = futures::channel::oneshot::channel();
         self.pending_writes += 1;
         self.pending_status = request.action.label();
@@ -3026,6 +3264,7 @@ impl KkPanel {
             .map(|repository| self.mutation_previews.file(repository, &request));
         let mut job = FileMutationJob::new(request, completion, dependencies);
         job.preview_id = preview_id;
+        job.previews = previews;
         let start = self
             .write_queues
             .entry(root.clone())
@@ -3036,12 +3275,26 @@ impl KkPanel {
         }
 
         cx.notify();
-        cx.spawn(async move |_, _| {
-            completed.await.map_err(|error| ClassificationFailure {
-                message: format!("File operation outcome was not confirmed: {error}"),
-                uncertain: true,
-            })?
+        let completed = cx
+            .spawn(async move |_, _| {
+                completed.await.map_err(|error| ClassificationFailure {
+                    message: format!("File operation outcome was not confirmed: {error}"),
+                    uncertain: true,
+                })?
+            })
+            .shared();
+        let observe = completed.clone();
+        cx.spawn(async move |_, cx| {
+            let outcome = observe.await;
+            for (view, id) in views {
+                view.update(cx, |view, cx| {
+                    view.finish_classification_preview(id, outcome.clone(), cx)
+                })
+                .log_err();
+            }
         })
+        .detach();
+        cx.spawn(async move |_, _| completed.await)
     }
 
     fn file_menu(
@@ -3538,6 +3791,93 @@ mod tests {
     }
 
     #[gpui::test(iterations = 3)]
+    async fn kk_cache_expansion_comparison_and_mode_are_visible_before_background_work(
+        cx: &mut TestAppContext,
+    ) {
+        cx.background_executor.allow_parking();
+        let (directory, snapshot, newer, revision, ancestor) = cx
+            .background_spawn(async {
+                let directory = tempfile::tempdir()?;
+                run_kk(directory.path(), &["init", "."]).await?;
+                std::fs::write(directory.path().join("file.txt"), "before\n")?;
+                run_kk(directory.path(), &["new", "-m", "changes"]).await?;
+                std::fs::write(directory.path().join("file.txt"), "after\n")?;
+                let repository =
+                    kk_workbench::Repository::open(directory.path(), Path::new("kk")).await?;
+                let snapshot = repository.snapshot(true).await?;
+                let history = snapshot.history(HistoryMode::Lineage, 50).await?;
+                let revision = history
+                    .revisions
+                    .iter()
+                    .find(|revision| revision.is_working_copy)
+                    .expect("working copy")
+                    .clone();
+                let ancestor = snapshot.exact_revision("@-").await?;
+                snapshot
+                    .changed_files(&DiffScope::Change(revision.full_commit_id.clone()))
+                    .await?;
+                Comparison::load(&snapshot, Comparison::new(&ancestor).intent).await?;
+                for mode in [HistoryMode::Lineage, HistoryMode::Log] {
+                    snapshot.history_containing(mode, 50, &[]).await?;
+                }
+                std::fs::write(directory.path().join("unrelated.txt"), "later\n")?;
+                let newer = snapshot.repository().snapshot(true).await?;
+                anyhow::Ok((directory, snapshot, newer, revision, ancestor))
+            })
+            .await
+            .expect("cached fixture");
+        let root = snapshot.repository().root().to_owned();
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            init(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(&root, serde_json::json!({"file.txt": "after\n"}))
+            .await;
+        let project = Project::test(fs, [root.as_path()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |view, _| view.workspace().clone());
+        let panel = cx
+            .update(|window, cx| KkPanel::load(workspace.downgrade(), window.to_async(cx)))
+            .await
+            .expect("panel");
+        panel
+            .update(cx, |panel, cx| panel.refresh_for_test(cx))
+            .await;
+        panel.update(cx, |panel, cx| {
+            let snapshot = snapshot.with_lifetime(panel.repositories[0].snapshot.repository().lifetime().cloned());
+            panel.repositories[0].snapshot = snapshot;
+            panel.repositories[0].expanded.clear();
+            panel.load_files(0, revision.clone(), false, cx);
+            assert!(matches!(panel.repositories[0].expanded.get(&revision.full_commit_id), Some(RevisionFiles::Loaded(files)) if files.len() == 1));
+            assert!(!panel.load_tasks.contains_key(&format!("commit:{}:{}", root.display(), revision.full_commit_id)));
+            panel.load_files(0, revision.clone(), false, cx);
+            assert!(!panel.repositories[0].expanded.contains_key(&revision.full_commit_id));
+            panel.load_files(0, revision.clone(), false, cx);
+            assert!(matches!(panel.repositories[0].expanded.get(&revision.full_commit_id), Some(RevisionFiles::Loaded(_))));
+            panel.load_files(0, ancestor.clone(), true, cx);
+            assert_eq!(panel.repositories[0].comparison.as_ref().expect("cached comparison").files.len(), 1);
+            panel.close_repository_comparison(0, cx);
+            panel.load_files(0, ancestor.clone(), true, cx);
+            assert_eq!(panel.repositories[0].comparison.as_ref().expect("reopened comparison").files.len(), 1);
+            panel.repositories[0].snapshot = newer.with_lifetime(panel.repositories[0].snapshot.repository().lifetime().cloned());
+            panel.close_repository_comparison(0, cx);
+            panel.load_files(0, ancestor.clone(), true, cx);
+            assert_eq!(panel.repositories[0].comparison.as_ref().expect("previous comparison").files.len(), 1);
+            assert_ne!(panel.repositories[0].comparison.as_ref().expect("previous comparison").snapshot.as_ref().expect("tagged source").operation(), panel.repositories[0].snapshot.operation());
+            panel.set_mode(HistoryMode::Log, cx);
+            assert_eq!(panel.repositories[0].mode, HistoryMode::Log);
+            panel.set_mode(HistoryMode::Lineage, cx);
+            assert_eq!(panel.repositories[0].mode, HistoryMode::Lineage);
+        });
+        cx.condition(&panel, |panel, _| !panel.loading).await;
+        drop(directory);
+    }
+
+    #[gpui::test(iterations = 3)]
     async fn kk_history_reveal_keeps_order_mode_and_branch_context(cx: &mut TestAppContext) {
         cx.background_executor.allow_parking();
         let (directory, target, middle, ancestor) = cx
@@ -3961,7 +4301,6 @@ mod tests {
         })
         .await
         .expect("make repository stale");
-        let previous = panel.read_with(cx, |panel, _| history_ids(panel));
         panel.update(cx, |panel, cx| panel.set_mode(HistoryMode::Lineage, cx));
         cx.condition(&panel, |panel, _| !panel.loading).await;
         panel.read_with(cx, |panel, _| {
@@ -3969,8 +4308,8 @@ mod tests {
             assert_eq!(panel.history_preference.mode, HistoryMode::Lineage);
             for (index, view) in panel.repositories.iter().enumerate() {
                 if view.snapshot.repository().root() == roots[1] {
-                    assert_eq!(view.mode, HistoryMode::Log);
-                    assert_eq!(history_ids(panel)[index], previous[index]);
+                    assert_eq!(view.mode, HistoryMode::Lineage);
+                    assert_eq!(history_ids(panel)[index], original[index]);
                     assert!(view.stale);
                 } else {
                     assert_eq!(view.mode, HistoryMode::Lineage);
@@ -4132,6 +4471,7 @@ mod tests {
         };
         panel.update(cx, |panel, _| {
             panel.repositories = vec![RepositoryView {
+                history_snapshot: None,
                 mode: HistoryMode::Lineage,
                 stale: false,
                 snapshot,
@@ -4379,6 +4719,7 @@ mod tests {
         assert!(!buffer.read_with(cx, |buffer, _| buffer.is_dirty()));
         panel.update(cx, |panel, cx| {
             panel.repositories = vec![RepositoryView {
+                history_snapshot: None,
                 mode: HistoryMode::Lineage,
                 stale: false,
                 snapshot: panel
@@ -4471,11 +4812,10 @@ mod tests {
             native_diff.read_with(cx, |diff, cx| diff.base_text_buffer().read(cx).text()),
             "saved\n"
         );
-        panel
-            .update(cx, |panel, _| {
-                std::mem::replace(&mut panel.refresh_task, Task::ready(()))
-            })
-            .await;
+        cx.condition(&panel, |panel, _| {
+            !panel.loading && panel.pending_writes == 0
+        })
+        .await;
         panel.read_with(cx, |panel, _| {
             assert_eq!(panel.pending_writes, 0);
             assert!(
@@ -4538,11 +4878,10 @@ mod tests {
             })
             .await;
         cx.run_until_parked();
-        panel
-            .update(cx, |panel, _| {
-                std::mem::replace(&mut panel.refresh_task, Task::ready(()))
-            })
-            .await;
+        cx.condition(&panel, |panel, _| {
+            !panel.loading && panel.pending_writes == 0
+        })
+        .await;
         let (snapshot, comparison) = panel.read_with(cx, |panel, _| {
             assert!(
                 panel.operation_error.is_none(),
@@ -4621,11 +4960,10 @@ mod tests {
         cx.simulate_prompt_answer("Revert File");
         revert.await;
         cx.run_until_parked();
-        panel
-            .update(cx, |panel, _| {
-                std::mem::replace(&mut panel.refresh_task, Task::ready(()))
-            })
-            .await;
+        cx.condition(&panel, |panel, _| {
+            !panel.loading && panel.pending_writes == 0
+        })
+        .await;
         panel.read_with(cx, |panel, _| {
             assert!(
                 panel.operation_error.is_none(),
