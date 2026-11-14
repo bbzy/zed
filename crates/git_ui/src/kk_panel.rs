@@ -23,7 +23,6 @@ use kk_workbench::{
     HistoryMode, HistoryPage, OperationReceipt, Publication, PublicationStatus, Revision, Snapshot,
     UncertainPublication, discover_with_diagnostics, history_graph,
 };
-use notifications::status_toast::StatusToast;
 use settings::{Settings, SettingsStore};
 use std::{
     collections::{HashMap, HashSet},
@@ -155,14 +154,12 @@ impl KkStatus {
             previous_errors = errors;
             if !messages.is_empty() {
                 let workspace = state.workspace.clone();
-                let panel = panel.downgrade();
                 let message = messages.join("\n");
                 // Workspace may be updating the panel when this observer runs.
                 cx.defer(move |cx| {
                     if let Some(workspace) = workspace.upgrade() {
-                        let toast = Self::error_toast(panel, message, cx);
                         workspace.update(cx, |workspace, cx| {
-                            workspace.toggle_status_toast(toast, cx);
+                            workspace.show_error(message, cx);
                         });
                     }
                 });
@@ -173,35 +170,6 @@ impl KkStatus {
             panel: panel.downgrade(),
             _subscription: subscription,
         }
-    }
-
-    fn error_toast(
-        panel: WeakEntity<KkPanel>,
-        message: String,
-        cx: &mut App,
-    ) -> Entity<StatusToast> {
-        let summary: String = message
-            .lines()
-            .next()
-            .unwrap_or("KK operation failed")
-            .chars()
-            .take(100)
-            .collect();
-        StatusToast::new(format!("KK: {summary}"), cx, |toast, _| {
-            toast
-                .icon(
-                    Icon::new(IconName::XCircle)
-                        .size(IconSize::Small)
-                        .color(Color::Error),
-                )
-                .dismiss_button(true)
-                .auto_dismiss(false)
-                .action("View Output", move |window, cx| {
-                    if let Some(panel) = panel.upgrade() {
-                        panel.update(cx, |panel, cx| panel.show_output(window, cx));
-                    }
-                })
-        })
     }
 }
 

@@ -10,7 +10,7 @@ use project::{FakeFs, Project};
 use remote::RemoteClient;
 use remote_server::{HeadlessAppState, HeadlessProject};
 use std::sync::Arc;
-use workspace::MultiWorkspace;
+use workspace::{MultiWorkspace, notifications::simple_message_notification::MessageNotification};
 
 pub(crate) struct RemoteFixture {
     pub directory: tempfile::TempDir,
@@ -185,17 +185,37 @@ async fn run_remote_panel(cx: &mut TestAppContext, server_cx: &mut TestAppContex
         cx.notify();
     });
     cx.run_until_parked();
-    let layer = cx.update(|_, cx| {
-        let toast = KkStatus::error_toast(panel.downgrade(), "Test failure".into(), cx);
-        assert!(!workspace::ToastView::auto_dismiss(toast.read(cx)));
-        let layer = cx.new(|_| workspace::ToastLayer::new());
-        layer.update(cx, |layer, cx| layer.show_toast(toast.clone(), cx));
-        assert!(layer.read(cx).has_active_toast());
-        toast.update(cx, |_, cx| cx.emit(DismissEvent));
-        layer
-    });
+    let message = format!(
+        "Test failure: {}\nFull failure details",
+        "details".repeat(20)
+    );
+    panel.update(cx, |panel, cx| panel.show_error(message.clone(), cx));
     cx.run_until_parked();
-    assert!(!layer.read_with(cx, |layer, _| layer.has_active_toast()));
+    let notification_id = workspace::notifications::NotificationId::unique::<String>();
+    let notification = workspace.read_with(cx, |workspace, cx| {
+        let expected_message: SharedString = message.clone().into();
+        assert!(workspace.has_notification(&notification_id));
+        let notification = workspace
+            .notification_views()
+            .into_iter()
+            .find_map(|view| view.downcast::<MessageNotification>().ok())
+            .expect("standard error notification");
+        assert_eq!(notification.read(cx).copied_text(), Some(&expected_message));
+        notification
+    });
+    panel.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert!(workspace.read_with(cx, |workspace, _| {
+        workspace
+            .notification_views()
+            .iter()
+            .any(|view| view.entity_id() == notification.entity_id())
+    }));
+    notification.update(cx, |notification, cx| notification.dismiss(cx));
+    cx.run_until_parked();
+    assert!(!workspace.read_with(cx, |workspace, _| {
+        workspace.has_notification(&notification_id)
+    }));
     let parent = snapshot.exact_revision("@-").await?;
     let comparison = Comparison::load(&snapshot, Comparison::new(&parent).intent).await?;
     let file = comparison.files.first().context("changed file")?.clone();

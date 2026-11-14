@@ -16321,7 +16321,7 @@ mod tests {
         .await;
         panel.update_in(&mut cx, |panel, window, cx| {
             assert!(!panel.entries.is_empty());
-            panel.schedule_visible_entries_update(window, cx);
+            panel.update_visible_entries(window, cx);
         });
         cx.update(|_, cx| {
             SettingsStore::update_global(cx, |store, cx| {
