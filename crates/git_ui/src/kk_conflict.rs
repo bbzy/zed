@@ -1193,11 +1193,7 @@ impl KkConflict {
         };
         let text = std::str::from_utf8(&input.bytes).map(str::to_owned);
         let base = std::str::from_utf8(&base.bytes).map(Arc::<str>::from);
-        let title = format!(
-            "{} · Base 1 ↔ {}",
-            self.draft.conflict.path,
-            self.input_title(role, index)
-        );
+        let title = format!("Base 1 ↔ {}", self.input_title(role, index));
         let path = self.draft.conflict.path.clone();
         let source = self.buffer.clone();
         let project = self.project.clone();
@@ -1451,7 +1447,12 @@ impl Render for KkConflict {
 impl Item for KkConflict {
     type Event = EditorEvent;
     fn tab_content_text(&self, _: usize, _: &App) -> SharedString {
-        format!("{} (Resolve conflict)", self.draft.conflict.path).into()
+        let path = &self.draft.conflict.path;
+        let name = path.rsplit('/').next().unwrap_or(path);
+        format!("{name} (Resolve conflict)").into()
+    }
+    fn tab_tooltip_text(&self, _: &App) -> Option<SharedString> {
+        Some(format!("{} (Resolve conflict)", self.draft.conflict.path).into())
     }
     fn tab_icon(&self, _: &Window, _: &App) -> Option<Icon> {
         Some(Icon::new(IconName::Warning).color(Color::Warning))
