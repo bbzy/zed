@@ -703,6 +703,7 @@ impl KkDiff {
         buffer: Entity<Buffer>,
         diff: Entity<BufferDiff>,
         base: Arc<str>,
+        position: Point,
         project: Entity<Project>,
         workspace: Entity<Workspace>,
         window: &mut Window,
@@ -745,27 +746,37 @@ impl KkDiff {
             window,
             cx,
         );
-        view.editor
-            .read(cx)
-            .rhs_editor()
-            .clone()
-            .update(cx, |editor, cx| {
-                let first = editor
-                    .buffer()
-                    .read(cx)
-                    .snapshot(cx)
-                    .diff_hunks()
-                    .next()
-                    .map(|hunk| Point::new(hunk.row_range.start.0, 0));
-                if let Some(position) = first {
-                    editor.change_selections(
-                        SelectionEffects::scroll(Autoscroll::center()),
-                        window,
-                        cx,
-                        |selections| selections.select_ranges([position..position]),
-                    );
-                }
+        cx.defer_in(window, move |view, window, cx| {
+            let position = view
+                .buffer
+                .read(cx)
+                .clip_point(position, editor::Bias::Left);
+            view.controls.update(cx, |controls, cx| {
+                controls.set_initial_position(view.buffer.read(cx).remote_id(), position, cx);
             });
+
+            view.editor
+                .read(cx)
+                .rhs_editor()
+                .clone()
+                .update(cx, |editor, cx| {
+                    let anchor =
+                        editor
+                            .buffer()
+                            .read(cx)
+                            .buffer_point_to_anchor(&view.buffer, position, cx);
+                    if let Some(anchor) = anchor {
+                        editor.change_selections(
+                            SelectionEffects::scroll(Autoscroll::center())
+                                .unfold()
+                                .nav_history(false),
+                            window,
+                            cx,
+                            |selections| selections.select_ranges([anchor..anchor]),
+                        );
+                    }
+                });
+        });
         view
     }
 
@@ -3715,13 +3726,38 @@ mod tests {
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
         let workspace = multi_workspace.read_with(cx, |view, _| view.workspace().clone());
         let prefix = "unchanged\n".repeat(100);
-        for (base, text) in [
+        for (base, text, showing_full_file, style) in [
             (format!("{prefix}old\n"), format!("{prefix}new\n")),
             (String::new(), "added\n".into()),
             ("removed\n".into(), String::new()),
             (String::new(), String::new()),
             ("same\n".into(), "same\n".into()),
-        ] {
+        ]
+        .into_iter()
+        .flat_map(|(base, text)| {
+            [
+                (true, DiffViewStyle::Unified),
+                (false, DiffViewStyle::Unified),
+                (true, DiffViewStyle::Split),
+                (false, DiffViewStyle::Split),
+            ]
+            .map(|(showing_full_file, style)| {
+                (base.clone(), text.clone(), showing_full_file, style)
+            })
+        }) {
+            cx.update(|_, cx| {
+                cx.update_global::<SettingsStore, _>(|store, cx| {
+                    store.update_user_settings(cx, |settings| {
+                        settings.editor.diff_view_style = Some(style);
+                        settings
+                            .git
+                            .get_or_insert_default()
+                            .file_diff
+                            .get_or_insert_default()
+                            .show_full_file = Some(showing_full_file);
+                    });
+                });
+            });
             let base: Arc<str> = base.into();
             let buffer = cx.new(|cx| {
                 let mut buffer = Buffer::local(text, cx);
@@ -3748,12 +3784,14 @@ mod tests {
                     buffer,
                     diff,
                     base,
+                    Point::new(30, 2),
                     project.clone(),
                     workspace.clone(),
                     window,
                     cx,
                 )
             });
+            cx.run_until_parked();
             view.update_in(cx, |view, window, cx| {
                 assert!(view.snapshot.is_none());
                 assert_eq!(view.capability(cx), Capability::ReadOnly);
@@ -3761,16 +3799,17 @@ mod tests {
                 let editor = view.editor.read(cx).rhs_editor().clone();
                 editor.update(cx, |editor, cx| {
                     let snapshot = editor.buffer().read(cx).snapshot(cx);
-                    if let Some(first) = snapshot.diff_hunks().next() {
-                        assert_eq!(
-                            editor
-                                .selections
-                                .newest::<Point>(&editor.display_snapshot(cx))
-                                .head()
-                                .row,
-                            first.row_range.start.0
-                        );
-                    }
+                    let head = editor.selections.newest_anchor().head();
+                    let (anchor, buffer) = snapshot
+                        .anchor_to_buffer_anchor(head)
+                        .expect("cursor buffer");
+                    assert_eq!(
+                        anchor.to_point(buffer),
+                        view.buffer
+                            .read(cx)
+                            .clip_point(Point::new(30, 2), editor::Bias::Left),
+                        "full file: {showing_full_file}, style: {style:?}"
+                    );
                 });
                 view.controls.update(cx, |controls, cx| {
                     controls.set_full_file(true, window, cx);
@@ -3782,6 +3821,8 @@ mod tests {
                     .update(cx, |controls, cx| controls.set_full_file(false, window, cx));
                 assert!(!view.is_dirty(cx));
             });
+            drop(view);
+            cx.run_until_parked();
         }
     }
 

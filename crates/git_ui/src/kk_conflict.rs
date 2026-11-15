@@ -1203,6 +1203,17 @@ impl KkConflict {
         let title = format!("Base 1 ↔ {}", self.input_title(role, index));
         let path = self.draft.conflict.path.clone();
         let source = self.buffer.clone();
+        let source_snapshot = source.read(cx).snapshot();
+        let source_position = self
+            .editor
+            .read(cx)
+            .selections
+            .newest_anchor()
+            .head()
+            .to_offset(&self.editor.read(cx).buffer().read(cx).read(cx))
+            .0;
+        let source_position = source_snapshot.offset_to_point(source_position);
+        let source_text = Arc::<str>::from(source_snapshot.text());
         let project = self.project.clone();
         let workspace = self.workspace.clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -1228,6 +1239,16 @@ impl KkConflict {
                     )
                 });
                 diff.update(cx, |diff, cx| {
+                    diff.set_base_text(Some(source_text), buffer.read(cx).snapshot().text, cx)
+                })
+                .await;
+                let position = cx.read_entity(&diff, |diff, cx| {
+                    diff.snapshot(cx).base_text_point_to_buffer_point(
+                        source_position,
+                        &buffer.read(cx).snapshot().text,
+                    )
+                });
+                diff.update(cx, |diff, cx| {
                     diff.set_base_text(Some(base.clone()), buffer.read(cx).snapshot().text, cx)
                 })
                 .await;
@@ -1235,7 +1256,7 @@ impl KkConflict {
                     let owner = cx.entity();
                     let view = cx.new(|cx| {
                         super::kk_diff::KkDiff::conflict_comparison(
-                            title, path, buffer, diff, base, project, owner, window, cx,
+                            title, path, buffer, diff, base, position, project, owner, window, cx,
                         )
                     });
                     telemetry::event!("KK Conflict Comparison Opened");
@@ -3146,6 +3167,23 @@ mod tests {
                     .active_item_as::<super::super::kk_diff::KkDiff>(cx)
                     .expect("active comparison")
             });
+            let comparison_editor = cx.update(|_, cx| {
+                (&comparison as &dyn workspace::ItemHandle)
+                    .act_as::<SplittableEditor>(cx)
+                    .expect("comparison editor")
+            });
+            let comparison_editor =
+                comparison_editor.read_with(cx, |editor, _| editor.rhs_editor().clone());
+            comparison_editor.update_in(cx, |editor, window, cx| {
+                let snapshot = editor.snapshot(window, cx);
+                assert_eq!(
+                    editor
+                        .selections
+                        .newest::<Point>(&snapshot.display_snapshot)
+                        .head(),
+                    Point::new(29, 2),
+                );
+            });
 
             for _ in 0..2 {
                 editor.update_in(cx, |editor, window, cx| {
@@ -3197,6 +3235,190 @@ mod tests {
                     );
                 });
             }
+        }
+    }
+
+    #[gpui::test(iterations = 3)]
+    async fn kk_conflict_comparison_maps_cursor_to_selected_version(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/repository", serde_json::json!({})).await;
+        let project = Project::test(fs, [Path::new("/repository")], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |workspace, _| workspace.workspace().clone());
+        let prefix = (0..100)
+            .map(|row| format!("context {row}\n"))
+            .collect::<String>();
+        let suffix = (0..100)
+            .map(|row| format!("suffix {row}\n"))
+            .collect::<String>();
+        let materialized = format!(
+            "{prefix}<<<<<<< conflict 1\n+++++++ left\nleft value\n------- base\nbase value\n+++++++ right\nright value\n>>>>>>> conflict 1\n{suffix}"
+        );
+        let target = format!("{prefix}right value\n{suffix}");
+        let cases = [
+            (
+                "middle",
+                materialized.clone(),
+                target.clone(),
+                Point::new(30, 2),
+                Point::new(30, 2),
+            ),
+            (
+                "after-conflict",
+                materialized.clone(),
+                target.clone(),
+                Point::new(163, 3),
+                Point::new(161, 3),
+            ),
+            (
+                "selected-side",
+                materialized.clone(),
+                target.clone(),
+                Point::new(102, 3),
+                Point::new(100, 3),
+            ),
+            (
+                "other-side",
+                materialized.clone(),
+                target.clone(),
+                Point::new(100, 3),
+                Point::new(100, 0),
+            ),
+            (
+                "edited-prefix",
+                format!("unsaved\n{materialized}"),
+                target,
+                Point::new(164, 3),
+                Point::new(161, 3),
+            ),
+            (
+                "deleted",
+                "removed\n".into(),
+                String::new(),
+                Point::new(0, 3),
+                Point::zero(),
+            ),
+            (
+                "empty",
+                String::new(),
+                String::new(),
+                Point::zero(),
+                Point::zero(),
+            ),
+            (
+                "unicode-crlf",
+                "extra\r\n中文内容\r\nlast\r\n".into(),
+                "中文内容\r\nlast\r\n".into(),
+                Point::new(1, 6),
+                Point::new(0, 6),
+            ),
+        ];
+        for (name, materialized, target, cursor, expected) in cases {
+            let draft = ConflictDraft::open(FileConflict {
+                repository_root: "/repository".into(),
+                path: format!("{name}.txt"),
+                change_id: "change".into(),
+                commit_id: "commit".into(),
+                immutable: true,
+                inputs: [
+                    (
+                        ConflictRole::Base,
+                        0,
+                        format!("{prefix}base value\n{suffix}"),
+                    ),
+                    (
+                        ConflictRole::Side,
+                        0,
+                        format!("{prefix}left value\n{suffix}"),
+                    ),
+                    (ConflictRole::Side, 1, target),
+                ]
+                .into_iter()
+                .map(|(role, index, text)| ConflictInput {
+                    role,
+                    index,
+                    id: Some(format!("{role:?}-{index}")),
+                    executable: false,
+                    bytes: text.into_bytes(),
+                    source: None,
+                })
+                .collect(),
+                materialized: materialized.into_bytes(),
+                marker_length: 7,
+                binary: false,
+            })
+            .expect("conflict draft");
+            let buffer = cx.new(|cx| Buffer::local(draft.editor_text(), cx));
+            let view = cx.new_window_entity(|window, cx| {
+                KkConflict::new(
+                    None,
+                    draft,
+                    format!("position-{name}"),
+                    buffer,
+                    project.clone(),
+                    workspace.downgrade(),
+                    None,
+                    window,
+                    cx,
+                )
+            });
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
+            });
+            let editor = view.read_with(cx, |view, _| view.editor.clone());
+            editor.update_in(cx, |editor, window, cx| {
+                editor.change_selections(
+                    editor::SelectionEffects::no_scroll(),
+                    window,
+                    cx,
+                    |selections| selections.select_ranges([cursor..cursor]),
+                );
+            });
+            view.update_in(cx, |view, window, cx| {
+                view.compare_input(ConflictRole::Side, 1, window, cx);
+            });
+            editor.update_in(cx, |editor, window, cx| {
+                editor.change_selections(
+                    editor::SelectionEffects::no_scroll(),
+                    window,
+                    cx,
+                    |selections| selections.select_ranges([Point::zero()..Point::zero()]),
+                );
+            });
+            cx.run_until_parked();
+            let comparison = workspace.read_with(cx, |workspace, cx| {
+                workspace
+                    .active_item_as::<super::super::kk_diff::KkDiff>(cx)
+                    .expect(name)
+            });
+            let split = cx.update(|_, cx| {
+                (&comparison as &dyn workspace::ItemHandle)
+                    .act_as::<SplittableEditor>(cx)
+                    .expect("comparison editor")
+            });
+            let editor = split.read_with(cx, |split, _| split.rhs_editor().clone());
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            editor.update_in(cx, |editor, window, cx| {
+                let snapshot = editor.snapshot(window, cx);
+                assert_eq!(
+                    editor
+                        .selections
+                        .newest::<Point>(&snapshot.display_snapshot)
+                        .head(),
+                    expected,
+                    "{name}"
+                );
+                if expected.row > 100 {
+                    assert!(editor.scroll_position(cx).y > 0., "{name}");
+                }
+            });
         }
     }
 

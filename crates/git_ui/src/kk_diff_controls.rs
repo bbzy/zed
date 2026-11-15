@@ -69,6 +69,7 @@ pub(super) struct KkDiffControls {
     path_order: std::collections::HashMap<language::BufferId, u64>,
     review_count: usize,
     buffers: Vec<(Entity<Buffer>, Entity<BufferDiff>, bool)>,
+    initial_position: Option<(language::BufferId, Point)>,
     _diff_subscriptions: Vec<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
@@ -155,6 +156,7 @@ impl KkDiffControls {
             path_order: Default::default(),
             review_count: 0,
             buffers: Vec::new(),
+            initial_position: None,
             _diff_subscriptions: Vec::new(),
             _subscriptions: subscriptions,
         }
@@ -305,6 +307,18 @@ impl KkDiffControls {
         self.buffers = buffers;
         self.apply_whitespace_preference(cx);
         cx.notify();
+    }
+
+    pub(super) fn set_initial_position(
+        &mut self,
+        buffer: language::BufferId,
+        position: Point,
+        cx: &mut Context<Self>,
+    ) {
+        self.initial_position = Some((buffer, position));
+        if !self.showing_full_file {
+            self.update_excerpts(false, cx);
+        }
     }
 
     pub fn excerpt_ranges(
@@ -489,6 +503,12 @@ impl KkDiffControls {
                 Self::excerpt_ranges(buffer, diff, self.showing_full_file, cx);
             if !self.showing_full_file {
                 let buffer_id = buffer.read(cx).remote_id();
+                if let Some((source, position)) = self.initial_position
+                    && source == buffer_id
+                {
+                    ranges.push(position..position);
+                }
+
                 ranges.extend(
                     review_ranges
                         .iter()
