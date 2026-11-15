@@ -1539,6 +1539,13 @@ impl CompletionProvider for Entity<Project> {
             return false;
         }
 
+        if self
+            .read(cx)
+            .is_syntax_completion_trigger(buffer, position, text, cx)
+        {
+            return true;
+        }
+
         let buffer = buffer.read(cx);
         let snapshot = buffer.snapshot();
         let classifier = snapshot

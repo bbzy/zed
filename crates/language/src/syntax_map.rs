@@ -393,6 +393,10 @@ impl SyntaxMap {
 }
 
 impl SyntaxSnapshot {
+    pub(crate) fn is_parsed_for_version(&self, version: &clock::Global) -> bool {
+        &self.parsed_version == version
+    }
+
     fn new(text: &BufferSnapshot) -> Self {
         Self {
             layers: SumTree::new(text),

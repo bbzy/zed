@@ -8264,7 +8264,8 @@ impl LspStore {
                 }
                 CompletionSource::BufferWord { .. }
                 | CompletionSource::Dap { .. }
-                | CompletionSource::Custom => {
+                | CompletionSource::Custom
+                | CompletionSource::SyntaxSymbol { .. } => {
                     return Ok(());
                 }
             }
@@ -8420,6 +8421,7 @@ impl LspStore {
                     serde_json::to_string(lsp_completion).unwrap().into_bytes()
                 }
                 CompletionSource::Custom
+                | CompletionSource::SyntaxSymbol { .. }
                 | CompletionSource::Dap { .. }
                 | CompletionSource::BufferWord { .. } => {
                     return Ok(());
@@ -14175,6 +14177,12 @@ impl LspStore {
                 serialized_completion.buffer_word_end = Some(serialize_anchor(&word_range.end));
                 serialized_completion.resolved = *resolved;
             }
+            CompletionSource::SyntaxSymbol { kind } => {
+                serialized_completion.source = proto::completion::Source::Custom as i32;
+                serialized_completion.lsp_completion =
+                    serde_json::to_vec(kind).log_err().unwrap_or_default();
+                serialized_completion.resolved = true;
+            }
             CompletionSource::Custom => {
                 serialized_completion.source = proto::completion::Source::Custom as i32;
                 serialized_completion.resolved = true;
@@ -14211,7 +14219,15 @@ impl LspStore {
             replace_range: old_replace_start..old_replace_end,
             new_text: completion.new_text,
             source: match proto::completion::Source::try_from(completion.source).ok() {
-                Some(proto::completion::Source::Custom) => CompletionSource::Custom,
+                Some(proto::completion::Source::Custom) => {
+                    if completion.lsp_completion.is_empty() {
+                        CompletionSource::Custom
+                    } else {
+                        CompletionSource::SyntaxSymbol {
+                            kind: serde_json::from_slice(&completion.lsp_completion)?,
+                        }
+                    }
+                }
                 Some(proto::completion::Source::Lsp) => CompletionSource::Lsp {
                     insert_range,
                     server_id: LanguageServerId::from_proto(completion.server_id),

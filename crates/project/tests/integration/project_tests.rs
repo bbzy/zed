@@ -14,6 +14,7 @@ mod project_search;
 mod search;
 mod search_history;
 mod signature_help;
+mod symbol_index;
 mod task_inventory;
 mod trusted_worktrees;
 mod yarn;

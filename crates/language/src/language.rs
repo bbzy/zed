@@ -19,6 +19,7 @@ pub mod modeline;
 mod outline;
 pub mod proto;
 mod runnable;
+pub mod symbol_index;
 mod syntax_map;
 mod task_context;
 mod text_diff;

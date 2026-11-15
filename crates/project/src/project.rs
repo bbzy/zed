@@ -17,6 +17,7 @@ pub mod prettier_store;
 pub mod project_search;
 pub mod project_settings;
 pub mod search;
+mod symbol_index;
 pub mod task_inventory;
 pub mod task_store;
 pub mod telemetry_snapshot;
@@ -227,6 +228,7 @@ pub struct Project {
     fs: Arc<dyn Fs>,
     remote_client: Option<Entity<RemoteClient>>,
     kk_workbench_client: std::sync::OnceLock<kk_workbench::remote::Client>,
+    symbol_index: symbol_index::SymbolIndexStore,
     // todo lw explain the client_state x remote_client matrix, its super confusing
     client_state: ProjectClientState,
     collaborators: HashMap<proto::PeerId, Collaborator>,
@@ -630,6 +632,9 @@ pub enum CompletionSource {
         sort_text: String,
     },
     Custom,
+    SyntaxSymbol {
+        kind: CompletionItemKind,
+    },
     BufferWord {
         word_range: Range<Anchor>,
         resolved: bool,
@@ -1463,6 +1468,7 @@ impl Project {
                 fs,
                 remote_client: None,
                 kk_workbench_client: std::sync::OnceLock::new(),
+                symbol_index: Default::default(),
                 bookmark_store,
                 breakpoint_store,
                 dap_store,
@@ -1697,6 +1703,7 @@ impl Project {
                 fs,
                 remote_client: Some(remote.clone()),
                 kk_workbench_client: std::sync::OnceLock::new(),
+                symbol_index: Default::default(),
                 terminals: Terminals {
                     local_handles: Vec::new(),
                 },
@@ -1957,6 +1964,7 @@ impl Project {
                 fs,
                 remote_client: None,
                 kk_workbench_client: std::sync::OnceLock::new(),
+                symbol_index: Default::default(),
                 settings_observer: settings_observer.clone(),
                 client_subscriptions: Default::default(),
                 _subscriptions: vec![cx.on_release(Self::release)],
@@ -3575,6 +3583,7 @@ impl Project {
         match event {
             BufferStoreEvent::BufferAdded(buffer) => {
                 self.register_buffer(buffer, cx).log_err();
+                self.warm_symbol_index(cx);
             }
             BufferStoreEvent::BufferDropped(buffer_id) => {
                 if let Some(ref remote_client) = self.remote_client {
@@ -3669,6 +3678,7 @@ impl Project {
                 buffer,
                 new_language,
             } => {
+                self.warm_symbol_index(cx);
                 let Some(_) = new_language else {
                     cx.emit(Event::LanguageNotFound(buffer.clone()));
                     return;
@@ -3906,6 +3916,7 @@ impl Project {
         event: &WorktreeStoreEvent,
         cx: &mut Context<Self>,
     ) {
+        self.warm_symbol_index(cx);
         match event {
             WorktreeStoreEvent::WorktreeAdded(worktree) => {
                 self.on_worktree_added(worktree, cx);
@@ -4259,8 +4270,25 @@ impl Project {
         let task = self.lsp_store.update(cx, |lsp_store, cx| {
             lsp_store.definitions(buffer, position, cx)
         });
-        cx.background_spawn(async move {
-            let result = task.await;
+        let buffer = buffer.clone();
+        let snapshot = buffer.read(cx).snapshot();
+        let offset = position.to_offset(&snapshot);
+        cx.spawn(async move |project, cx| {
+            let result = task.await?;
+            if result
+                .as_ref()
+                .is_some_and(|locations| !locations.is_empty())
+            {
+                drop(guard);
+                return Ok(result);
+            }
+            let fallback = project.update(cx, |project, cx| {
+                if buffer.read(cx).version() != *snapshot.version() {
+                    return Task::ready(Ok(None));
+                }
+                project.syntax_definitions(&buffer, offset, false, cx)
+            })?;
+            let result = fallback.await;
             drop(guard);
             result
         })
@@ -4290,8 +4318,25 @@ impl Project {
         let task = self.lsp_store.update(cx, |lsp_store, cx| {
             lsp_store.declarations(buffer, position, cx)
         });
-        cx.background_spawn(async move {
-            let result = task.await;
+        let buffer = buffer.clone();
+        let snapshot = buffer.read(cx).snapshot();
+        let offset = position.to_offset(&snapshot);
+        cx.spawn(async move |project, cx| {
+            let result = task.await?;
+            if result
+                .as_ref()
+                .is_some_and(|locations| !locations.is_empty())
+            {
+                drop(guard);
+                return Ok(result);
+            }
+            let fallback = project.update(cx, |project, cx| {
+                if buffer.read(cx).version() != *snapshot.version() {
+                    return Task::ready(Ok(None));
+                }
+                project.syntax_definitions(&buffer, offset, true, cx)
+            })?;
+            let result = fallback.await;
             drop(guard);
             result
         })
@@ -4344,8 +4389,25 @@ impl Project {
         let task = self.lsp_store.update(cx, |lsp_store, cx| {
             lsp_store.references(buffer, position, cx)
         });
-        cx.background_spawn(async move {
-            let result = task.await;
+        let buffer = buffer.clone();
+        let snapshot = buffer.read(cx).snapshot();
+        let offset = position.to_offset(&snapshot);
+        cx.spawn(async move |project, cx| {
+            let result = task.await?;
+            if result
+                .as_ref()
+                .is_some_and(|locations| !locations.is_empty())
+            {
+                drop(guard);
+                return Ok(result);
+            }
+            let fallback = project.update(cx, |project, cx| {
+                if buffer.read(cx).version() != *snapshot.version() {
+                    return Task::ready(Ok(None));
+                }
+                project.syntax_references(&buffer, offset, cx)
+            })?;
+            let result = fallback.await;
             drop(guard);
             result
         })
@@ -4585,8 +4647,28 @@ impl Project {
         cx: &mut Context<Self>,
     ) -> Task<Result<Vec<CompletionResponse>>> {
         let position = position.to_point_utf16(buffer.read(cx));
-        self.lsp_store.update(cx, |lsp_store, cx| {
+        let task = self.lsp_store.update(cx, |lsp_store, cx| {
             lsp_store.completions(buffer, position, context, cx)
+        });
+        let buffer = buffer.clone();
+        let snapshot = buffer.read(cx).snapshot();
+        let offset = position.to_offset(&snapshot);
+        cx.spawn(async move |project, cx| {
+            let result = task.await?;
+            if result
+                .iter()
+                .any(|response| !response.completions.is_empty())
+            {
+                return Ok(result);
+            }
+            project
+                .update(cx, |project, cx| {
+                    if buffer.read(cx).version() != *snapshot.version() {
+                        return Task::ready(Ok(Vec::new()));
+                    }
+                    project.syntax_completions(&buffer, offset, cx)
+                })?
+                .await
         })
     }
 
@@ -6912,6 +6994,9 @@ impl ProjectItem for Buffer {
 
 impl Completion {
     pub fn kind(&self) -> Option<CompletionItemKind> {
+        if let CompletionSource::SyntaxSymbol { kind } = self.source {
+            return Some(kind);
+        }
         self.source
             // `lsp::CompletionListItemDefaults` has no `kind` field
             .lsp_completion(false)
