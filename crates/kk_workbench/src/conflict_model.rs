@@ -41,6 +41,7 @@ pub enum ConflictEditReason {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConflictChoice {
     Input(ConflictRole, usize),
+    AllSides,
     Edited,
 }
 
@@ -281,25 +282,46 @@ impl ConflictDraft {
                 .iter()
                 .find(|conflict| conflict.range.start == *start)
                 .context("The selected conflict block is no longer available")?;
-            let range = match choice {
+            let ranges = match choice {
                 ConflictChoice::Edited => {
                     ensure!(conflict.edited, "Use Edited Block requires an explicitly edited block");
-                    &conflict.range
+                    vec![&conflict.range]
                 }
-                ConflictChoice::Input(role, index) => &conflict.sections.iter().find(|section| section.role == role && section.index == index)
-                    .context("A conflict block was edited across inputs. Confirm that edited block before accepting a version for all remaining blocks.")?.range,
+                ConflictChoice::Input(role, index) => vec![&conflict.sections.iter().find(|section| section.role == role && section.index == index)
+                    .context("A conflict block was edited across inputs. Confirm that edited block before accepting a version for all remaining blocks.")?.range],
+                ConflictChoice::AllSides => {
+                    ensure!(!conflict.edited, "Confirm this edited block before accepting its sides");
+                    let ranges = conflict.sections.iter().filter(|section| section.role == ConflictRole::Side)
+                        .map(|section| &section.range).collect::<Vec<_>>();
+                    ensure!(ranges.len() >= 2, "Select a conflict block with at least two sides");
+                    ranges
+                }
             };
-            let physical = physical_range(&self.text, range)?;
-            let replacement = self
+            let block_range = physical_range(&self.text, &conflict.range)?;
+            let block = self
                 .text
-                .get(physical)
-                .context("Invalid conflict input position")?
-                .to_owned();
+                .get(block_range.clone())
+                .context("Invalid conflict block position")?;
+            let line_ending = if block.contains("\r\n") { "\r\n" } else { "\n" };
+            let mut replacement = String::new();
+            for range in ranges {
+                let physical = physical_range(&self.text, range)?;
+                let fragment = self
+                    .text
+                    .get(physical)
+                    .context("Invalid conflict input position")?;
+                if !fragment.is_empty() && !replacement.is_empty() && !replacement.ends_with('\n') {
+                    replacement.push_str(line_ending);
+                }
+
+                replacement.push_str(fragment);
+            }
+
             edits.push(ConflictEdit {
                 range: conflict.range.clone(),
                 text: normalize_conflict_text(&replacement),
             });
-            replacements.push((physical_range(&self.text, &conflict.range)?, replacement));
+            replacements.push((block_range, replacement));
         }
 
         let mut raw_result = self.text.clone();

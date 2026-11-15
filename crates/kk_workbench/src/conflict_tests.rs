@@ -359,6 +359,172 @@ fn draft_fixture() -> Result<ConflictDraft> {
 }
 
 #[test]
+fn conflict_draft_accept_all_sides_preserves_order_and_boundaries() -> Result<()> {
+    for line_ending in ["\n", "\r\n"] {
+        for (sides, terminated, expected) in [
+            (vec!["left\n", "right\n"], true, "left\nright\n"),
+            (vec!["one\n", "two\n", "three\n"], true, "one\ntwo\nthree\n"),
+            (
+                vec!["one\n", "", "three\n", "four\n"],
+                true,
+                "one\nthree\nfour\n",
+            ),
+            (vec!["", "right\n"], true, "right\n"),
+            (vec!["left\n", ""], true, "left\n"),
+            (vec!["", "", ""], true, ""),
+            (vec!["same\n", "same\n"], true, "same\nsame\n"),
+            (vec!["左", "右"], false, "左\n右"),
+            (vec!["one", "", "three"], false, "one\nthree"),
+            (vec!["one\n\n", "two\n"], true, "one\n\ntwo\n"),
+        ] {
+            let mut draft = all_sides_draft(&sides, line_ending, terminated)?;
+            let original = draft.text.clone();
+            let original_conflicts = draft.conflicts.clone();
+            draft.accept(draft.prepare_accept(&[0], ConflictChoice::AllSides)?)?;
+            let accepted = expected.replace('\n', line_ending);
+            assert_eq!(draft.text, accepted, "{sides:?}, {line_ending:?}");
+            assert!(draft.conflicts.is_empty());
+            draft.update(
+                &normalize_conflict_text(&original),
+                None,
+                ConflictEditReason::Undo,
+            )?;
+            assert_eq!(draft.text, original);
+            assert_eq!(draft.conflicts, original_conflicts);
+            draft.update(
+                &normalize_conflict_text(&accepted),
+                None,
+                ConflictEditReason::Redo,
+            )?;
+            assert_eq!(draft.text, accepted);
+            assert!(draft.conflicts.is_empty());
+        }
+    }
+
+    Ok(())
+}
+
+fn all_sides_draft(sides: &[&str], line_ending: &str, terminated: bool) -> Result<ConflictDraft> {
+    let mut conflict = draft_fixture()?.conflict;
+    let mut materialized = format!("<<<<<<< conflict 1{line_ending}");
+    conflict.inputs.clear();
+    for (index, side) in sides.iter().enumerate() {
+        materialized.push_str(&format!("+++++++ side {index}{line_ending}"));
+        let side = side.replace('\n', line_ending);
+        materialized.push_str(&side);
+        if !side.is_empty() && !side.ends_with('\n') {
+            materialized.push_str(line_ending);
+        }
+
+        conflict.inputs.push(ConflictInput {
+            role: Side,
+            index,
+            id: Some(format!("side-{index}")),
+            executable: false,
+            bytes: side.into_bytes(),
+            source: None,
+        });
+        if index + 1 < sides.len() {
+            materialized.push_str(&format!(
+                "------- base {index}{line_ending}ancestor {index}{line_ending}"
+            ));
+            conflict.inputs.push(ConflictInput {
+                role: Base,
+                index,
+                id: Some(format!("base-{index}")),
+                executable: false,
+                bytes: format!("ancestor {index}{line_ending}").into_bytes(),
+                source: None,
+            });
+        }
+    }
+
+    materialized.push_str(">>>>>>> conflict 1");
+    if terminated {
+        materialized.push_str(line_ending);
+    }
+
+    conflict.materialized = materialized.into_bytes();
+    ConflictDraft::open(conflict)
+}
+
+#[test]
+fn conflict_draft_accept_all_sides_uses_edited_fragments() -> Result<()> {
+    for line_ending in ["\n", "\r\n"] {
+        let mut draft = all_sides_draft(&["left\n", "right\n"], line_ending, true)?;
+        let side = draft.conflicts[0].sections[0].range.clone();
+        let mut next = draft.editor_text();
+        next.replace_range(side.clone(), "修改");
+        draft.update(
+            &next,
+            Some(&[ConflictEdit {
+                range: side,
+                text: "修改".into(),
+            }]),
+            ConflictEditReason::Edit,
+        )?;
+        let side = draft.conflicts[0].sections[2].range.clone();
+        let mut next = draft.editor_text();
+        next.replace_range(side.clone(), "right edited\n");
+        draft.update(
+            &next,
+            Some(&[ConflictEdit {
+                range: side,
+                text: "right edited\n".into(),
+            }]),
+            ConflictEditReason::Edit,
+        )?;
+        draft.accept(draft.prepare_accept(&[0], ConflictChoice::AllSides)?)?;
+        assert_eq!(
+            draft.text,
+            format!("修改{line_ending}right edited{line_ending}")
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn conflict_draft_accept_all_sides_only_resolves_selected_block() -> Result<()> {
+    let mut draft = draft_fixture()?;
+    let original = draft.text.clone();
+    let original_conflicts = draft.conflicts.clone();
+    let first = draft.conflicts[0].range.start;
+    draft.accept(draft.prepare_accept(&[first], ConflictChoice::AllSides)?)?;
+    assert_eq!(draft.conflicts.len(), 1);
+    assert_eq!(
+        draft.text,
+        "\u{feff}common\r\n左\r\nright\r\nbetween\n左2\nbase2\nright2\nend\n"
+    );
+    draft.update(
+        &normalize_conflict_text(&original),
+        None,
+        ConflictEditReason::Undo,
+    )?;
+    assert_eq!(draft.conflicts, original_conflicts);
+    let range = draft.conflicts[0].range.clone();
+    let mut next = draft.editor_text();
+    next.replace_range(range.clone(), "merged\n");
+    draft.update(
+        &next,
+        Some(&[ConflictEdit {
+            range,
+            text: "merged\n".into(),
+        }]),
+        ConflictEditReason::Edit,
+    )?;
+    let before = draft.text.clone();
+    let first = draft.conflicts[0].range.start;
+    assert!(
+        draft
+            .prepare_accept(&[first], ConflictChoice::AllSides)
+            .is_err()
+    );
+    assert_eq!(draft.text, before);
+    Ok(())
+}
+
+#[test]
 fn conflict_draft_acceptance_preserves_eol_and_native_undo_metadata() -> Result<()> {
     let mut draft = draft_fixture()?;
     let original = draft.text.clone();

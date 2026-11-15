@@ -903,6 +903,12 @@ impl KkConflict {
         let disabled = self.applying || self.draft.applied_digest.is_some();
         for conflict in &self.draft.conflicts {
             let start = conflict.range.start;
+            let mut sides = conflict
+                .sections
+                .iter()
+                .filter(|section| section.role == ConflictRole::Side);
+            let first_side = sides.next();
+            let side_count = usize::from(first_side.is_some()) + sides.count();
             if conflict.edited {
                 highlights.push((
                     2,
@@ -952,6 +958,15 @@ impl KkConflict {
             for (offset, title, choice) in inputs {
                 let weak = cx.weak_entity();
                 let version = self.buffer.read(cx).version();
+                let all_sides_label = (side_count >= 2
+                    && first_side.is_some_and(|section| {
+                        choice == ConflictChoice::Input(ConflictRole::Side, section.index)
+                    }))
+                .then_some(if side_count == 2 {
+                    "Accept Both"
+                } else {
+                    "Accept All"
+                });
                 let detail = match choice {
                     ConflictChoice::Input(role, index) => self
                         .draft
@@ -964,6 +979,7 @@ impl KkConflict {
                     ConflictChoice::Edited => {
                         "Keep the current code in this block as the resolution.".into()
                     }
+                    ConflictChoice::AllSides => "Keep all sides in this conflict block.".into(),
                 };
                 let change_id_prefix = if let ConflictChoice::Input(role, index) = choice {
                     self.draft
@@ -1015,7 +1031,9 @@ impl KkConflict {
                     render: Arc::new(move |cx| {
                         let weak = weak.clone();
                         let compare = weak.clone();
+                        let accept_all = weak.clone();
                         let version = version.clone();
+                        let all_sides_version = version.clone();
                         h_flex()
                             .ml(cx.margins.gutter.width)
                             .h(cx.line_height)
@@ -1051,6 +1069,26 @@ impl KkConflict {
                                         compare.update(cx, |view, cx| view.compare_input(role, index, window, cx)).log_err();
                                     }
                                 }))
+                            })
+                            .when_some(all_sides_label, |row, label| {
+                                row.child(div().debug_selector(move || format!("{label}-{start}"))
+                                    .child(Button::new(("accept-all-sides", start), label)
+                                        .style(ButtonStyle::Outlined)
+                                        .size(ButtonSize::Compact)
+                                        .label_size(LabelSize::Small)
+                                        .disabled(disabled)
+                                        .tooltip(ui::Tooltip::text("Keep all sides in this block in display order, excluding Base."))
+                                        .on_click(move |_, window, cx| {
+                                            accept_all.update(cx, |view, cx| {
+                                                if view.buffer.read(cx).version() != all_sides_version {
+                                                    view.error = Some("This conflict changed. Select the action again.".into());
+                                                    cx.notify();
+                                                    return;
+                                                }
+
+                                                view.accept(vec![start], ConflictChoice::AllSides, window, cx);
+                                            }).log_err();
+                                        })))
                             })
                             .into_any_element()
                     }),
@@ -3436,6 +3474,198 @@ mod tests {
     }
 
     #[gpui::test(iterations = 3)]
+    async fn kk_conflict_accept_all_sides_button(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            cx.bind_keys([
+                gpui::KeyBinding::new("cmd-z", editor::actions::Undo, Some("Editor")),
+                gpui::KeyBinding::new("cmd-shift-z", editor::actions::Redo, Some("Editor")),
+            ]);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/repository", serde_json::json!({})).await;
+        let project = Project::test(fs, [Path::new("/repository")], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |workspace, _| workspace.workspace().clone());
+        for (side_count, first_empty, empty_base) in [
+            (2, false, false),
+            (3, false, false),
+            (4, false, false),
+            (2, true, false),
+            (3, true, false),
+            (2, false, true),
+        ] {
+            let mut materialized = String::new();
+            let mut inputs = Vec::new();
+            for block in 0..2 {
+                materialized.push_str(&format!("<<<<<<< conflict {block}\n"));
+                for index in 0..side_count {
+                    materialized.push_str(&format!("+++++++ side {index}\n"));
+                    let text = if block == 0 && index == 0 && first_empty {
+                        String::new()
+                    } else {
+                        format!("side {block}-{index}\n")
+                    };
+                    materialized.push_str(&text);
+                    if block == 0 {
+                        inputs.push(ConflictInput {
+                            role: ConflictRole::Side,
+                            index,
+                            id: Some(format!("side-{index}")),
+                            executable: false,
+                            bytes: text.into_bytes(),
+                            source: None,
+                        });
+                    }
+
+                    if index + 1 < side_count {
+                        let base = if empty_base {
+                            String::new()
+                        } else {
+                            format!("base {block}-{index}\n")
+                        };
+                        materialized.push_str(&format!("------- base {index}\n{base}"));
+                        if block == 0 {
+                            inputs.push(ConflictInput {
+                                role: ConflictRole::Base,
+                                index,
+                                id: Some(format!("base-{index}")),
+                                executable: false,
+                                bytes: base.into_bytes(),
+                                source: None,
+                            });
+                        }
+                    }
+                }
+
+                materialized.push_str(&format!(">>>>>>> conflict {block}\n"));
+                if block == 0 {
+                    materialized.push_str("between\n");
+                }
+            }
+
+            let draft = ConflictDraft::open(FileConflict {
+                repository_root: "/repository".into(),
+                path: "file.txt".into(),
+                change_id: "change".into(),
+                commit_id: "commit".into(),
+                immutable: true,
+                inputs,
+                materialized: materialized.into_bytes(),
+                marker_length: 7,
+                binary: false,
+            })
+            .expect("draft");
+            let buffer = cx.new(|cx| Buffer::local(draft.editor_text(), cx));
+            let view = cx.new_window_entity(|window, cx| {
+                KkConflict::new(
+                    None,
+                    draft,
+                    format!("all-sides-{side_count}-{first_empty}-{empty_base}"),
+                    buffer.clone(),
+                    project.clone(),
+                    workspace.downgrade(),
+                    None,
+                    window,
+                    cx,
+                )
+            });
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
+            });
+            let (editor, position) = view.read_with(cx, |view, _| {
+                let position = view.draft.conflicts[0]
+                    .sections
+                    .iter()
+                    .find(|section| {
+                        section.role == ConflictRole::Side && section.index + 1 == side_count
+                    })
+                    .expect("last side")
+                    .range
+                    .start;
+                (view.editor.clone(), position)
+            });
+            editor.update_in(cx, |editor, window, cx| {
+                editor.change_selections(
+                    editor::SelectionEffects::no_scroll(),
+                    window,
+                    cx,
+                    |selections| {
+                        selections.select_ranges([
+                            MultiBufferOffset(position)..MultiBufferOffset(position)
+                        ])
+                    },
+                );
+                editor.insert("edited ", window, cx);
+                editor.finalize_last_transaction(cx);
+            });
+            cx.run_until_parked();
+            view.update_in(cx, |view, window, cx| view.refresh_blocks(window, cx));
+            editor.update_in(cx, |editor, window, cx| {
+                editor.set_scroll_position(gpui::point(0., 0.), window, cx);
+            });
+            let (before, conflicts, untouched) = view.read_with(cx, |view, _| {
+                let text = view.draft.editor_text();
+                (
+                    text.clone(),
+                    view.draft.conflicts.clone(),
+                    text.get(view.draft.conflicts[1].range.clone())
+                        .expect("second block")
+                        .to_owned(),
+                )
+            });
+            let selector = if side_count == 2 {
+                "Accept Both-0"
+            } else {
+                "Accept All-0"
+            };
+            let other = if side_count == 2 {
+                "Accept All-0"
+            } else {
+                "Accept Both-0"
+            };
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert!(cx.debug_bounds(other).is_none());
+            let button = cx.debug_bounds(selector).expect("accept all sides button");
+            cx.simulate_click(button.center(), gpui::Modifiers::none());
+            cx.run_until_parked();
+            let combined = (0..side_count)
+                .filter(|index| !(first_empty && *index == 0))
+                .map(|index| {
+                    if index + 1 == side_count {
+                        format!("edited side 0-{index}\n")
+                    } else {
+                        format!("side 0-{index}\n")
+                    }
+                })
+                .collect::<String>();
+            let expected = format!("{combined}between\n{untouched}");
+            view.read_with(cx, |view, _| {
+                assert!(view.error.is_none(), "{:?}", view.error);
+                assert_eq!(view.draft.conflicts.len(), 1);
+                assert_eq!(view.draft.editor_text(), expected);
+            });
+            cx.simulate_keystrokes("cmd-z");
+            cx.run_until_parked();
+            view.read_with(cx, |view, _| {
+                assert_eq!(view.draft.editor_text(), before);
+                assert_eq!(view.draft.conflicts, conflicts);
+            });
+            cx.simulate_keystrokes("cmd-shift-z");
+            cx.run_until_parked();
+            view.read_with(cx, |view, _| {
+                assert!(view.error.is_none(), "{:?}", view.error);
+                assert_eq!(view.draft.editor_text(), expected);
+                assert_eq!(view.draft.conflicts.len(), 1);
+            });
+        }
+    }
+
+    #[gpui::test(iterations = 3)]
     async fn kk_conflict_edits_preserve_version_sections(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let settings = SettingsStore::test(cx);
@@ -4017,6 +4247,45 @@ mod tests {
         });
         assert_eq!(
             std::fs::read(root.join("file.txt")).expect("final conflict"),
+            workspace_contents
+        );
+        mutable.update_in(cx, |view, window, cx| {
+            let start = view
+                .draft
+                .conflicts
+                .first()
+                .expect("restored block")
+                .range
+                .start;
+            view.accept(vec![start], ConflictChoice::AllSides, window, cx);
+        });
+        cx.condition(&mutable, |view, _| !view.applying).await;
+        mutable.read_with(cx, |view, _| {
+            assert!(view.error.is_none(), "{:?}", view.error);
+            assert!(view.draft.applied_digest.is_some());
+        });
+        let combined = std::fs::read_to_string(root.join("file.txt")).expect("all sides result");
+        let lines = combined.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.first(), Some(&"common"));
+        assert_eq!(lines.iter().filter(|line| **line == "left").count(), 1);
+        assert_eq!(lines.iter().filter(|line| **line == "right").count(), 1);
+        cx.simulate_keystrokes("cmd-z");
+        cx.condition(&mutable, |view, _| !view.applying).await;
+        assert_eq!(
+            std::fs::read(root.join("file.txt")).expect("undo all sides"),
+            workspace_contents
+        );
+        cx.simulate_keystrokes("cmd-shift-z");
+        cx.condition(&mutable, |view, _| !view.applying).await;
+        assert_eq!(
+            std::fs::read_to_string(root.join("file.txt")).expect("redo all sides"),
+            combined
+        );
+        cx.simulate_keystrokes("cmd-z");
+        cx.condition(&mutable, |view, _| !view.applying).await;
+        assert_eq!(
+            std::fs::read(root.join("file.txt")).expect("restore before manual edits"),
             workspace_contents
         );
         for manual_result in ["manually merged\n", ""] {
