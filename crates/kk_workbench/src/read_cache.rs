@@ -142,9 +142,10 @@ fn immutable_query(query: &Read) -> bool {
         DiffScope::Comparison { base, target } => commit(base) && commit(target),
     };
     match query {
-        Read::FileContent { revision, .. } | Read::FileContentIfExists { revision, .. } => {
-            commit(revision)
-        }
+        Read::FileContent { revision, .. }
+        | Read::FileContentIfExists { revision, .. }
+        | Read::FileProbe { revision, .. }
+        | Read::MergedParentFile { revision, .. } => commit(revision),
         Read::ChangedFiles { scope: value }
         | Read::Diff { scope: value, .. }
         | Read::SearchData { scope: value } => scope(value),

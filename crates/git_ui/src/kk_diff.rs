@@ -235,7 +235,7 @@ impl DiffTarget {
     }
 }
 
-struct DiffContents {
+pub(super) struct DiffContents {
     base: Option<Arc<str>>,
     base_revision: Option<String>,
     historical: Option<String>,
@@ -470,6 +470,40 @@ impl editor::Addon for DiffAddon {
 }
 
 impl DiffContents {
+    pub(super) async fn prefetch(
+        snapshot: &Snapshot,
+        revision: &Revision,
+        file: &ChangedFile,
+    ) -> Result<bool> {
+        let commit = &revision.full_commit_id;
+        snapshot.revisions(Some(commit), 2).await?;
+        snapshot.revisions(Some(&revision.revset()), 2).await?;
+        let target = snapshot.prefetch_file(commit, &file.path).await?;
+        let original_path = file.renamed_from.as_deref().unwrap_or(&file.path);
+        if revision.parent_commit_ids.len() <= 1 {
+            let parent = revision
+                .parent_commit_ids
+                .first()
+                .map(String::as_str)
+                .unwrap_or("root()");
+            snapshot.prefetch_file(parent, original_path).await?;
+        } else if target.is_text() || target.information.exists == Some(false) {
+            let mut size = 0u64;
+            let mut available = true;
+            for parent in &revision.parent_commit_ids {
+                let probe = snapshot.prefetch_file(parent, original_path).await?;
+                size = size.saturating_add(probe.information.size.unwrap_or(0));
+                available &= probe.is_text() || probe.information.exists == Some(false);
+            }
+
+            if available && size <= kk_workbench::PREFETCH_FILE_BYTES as u64 {
+                snapshot.merged_parent_file(commit, file).await?;
+            }
+        }
+
+        Ok(target.is_text() && !file.has_conflict)
+    }
+
     async fn text(snapshot: &Snapshot, mut bytes: Vec<u8>, resolve_lfs: bool) -> Result<String> {
         if resolve_lfs && let Some(pointer) = kk_workbench::LfsPointer::parse(&bytes) {
             bytes = snapshot.repository().lfs_content(&pointer).await?;
@@ -1009,7 +1043,8 @@ impl KkDiff {
             .into_iter()
             .find_map(|buffer| {
                 let buffer = buffer.read(cx);
-                (buffer.is_dirty()
+                ((buffer.is_dirty()
+                    || (buffer.encoding().name() == "UTF-8" && !buffer.text().contains('\0')))
                     && buffer
                         .file()
                         .and_then(|file| file.file_system_abs_path(cx))

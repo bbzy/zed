@@ -110,7 +110,7 @@ impl FileInformation {
         }
     }
 
-    fn contents(&mut self, bytes: &[u8]) {
+    pub(crate) fn contents(&mut self, bytes: &[u8]) {
         self.pointer = LfsPointer::parse(bytes);
         self.size = Some(
             self.pointer
@@ -182,6 +182,21 @@ impl FileInformation {
 
 impl Snapshot {
     pub async fn merged_parent_file(
+        &self,
+        revision: &str,
+        file: &ChangedFile,
+    ) -> Result<(FileInformation, Option<Vec<u8>>)> {
+        self.read_cached(
+            crate::remote::Read::MergedParentFile {
+                revision: revision.into(),
+                file: file.clone(),
+            },
+            Box::pin(self.merged_parent_file_uncached(revision, file)),
+        )
+        .await
+    }
+
+    async fn merged_parent_file_uncached(
         &self,
         revision: &str,
         file: &ChangedFile,
@@ -291,6 +306,30 @@ impl Snapshot {
                 .await;
         }
 
+        let mut information = if let Some(probe) =
+            self.cached::<crate::FileProbe>(&crate::remote::Read::FileProbe {
+                revision: revision.into(),
+                path: path.into(),
+            }) {
+            probe.information
+        } else {
+            self.file_metadata(revision, path).await?
+        };
+        if information.file_type.as_deref() == Some("file") && information.hash.is_none() {
+            match self.file_content(revision, path).await {
+                Ok(bytes) => information.contents(&bytes),
+                Err(error) => information.unavailable = Some(format!("{error:#}")),
+            }
+        }
+
+        Ok(information)
+    }
+
+    pub(crate) async fn file_metadata(
+        &self,
+        revision: &str,
+        path: &str,
+    ) -> Result<FileInformation> {
         #[derive(Deserialize)]
         struct Entry {
             kind: String,
@@ -325,12 +364,6 @@ impl Snapshot {
         if let Some(entry) = metadata.entries.first() {
             information.file_type = Some(entry.kind.clone());
             information.object_id = (!entry.object.is_empty()).then(|| entry.object.clone());
-            if entry.kind == "file" {
-                match self.file_content(revision, path).await {
-                    Ok(bytes) => information.contents(&bytes),
-                    Err(error) => information.unavailable = Some(format!("{error:#}")),
-                }
-            }
         }
 
         Ok(information)

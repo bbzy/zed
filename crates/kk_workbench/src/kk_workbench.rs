@@ -7,6 +7,7 @@ mod file;
 mod file_mutation;
 mod history;
 mod opening;
+mod prefetch;
 mod preview;
 mod read_cache;
 pub mod remote;
@@ -36,6 +37,7 @@ pub use file::{BlameLine, FileInformation, LfsPointer, SparseCheckout};
 pub use file_mutation::{FileEdit, FileMoveDirection, PreparedFileMutation};
 pub use history::{GraphRow, HistoryMode, HistoryPage, Revision, history_graph, rank_revisions};
 pub use opening::DiffOpening;
+pub use prefetch::{FileProbe, PREFETCH_FILE_BYTES};
 pub use preview::{ClassificationPreview, TransferDirection};
 pub use repository::{
     ChangeKind, ChangedFile, ComparisonBoundary, DiffScope, Repository, RepositoryLifetime,

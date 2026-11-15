@@ -40,6 +40,8 @@ mod file_actions;
 use file_actions::{FileAction, FileBatchKey, FileRow};
 #[path = "kk_file_opening.rs"]
 mod file_opening;
+#[path = "kk_prefetch.rs"]
+mod prefetch;
 pub(super) use file_opening::{FileOpeningState, OpeningToken};
 #[path = "kk_tree.rs"]
 mod tree;
@@ -276,6 +278,7 @@ pub struct KkPanel {
     file_batches: HashMap<FileBatchKey, Task<()>>,
     classification_batch_sequence: u64,
     file_opening: FileOpeningState,
+    prefetch: prefetch::PrefetchState,
     opening_feedback: Option<(u64, String, HashSet<tree::TreeRowId>)>,
     opening_sequence: u64,
     context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
@@ -510,6 +513,7 @@ impl KkPanel {
                         file_batches: HashMap::new(),
                         classification_batch_sequence: 0,
                         file_opening: FileOpeningState::default(),
+                        prefetch: prefetch::PrefetchState::default(),
                         opening_feedback: None,
                         opening_sequence: 0,
                         context_menu: None,
@@ -1367,6 +1371,16 @@ impl KkPanel {
         comparison: bool,
         cx: &mut Context<Self>,
     ) {
+        if !comparison
+            && let Some(repository) = self.repositories.get(repository_index)
+            && !repository.expanded.contains_key(&revision.full_commit_id)
+        {
+            self.prefetch.promote(
+                repository.snapshot.repository().root(),
+                &revision.full_commit_id,
+            );
+        }
+
         self.model_generation += 1;
         let Some(repository) = self.repositories.get_mut(repository_index) else {
             return;
@@ -1417,6 +1431,7 @@ impl KkPanel {
                 .is_some()
             {
                 self.load_tasks.remove(&key);
+                self.reconcile_prefetch(cx);
                 cx.notify();
                 return;
             }
@@ -1428,6 +1443,7 @@ impl KkPanel {
                     revision.full_commit_id.clone(),
                     RevisionFiles::Loaded(files),
                 );
+                self.reconcile_prefetch(cx);
                 cx.notify();
                 return;
             }
@@ -1492,6 +1508,7 @@ impl KkPanel {
                     Err(error) => this.error = Some(format!("{error:#}")),
                 }
 
+                this.reconcile_prefetch(cx);
                 this.model_generation += 1;
                 cx.notify();
             })
@@ -2699,6 +2716,7 @@ impl KkPanel {
                                         this.model_generation += 1;
                                         this.refresh_repository(root.clone(), cx);
                                     }
+                                    this.pump_prefetch(cx);
                                     cx.notify();
                                 }
                             }
@@ -2768,6 +2786,7 @@ impl KkPanel {
             }
         }
 
+        self.pump_prefetch(cx);
         cx.notify();
     }
 
@@ -2864,6 +2883,7 @@ impl KkPanel {
         }
 
         self.file_opening.cancel_closed();
+        self.prefetch.cancel_closed();
     }
 
     fn bind_snapshot(&mut self, snapshot: Snapshot, cx: &App) -> anyhow::Result<Snapshot> {

@@ -153,6 +153,7 @@ impl KkPanel {
                     .is_some_and(|(current, _, _)| *current == sequence)
                 {
                     this.opening_feedback = None;
+                    this.pump_prefetch(cx);
                     cx.notify();
                 }
             })
@@ -281,6 +282,10 @@ impl KkPanel {
             Ok(snapshot) => snapshot,
             Err(error) => return Task::ready(Err(error)),
         };
+        if let kk_workbench::DiffScope::Change(commit) = &target.scope {
+            self.prefetch.promote(snapshot.repository().root(), commit);
+        }
+
         if let Some(existing) = super::super::kk_diff::KkDiff::reopen(
             snapshot.clone(),
             &target,
@@ -435,6 +440,7 @@ impl KkPanel {
         } else {
             Vec::new()
         };
+        let prefetched = self.prefetch.wait_for(&snapshot, &target.scope, &file.path);
         let preparation = self.prepare_open(snapshot, paths, &opening, window, cx);
         cx.spawn_in(window, async move |this, cx| {
             let preparation = preparation.await;
@@ -446,6 +452,13 @@ impl KkPanel {
             else {
                 return Ok(None);
             };
+
+            if let Some(prefetched) = prefetched {
+                match select(std::pin::pin!(prefetched), opening.0.cancelled.clone()).await {
+                    Either::Left(_) if opening.is_current() => {}
+                    _ => return Ok(None),
+                }
+            }
 
             let open = this.update_in(cx, |this, window, cx| {
                 super::super::kk_diff::KkDiff::open(

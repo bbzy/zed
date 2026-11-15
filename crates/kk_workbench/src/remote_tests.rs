@@ -25,6 +25,62 @@ struct ServiceTransport {
 }
 
 #[test]
+fn remote_prefetch_bounds_payload_and_primes_foreground_reads() -> Result<()> {
+    smol::block_on(async {
+        let fixture = Fixture::create()?;
+        fixture.run(&["config", "set", "--repo", "snapshot.max-new-file-size", "0"])?;
+        fs::write(fixture.root().join("text.txt"), "remote text\n")?;
+        fs::write(fixture.root().join("binary.bin"), b"remote\0binary")?;
+        fs::write(
+            fixture.root().join("large.txt"),
+            vec![b'x'; PREFETCH_FILE_BYTES + 1],
+        )?;
+        let local = fixture.repository().await?;
+        local.snapshot(true).await?;
+        let transport = ServiceTransport::new(&fixture)?;
+        let remote = transport.open().await?;
+        let snapshot = remote.snapshot(false).await?;
+        let revision = snapshot.exact_revision("@").await?.full_commit_id;
+        assert_eq!(
+            snapshot
+                .prefetch_file(&revision, "text.txt")
+                .await?
+                .contents,
+            Some(b"remote text\n".to_vec())
+        );
+        assert_eq!(
+            snapshot.cached::<Vec<u8>>(&Read::FileContent {
+                revision: revision.clone(),
+                path: "text.txt".into(),
+            }),
+            Some(b"remote text\n".to_vec())
+        );
+        for path in ["binary.bin", "large.txt"] {
+            let probe = snapshot.prefetch_file(&revision, path).await?;
+            assert!(probe.contents.is_none());
+            assert!(probe.information.size.is_some());
+            assert!(
+                snapshot
+                    .cached::<Vec<u8>>(&Read::FileContent {
+                        revision: revision.clone(),
+                        path: path.into(),
+                    })
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            snapshot.file_content(&revision, "large.txt").await?.len(),
+            PREFETCH_FILE_BYTES + 1
+        );
+        let lifetime = RepositoryLifetime::default();
+        let closed = snapshot.with_lifetime(Some(lifetime.clone()));
+        lifetime.invalidate();
+        assert!(closed.prefetch_file(&revision, "text.txt").await.is_err());
+        Ok(())
+    })
+}
+
+#[test]
 fn kk_merge_diff_base_uses_both_parents_locally_and_remotely() -> Result<()> {
     smol::block_on(async {
         let fixture = Fixture::create()?;

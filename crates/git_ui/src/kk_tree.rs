@@ -55,7 +55,7 @@ pub(super) struct TreeSelectionState {
     pub selected: HashSet<TreeRowId>,
     pub anchor: Option<TreeRowId>,
     cursor: Option<TreeRowId>,
-    expanded: HashMap<TreeRowId, bool>,
+    pub(super) expanded: HashMap<TreeRowId, bool>,
     rows: Vec<TreeRow>,
     rendered: Vec<TreeRenderRow>,
     empty_commits: HashMap<PathBuf, HashMap<String, bool>>,
@@ -551,6 +551,7 @@ impl KkPanel {
             self.scroll_handle
                 .scroll_to_item(row.render_index, gpui::ScrollStrategy::Nearest);
             if let TreeRowKind::Revision(revision, _) = &row.kind {
+                self.prefetch.promote(id.root(), &revision.full_commit_id);
                 self.selected_change = Some((
                     id.root().to_owned(),
                     revision.full_change_id.clone(),
@@ -559,6 +560,7 @@ impl KkPanel {
             }
         }
 
+        self.pump_prefetch(cx);
         cx.notify();
     }
 
@@ -675,6 +677,7 @@ impl KkPanel {
                 self.tree_selection
                     .expanded
                     .insert(row.id.clone(), row.expanded != Some(true));
+                self.reconcile_prefetch(cx);
                 cx.notify();
             }
             TreeRowKind::More => {
@@ -791,7 +794,38 @@ impl KkPanel {
             }
         }
 
+        self.reconcile_prefetch(cx);
         self.tree_selection.rendered.len()
+    }
+
+    pub(super) fn prefetch_revisions(&self) -> Vec<(usize, Revision)> {
+        self.tree_selection
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let TreeRowKind::Revision(revision, _) = &row.kind else {
+                    return None;
+                };
+                let root = row.id.root();
+                if (self.tree_selection.grouped
+                    && !self
+                        .tree_selection
+                        .is_expanded(&TreeRowId::Repository(root.to_owned())))
+                    || !self
+                        .tree_selection
+                        .is_expanded(&TreeRowId::History(root.to_owned()))
+                {
+                    return None;
+                }
+
+                self.repositories
+                    .iter()
+                    .position(|repository| {
+                        repository.snapshot.repository().root() == root && !repository.stale
+                    })
+                    .map(|index| (index, revision.clone()))
+            })
+            .collect()
     }
 
     pub(super) fn render_tree_rows(

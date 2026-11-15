@@ -43,7 +43,7 @@ pub struct DiagnosticOutput {
     pub text: String,
 }
 
-const PROTOCOL_VERSION: u32 = 7;
+const PROTOCOL_VERSION: u32 = 8;
 
 pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     Ok(bincode::DefaultOptions::new().serialize(&(PROTOCOL_VERSION, value))?)
@@ -234,6 +234,14 @@ pub enum Request {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Read {
+    FileProbe {
+        revision: String,
+        path: String,
+    },
+    MergedParentFile {
+        revision: String,
+        file: crate::ChangedFile,
+    },
     FileEdit {
         revision: String,
         path: String,
@@ -990,6 +998,12 @@ impl Service {
     async fn read(&self, info: SnapshotInfo, operation: Read) -> Result<Response> {
         let snapshot = self.snapshot(&info)?;
         match operation {
+            Read::FileProbe { revision, path } => {
+                data(snapshot.file_probe(&revision, &path).await?)
+            }
+            Read::MergedParentFile { revision, file } => {
+                data(snapshot.merged_parent_file(&revision, &file).await?)
+            }
             Read::Revisions { revset, limit } => {
                 data(snapshot.revisions(revset.as_deref(), limit).await?)
             }
@@ -1433,7 +1447,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("protocol version 2 (expected 7)"),
+                .contains("protocol version 2 (expected 8)"),
             "{error:#}"
         );
         let revision: Revision = serde_json::from_value(serde_json::json!({

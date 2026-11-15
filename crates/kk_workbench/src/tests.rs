@@ -8,6 +8,8 @@ use tempfile::TempDir;
 mod conflict_tests;
 #[path = "file_edit_tests.rs"]
 mod file_edit_tests;
+#[path = "prefetch_tests.rs"]
+mod prefetch_tests;
 #[path = "remote_tests.rs"]
 mod remote_tests;
 #[path = "transaction_tests.rs"]
