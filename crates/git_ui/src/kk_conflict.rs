@@ -14,8 +14,8 @@ use gpui::{
     FocusHandle, Focusable, Render, SharedString, Subscription, Task, WeakEntity, Window, actions,
 };
 use kk_workbench::{
-    ConflictChoice, ConflictDraft, ConflictEditReason, ConflictInput, ConflictRole, FileConflict,
-    Snapshot,
+    ConflictChoice, ConflictDraft, ConflictEdit, ConflictEditReason, ConflictInput, ConflictRole,
+    FileConflict, Snapshot,
 };
 use language::{Buffer, Capability};
 use multi_buffer::{MultiBuffer, MultiBufferOffset, ToOffset as _};
@@ -52,6 +52,7 @@ pub(super) struct KkConflict {
     draft: ConflictDraft,
     saved_draft: ConflictDraft,
     saved_version: u64,
+    synchronized_version: clock::Global,
     snapshot: Option<Snapshot>,
     operation: String,
     editor: Entity<Editor>,
@@ -453,6 +454,7 @@ impl KkConflict {
         Self {
             saved_draft: draft.clone(),
             saved_version: 0,
+            synchronized_version: buffer.read(cx).version(),
             draft,
             operation: snapshot
                 .as_ref()
@@ -518,8 +520,18 @@ impl KkConflict {
     }
 
     fn synchronize(&mut self, reason: ConflictEditReason, cx: &App) -> Result<()> {
-        self.draft
-            .update(&self.buffer.read(cx).text(), None, reason)
+        let snapshot = self.buffer.read(cx).snapshot();
+        let edits = snapshot
+            .text
+            .edits_since::<usize>(&self.synchronized_version)
+            .map(|edit| ConflictEdit {
+                range: edit.old,
+                text: snapshot.text_for_range(edit.new).collect(),
+            })
+            .collect::<Vec<_>>();
+        self.draft.update(&snapshot.text(), Some(&edits), reason)?;
+        self.synchronized_version = snapshot.version().clone();
+        Ok(())
     }
 
     fn refresh_metadata(draft: &mut ConflictDraft, conflict: &FileConflict) {
@@ -866,6 +878,7 @@ impl KkConflict {
                 editor.finalize_last_transaction(cx);
             });
             self.draft = next;
+            self.synchronized_version = self.buffer.read(cx).version();
             anyhow::Ok(())
         })();
         if let Err(error) = result {
@@ -3419,6 +3432,261 @@ mod tests {
                     assert!(editor.scroll_position(cx).y > 0., "{name}");
                 }
             });
+        }
+    }
+
+    #[gpui::test(iterations = 3)]
+    async fn kk_conflict_edits_preserve_version_sections(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            cx.bind_keys([
+                gpui::KeyBinding::new("enter", editor::actions::Newline, Some("Editor")),
+                gpui::KeyBinding::new("cmd-z", editor::actions::Undo, Some("Editor")),
+                gpui::KeyBinding::new("cmd-shift-z", editor::actions::Redo, Some("Editor")),
+            ]);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/repository", serde_json::json!({})).await;
+        let project = Project::test(fs, [Path::new("/repository")], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |workspace, _| workspace.workspace().clone());
+        let sections = |draft: &ConflictDraft| {
+            let text = draft.editor_text();
+            draft
+                .conflicts
+                .iter()
+                .map(|conflict| {
+                    assert!(!conflict.edited);
+                    conflict
+                        .sections
+                        .iter()
+                        .map(|section| {
+                            (
+                                section.role,
+                                section.index,
+                                text.get(section.range.clone())
+                                    .expect("section range")
+                                    .to_owned(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        for line_ending in ["\n", "\r\n"] {
+            for (name, ranges, input, expected_base, expected_second_base) in [
+                (
+                    "enter",
+                    vec![Point::new(1, 4)..Point::new(1, 4)],
+                    "\n",
+                    "base\n\n",
+                    "base2\n",
+                ),
+                (
+                    "blank-lines",
+                    vec![Point::new(1, 4)..Point::new(1, 4)],
+                    "\n\n",
+                    "base\n\n\n",
+                    "base2\n",
+                ),
+                (
+                    "repeated-text",
+                    vec![Point::new(1, 0)..Point::new(1, 0)],
+                    "base",
+                    "basebase\n",
+                    "base2\n",
+                ),
+                (
+                    "paste",
+                    vec![Point::new(1, 4)..Point::new(1, 4)],
+                    "\n中文\n\n",
+                    "base\n中文\n\n\n",
+                    "base2\n",
+                ),
+                (
+                    "replace",
+                    vec![Point::new(1, 0)..Point::new(1, 4)],
+                    "中文",
+                    "中文\n",
+                    "base2\n",
+                ),
+                (
+                    "delete",
+                    vec![Point::new(1, 3)..Point::new(1, 4)],
+                    "",
+                    "bas\n",
+                    "base2\n",
+                ),
+                (
+                    "join-lines",
+                    vec![Point::new(1, 4)..Point::new(2, 0)],
+                    "",
+                    "base",
+                    "base2\n",
+                ),
+                (
+                    "multi-cursor",
+                    vec![
+                        Point::new(1, 4)..Point::new(1, 4),
+                        Point::new(5, 5)..Point::new(5, 5),
+                    ],
+                    "\n",
+                    "base\n\n",
+                    "base2\n\n",
+                ),
+                (
+                    "batched-input",
+                    vec![Point::new(1, 4)..Point::new(1, 4)],
+                    "\n",
+                    "base\n\n\n",
+                    "base2\n",
+                ),
+            ] {
+                let materialized = concat!(
+                    "<<<<<<< conflict 1\n+++++++ left\nleft\n------- base\nbase\n+++++++ right\nright\n>>>>>>> conflict 1\n",
+                    "between\n<<<<<<< conflict 2\n+++++++ left\nleft2\n------- base\nbase2\n+++++++ right\nright2\n>>>>>>> conflict 2\n",
+                ).replace('\n', line_ending);
+                let draft = ConflictDraft::open(FileConflict {
+                    repository_root: "/repository".into(),
+                    path: format!("{name}.txt"),
+                    change_id: "change".into(),
+                    commit_id: "commit".into(),
+                    immutable: true,
+                    inputs: [
+                        (ConflictRole::Side, 0, "left\nbetween\nleft2\n"),
+                        (ConflictRole::Base, 0, "base\nbetween\nbase2\n"),
+                        (ConflictRole::Side, 1, "right\nbetween\nright2\n"),
+                    ]
+                    .into_iter()
+                    .map(|(role, index, text)| ConflictInput {
+                        role,
+                        index,
+                        id: Some(format!("{role:?}-{index}")),
+                        executable: false,
+                        bytes: text.replace('\n', line_ending).into_bytes(),
+                        source: None,
+                    })
+                    .collect(),
+                    materialized: materialized.into_bytes(),
+                    marker_length: 7,
+                    binary: false,
+                })
+                .expect("draft");
+                let original_sections = sections(&draft);
+                let original_text = draft.text.clone();
+                let buffer = cx.new(|cx| Buffer::local(draft.editor_text(), cx));
+                let view = cx.new_window_entity(|window, cx| {
+                    KkConflict::new(
+                        None,
+                        draft,
+                        format!("section-{name}"),
+                        buffer.clone(),
+                        project.clone(),
+                        workspace.downgrade(),
+                        None,
+                        window,
+                        cx,
+                    )
+                });
+                workspace.update_in(cx, |workspace, window, cx| {
+                    workspace.add_item_to_active_pane(
+                        Box::new(view.clone()),
+                        None,
+                        true,
+                        window,
+                        cx,
+                    );
+                });
+                let editor = view.read_with(cx, |view, _| view.editor.clone());
+                editor.update_in(cx, |editor, window, cx| {
+                    editor.finalize_last_transaction(cx);
+                    editor.change_selections(
+                        editor::SelectionEffects::no_scroll(),
+                        window,
+                        cx,
+                        |selections| selections.select_ranges(ranges),
+                    );
+                    editor.focus_handle(cx).focus(window, cx);
+                });
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                if name == "enter" {
+                    cx.simulate_keystrokes("enter");
+                } else if name == "batched-input" {
+                    editor.update_in(cx, |editor, window, cx| {
+                        editor.transact(window, cx, |editor, window, cx| {
+                            editor.insert(input, window, cx);
+                            editor.insert(input, window, cx);
+                        });
+                    });
+                } else {
+                    editor.update_in(cx, |editor, window, cx| editor.insert(input, window, cx));
+                }
+
+                editor.update(cx, |editor, cx| editor.finalize_last_transaction(cx));
+                cx.run_until_parked();
+                let expected = vec![
+                    vec![
+                        (ConflictRole::Side, 0, "left\n".to_owned()),
+                        (ConflictRole::Base, 0, expected_base.to_owned()),
+                        (ConflictRole::Side, 1, "right\n".to_owned()),
+                    ],
+                    vec![
+                        (ConflictRole::Side, 0, "left2\n".to_owned()),
+                        (ConflictRole::Base, 0, expected_second_base.to_owned()),
+                        (ConflictRole::Side, 1, "right2\n".to_owned()),
+                    ],
+                ];
+                let expected_text = format!(
+                    "left\n{expected_base}right\nbetween\nleft2\n{expected_second_base}right2\n"
+                )
+                .replace('\n', line_ending);
+                view.read_with(cx, |view, _| {
+                    assert!(view.error.is_none(), "{name}: {:?}", view.error);
+                    assert_eq!(sections(&view.draft), expected, "{name}, {line_ending:?}");
+                    assert_eq!(view.draft.text, expected_text, "{name}");
+                });
+                cx.simulate_keystrokes("cmd-z");
+                cx.run_until_parked();
+                view.read_with(cx, |view, _| {
+                    assert_eq!(sections(&view.draft), original_sections, "undo {name}");
+                    assert_eq!(view.draft.text, original_text, "undo {name}");
+                });
+                cx.simulate_keystrokes("cmd-shift-z");
+                cx.run_until_parked();
+                view.update_in(cx, |view, window, cx| {
+                    assert_eq!(sections(&view.draft), expected, "redo {name}");
+                    let start = view
+                        .draft
+                        .conflicts
+                        .first()
+                        .expect("first conflict")
+                        .range
+                        .start;
+                    view.accept(
+                        vec![start],
+                        ConflictChoice::Input(ConflictRole::Base, 0),
+                        window,
+                        cx,
+                    );
+                    assert!(view.error.is_none(), "accept {name}: {:?}", view.error);
+                    assert_eq!(
+                        view.draft.editor_text(),
+                        format!("{expected_base}between\nleft2\n{expected_second_base}right2\n"),
+                        "accept {name}"
+                    );
+                });
+                cx.run_until_parked();
+                cx.simulate_keystrokes("cmd-z");
+                cx.run_until_parked();
+                view.read_with(cx, |view, _| {
+                    assert!(view.error.is_none(), "undo accept {name}: {:?}", view.error);
+                    assert_eq!(sections(&view.draft), expected, "undo accept {name}");
+                });
+            }
         }
     }
 
