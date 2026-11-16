@@ -1,10 +1,7 @@
 use crate::{
     branch_picker,
     diff_multibuffer::DiffMultibuffer,
-    project_diff::{
-        self, CompareWithBranch, DeployBranchDiff, ProjectDiff, ReviewDiff,
-        render_send_review_to_agent_button,
-    },
+    project_diff::{self, CompareWithBranch, DeployBranchDiff, ProjectDiff, ReviewDiff},
 };
 use agent_settings::AgentSettings;
 use anyhow::{Context as _, Result, anyhow};
@@ -13,6 +10,7 @@ use editor::{
     actions::SendReviewToAgent,
 };
 use git::{repository::DiffType, status::FileStatus};
+use git_ui_core::file_diff_view::render_send_review_to_agent_button;
 use gpui::{
     Action, App, AppContext as _, Entity, EventEmitter, FocusHandle, Focusable, Render,
     SharedString, Subscription, Task, WeakEntity,

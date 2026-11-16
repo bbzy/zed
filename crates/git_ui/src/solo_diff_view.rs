@@ -2,15 +2,14 @@ use crate::{git_panel::GitStatusEntry, git_panel_settings::GitPanelSettings, git
 use anyhow::{Context as _, Result};
 use buffer_diff::DiffHunkSecondaryStatus;
 use editor::{
-    DiffStyleControls, Direction, Editor, EditorEvent, EditorSettings, SplittableEditor,
-    ToggleSplitDiff,
-    actions::{GoToHunk, GoToPreviousHunk},
+    Direction, Editor, EditorEvent, EditorSettings, SplittableEditor, ToggleSplitDiff,
     file_status_label_color,
 };
 use git::{
     Commit, Restore, StageAndNext, StageFile, ToggleStaged, UnstageAndNext, UnstageFile,
     repository::RepoPath, status::StageStatus,
 };
+use git_ui_core::file_diff_view::{diff_navigation_controls, diff_style_controls};
 use gpui::{
     Action, App, AppContext as _, Context, Empty, Entity, EventEmitter, FocusHandle, Focusable,
     HighlightStyle, IntoElement, Render, Subscription, Task, WeakEntity, Window,
@@ -28,10 +27,7 @@ use std::{
     sync::Arc,
 };
 use ui::{DiffStat, Divider, Tooltip, prelude::*};
-use util::{
-    ResultExt as _,
-    paths::{PathExt as _, PathStyle},
-};
+use util::paths::{PathExt as _, PathStyle};
 use workspace::{
     Item, ItemHandle, ItemNavHistory, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
     Workspace,
@@ -541,8 +537,6 @@ impl Render for SoloDiffView {
 
 pub struct SoloDiffStyleToolbar {
     solo_diff: Option<WeakEntity<SoloDiffView>>,
-    kk_diff: Option<Entity<crate::kk_diff_controls::KkDiffControls>>,
-    _kk_subscription: Option<Subscription>,
 }
 
 pub(super) fn diff_file_breadcrumbs(
@@ -569,97 +563,13 @@ pub(super) fn diff_file_breadcrumbs(
     )
 }
 
-pub(super) fn diff_style_controls(
-    editor: Entity<SplittableEditor>,
-    showing_full_file: bool,
-    on_toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> gpui::Div {
-    h_flex()
-        .debug_selector(|| "solo-diff-style-controls".into())
-        .pl_0p5()
-        .gap_1()
-        .child(diff_context_control(showing_full_file, on_toggle))
-        .child(DiffStyleControls::new(editor))
-        .child(Divider::vertical().mr_1())
-}
-
-fn diff_context_control(
-    showing_full_file: bool,
-    on_toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> IconButton {
-    let (icon, tooltip) = if showing_full_file {
-        (IconName::ChevronDownUp, "Show Changes Only")
-    } else {
-        (IconName::ChevronUpDown, "Show Full File")
-    };
-    IconButton::new("solo-diff-toggle-excerpts", icon)
-        .icon_size(IconSize::Small)
-        .tooltip(Tooltip::text(tooltip))
-        .on_click(on_toggle)
-}
-
-pub(super) fn diff_navigation_controls(
-    editor: Entity<SplittableEditor>,
-    enabled: bool,
-    cx: &App,
-) -> impl IntoElement + use<> {
-    let focus = editor.focus_handle(cx);
-    let previous_editor = editor.clone();
-    h_group_sm()
-        .child(
-            IconButton::new("up", IconName::ArrowUp)
-                .aria_label("Go to Previous Hunk")
-                .icon_size(IconSize::Small)
-                .disabled(!enabled)
-                .tooltip(Tooltip::for_action_title_in(
-                    "Go to Previous Hunk",
-                    &GoToPreviousHunk,
-                    &focus,
-                ))
-                .on_click(move |_, window, cx| {
-                    dispatch_diff_action(&previous_editor, &GoToPreviousHunk, window, cx);
-                }),
-        )
-        .child(
-            IconButton::new("down", IconName::ArrowDown)
-                .aria_label("Go to Next Hunk")
-                .icon_size(IconSize::Small)
-                .disabled(!enabled)
-                .tooltip(Tooltip::for_action_title_in(
-                    "Go to Next Hunk",
-                    &GoToHunk,
-                    &focus,
-                ))
-                .on_click(move |_, window, cx| {
-                    dispatch_diff_action(&editor, &GoToHunk, window, cx);
-                }),
-        )
-}
-
-pub(super) fn dispatch_diff_action(
-    editor: &Entity<SplittableEditor>,
-    action: &dyn gpui::Action,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let focus = editor.focus_handle(cx);
-    focus.focus(window, cx);
-    focus.dispatch_action(action, window, cx);
-}
-
 pub struct SoloDiffGitToolbar {
     solo_diff: Option<WeakEntity<SoloDiffView>>,
-    kk_diff: Option<Entity<crate::kk_diff_controls::KkDiffControls>>,
-    _kk_subscription: Option<Subscription>,
 }
 
 impl SoloDiffStyleToolbar {
     pub fn new(_: &mut Context<Self>) -> Self {
-        Self {
-            solo_diff: None,
-            kk_diff: None,
-            _kk_subscription: None,
-        }
+        Self { solo_diff: None }
     }
 
     fn solo_diff(&self) -> Option<Entity<SoloDiffView>> {
@@ -687,13 +597,7 @@ impl ToolbarItemView for SoloDiffStyleToolbar {
         self.solo_diff = active_pane_item
             .and_then(|item| item.act_as::<SoloDiffView>(cx))
             .map(|entity| entity.downgrade());
-        self.kk_diff = active_pane_item
-            .and_then(|item| item.act_as::<crate::kk_diff_controls::KkDiffControls>(cx));
-        self._kk_subscription = self
-            .kk_diff
-            .as_ref()
-            .map(|controls| cx.observe(controls, |_, _, cx| cx.notify()));
-        if self.solo_diff.is_some() || self.kk_diff.is_some() {
+        if self.solo_diff.is_some() {
             ToolbarItemLocation::PrimaryLeft
         } else {
             ToolbarItemLocation::Hidden
@@ -703,34 +607,6 @@ impl ToolbarItemView for SoloDiffStyleToolbar {
 
 impl Render for SoloDiffStyleToolbar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(controls) = &self.kk_diff {
-            let editor = controls.read(cx).editor.clone();
-            let showing_full_file = controls.read(cx).showing_full_file;
-            let status = controls.read(cx).status;
-            let generic_style_controls = controls.read(cx).generic_style_controls;
-            let show_status_icon =
-                GitPanelSettings::get_global(cx).status_style != StatusStyle::LabelColor;
-            let controls = controls.downgrade();
-            let on_toggle = move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
-                controls
-                    .update(cx, |controls, cx| controls.toggle_full_file(window, cx))
-                    .log_err();
-            };
-            let controls = if generic_style_controls {
-                h_flex()
-                    .pl_0p5()
-                    .gap_1()
-                    .child(diff_context_control(showing_full_file, on_toggle))
-            } else {
-                diff_style_controls(editor, showing_full_file, on_toggle)
-            };
-            return controls
-                .when_some(
-                    show_status_icon.then_some(status).flatten(),
-                    |this, status| this.child(git_status_icon(status)),
-                )
-                .into_any_element();
-        }
         let Some(solo_diff) = self.solo_diff() else {
             return Empty.into_any_element();
         };
@@ -768,11 +644,7 @@ impl Render for SoloDiffStyleToolbar {
 
 impl SoloDiffGitToolbar {
     pub fn new(_: &mut Context<Self>) -> Self {
-        Self {
-            solo_diff: None,
-            kk_diff: None,
-            _kk_subscription: None,
-        }
+        Self { solo_diff: None }
     }
 
     fn solo_diff(&self) -> Option<Entity<SoloDiffView>> {
@@ -816,13 +688,7 @@ impl ToolbarItemView for SoloDiffGitToolbar {
         self.solo_diff = active_pane_item
             .and_then(|item| item.act_as::<SoloDiffView>(cx))
             .map(|entity| entity.downgrade());
-        self.kk_diff = active_pane_item
-            .and_then(|item| item.act_as::<crate::kk_diff_controls::KkDiffControls>(cx));
-        self._kk_subscription = self
-            .kk_diff
-            .as_ref()
-            .map(|controls| cx.observe(controls, |_, _, cx| cx.notify()));
-        if self.solo_diff.is_some() || self.kk_diff.is_some() {
+        if self.solo_diff.is_some() {
             ToolbarItemLocation::PrimaryRight
         } else {
             ToolbarItemLocation::Hidden
@@ -882,15 +748,7 @@ mod tests {
 }
 
 impl Render for SoloDiffGitToolbar {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(controls) = &self.kk_diff {
-            return crate::kk_diff_controls::KkDiffControls::render_actions(
-                controls.clone(),
-                window,
-                cx,
-            )
-            .into_any_element();
-        }
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(solo_diff) = self.solo_diff() else {
             return gpui::Empty.into_any_element();
         };

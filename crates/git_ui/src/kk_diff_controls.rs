@@ -1,18 +1,21 @@
+use super::{git_panel_settings::GitPanelSettings, git_status_icon};
 use buffer_diff::BufferDiff;
 use editor::display_map::ToDisplayPoint as _;
 use editor::{
     DefaultDiffHunkRenderer, DiffHunkRenderer, Editor, EditorEvent, RowExt as _, SplittableEditor,
 };
+use git_ui_core::file_diff_view::{diff_context_control, diff_style_controls};
 use gpui::{
-    App, AppContext as _, Context, Entity, Focusable as _, Render, ScrollHandle, Subscription,
-    WeakEntity, Window,
+    App, AppContext as _, Context, Entity, EventEmitter, Focusable as _, Render, ScrollHandle,
+    Subscription, WeakEntity, Window,
 };
 use language::{Buffer, OffsetRangeExt as _, Point};
 use multi_buffer::{PathKey, excerpt_context_lines};
-use settings::Settings as _;
+use settings::{Settings as _, StatusStyle};
 use std::{ops::Range, sync::Arc};
 use ui::{DiffStat, Divider, Tooltip, prelude::*};
 use util::ResultExt as _;
+use workspace::{ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView, item::ItemHandle};
 
 async fn load_review_diff(
     snapshot: &kk_workbench::Snapshot,
@@ -727,7 +730,7 @@ impl KkDiffControls {
                             .icon_size(IconSize::Small)
                             .tooltip(Tooltip::text("Buffer Search"))
                             .on_click(move |_, window, cx| {
-                                super::solo_diff_view::dispatch_diff_action(
+                                git_ui_core::file_diff_view::dispatch_diff_action(
                                     &search_editor,
                                     &zed_actions::buffer_search::Deploy::find(),
                                     window,
@@ -833,7 +836,7 @@ impl KkDiffControls {
                 ))
                 .child(Divider::vertical().ml_1())
             })
-            .child(super::solo_diff_view::diff_navigation_controls(
+            .child(git_ui_core::file_diff_view::diff_navigation_controls(
                 editor.clone(),
                 has_changes,
                 cx,
@@ -849,7 +852,7 @@ impl KkDiffControls {
                             &focus,
                         ))
                         .on_click(move |_, window, cx| {
-                            super::solo_diff_view::dispatch_diff_action(
+                            git_ui_core::file_diff_view::dispatch_diff_action(
                                 &editor,
                                 &git::Restore,
                                 window,
@@ -871,15 +874,18 @@ impl KkDiffControls {
             })
             .when(review_count > 0, |this| {
                 this.child(Divider::vertical()).child(
-                    super::project_diff::render_send_review_to_agent_button(review_count, &focus)
-                        .on_click(move |_, window, cx| {
-                            super::solo_diff_view::dispatch_diff_action(
-                                &editor,
-                                &editor::actions::SendReviewToAgent,
-                                window,
-                                cx,
-                            )
-                        }),
+                    git_ui_core::file_diff_view::render_send_review_to_agent_button(
+                        review_count,
+                        &focus,
+                    )
+                    .on_click(move |_, window, cx| {
+                        git_ui_core::file_diff_view::dispatch_diff_action(
+                            &editor,
+                            &editor::actions::SendReviewToAgent,
+                            window,
+                            cx,
+                        )
+                    }),
                 )
             })
     }
@@ -905,25 +911,23 @@ impl Render for KkDiffControls {
             .children(details.and_then(|revision| {
                 let message = self.message.clone()?;
                 let view = cx.weak_entity();
-                let sha: gpui::SharedString = revision.full_commit_id.clone().into();
+                let sha: gpui::SharedString = revision.full_commit_id.into();
                 Some(
-                    super::commit_view::CommitHeader {
+                    super::commit_metadata::CommitHeader {
                         author_name: revision.author_name.into(),
-                        author_email: revision.author_email.clone().into(),
+                        author_email: revision.author_email.into(),
                         timestamp: revision.commit_timestamp,
                         description: revision.full_description,
                         change_id_prefix: Some(revision.change_id_prefix),
                         identifiers: vec![
                             ("Change ID", revision.full_change_id.into()),
-                            ("Commit SHA", sha.clone()),
+                            ("Commit SHA", sha),
                         ],
-                        avatar: super::commit_tooltip::CommitAvatar::new(
-                            &sha,
-                            Some(revision.author_email.into()),
-                            None,
-                        )
-                        .size(rems_from_px(40_f32))
-                        .render(window, cx),
+                        avatar: super::commit_metadata::avatar_placeholder(
+                            Some(rems_from_px(40_f32).into()),
+                            window,
+                            cx,
+                        ),
                         editor: self.editor.clone(),
                         message,
                         expanded: self.message_expanded,
@@ -979,6 +983,122 @@ impl DiffHunkRenderer for KkDiffHunkRenderer {
 
     fn render_hunk_as_staged(&self, _: &buffer_diff::DiffHunkStatus, _: &App) -> bool {
         false
+    }
+}
+
+pub struct KkDiffStyleToolbar {
+    kk_diff: Option<Entity<KkDiffControls>>,
+    _subscription: Option<Subscription>,
+}
+
+impl KkDiffStyleToolbar {
+    pub fn new(_: &mut Context<Self>) -> Self {
+        Self {
+            kk_diff: None,
+            _subscription: None,
+        }
+    }
+}
+
+impl EventEmitter<ToolbarItemEvent> for KkDiffStyleToolbar {}
+
+impl ToolbarItemView for KkDiffStyleToolbar {
+    fn set_active_pane_item(
+        &mut self,
+        active_pane_item: Option<&dyn ItemHandle>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ToolbarItemLocation {
+        self.kk_diff = active_pane_item.and_then(|item| item.act_as::<KkDiffControls>(cx));
+        self._subscription = self
+            .kk_diff
+            .as_ref()
+            .map(|controls| cx.observe(controls, |_, _, cx| cx.notify()));
+        if self.kk_diff.is_some() {
+            ToolbarItemLocation::PrimaryLeft
+        } else {
+            ToolbarItemLocation::Hidden
+        }
+    }
+}
+
+pub struct KkDiffActionsToolbar {
+    kk_diff: Option<Entity<KkDiffControls>>,
+    _subscription: Option<Subscription>,
+}
+
+impl KkDiffActionsToolbar {
+    pub fn new(_: &mut Context<Self>) -> Self {
+        Self {
+            kk_diff: None,
+            _subscription: None,
+        }
+    }
+}
+
+impl EventEmitter<ToolbarItemEvent> for KkDiffActionsToolbar {}
+
+impl ToolbarItemView for KkDiffActionsToolbar {
+    fn set_active_pane_item(
+        &mut self,
+        active_pane_item: Option<&dyn ItemHandle>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ToolbarItemLocation {
+        self.kk_diff = active_pane_item.and_then(|item| item.act_as::<KkDiffControls>(cx));
+        self._subscription = self
+            .kk_diff
+            .as_ref()
+            .map(|controls| cx.observe(controls, |_, _, cx| cx.notify()));
+        if self.kk_diff.is_some() {
+            ToolbarItemLocation::PrimaryRight
+        } else {
+            ToolbarItemLocation::Hidden
+        }
+    }
+}
+
+impl Render for KkDiffStyleToolbar {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(controls) = &self.kk_diff {
+            let editor = controls.read(cx).editor.clone();
+            let showing_full_file = controls.read(cx).showing_full_file;
+            let status = controls.read(cx).status;
+            let generic_style_controls = controls.read(cx).generic_style_controls;
+            let show_status_icon =
+                GitPanelSettings::get_global(cx).status_style != StatusStyle::LabelColor;
+            let controls = controls.downgrade();
+            let on_toggle = move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+                controls
+                    .update(cx, |controls, cx| controls.toggle_full_file(window, cx))
+                    .log_err();
+            };
+            let controls = if generic_style_controls {
+                h_flex()
+                    .pl_0p5()
+                    .gap_1()
+                    .child(diff_context_control(showing_full_file, on_toggle))
+            } else {
+                diff_style_controls(editor, showing_full_file, on_toggle)
+            };
+            return controls
+                .when_some(
+                    show_status_icon.then_some(status).flatten(),
+                    |this, status| this.child(git_status_icon(status)),
+                )
+                .into_any_element();
+        }
+        gpui::Empty.into_any_element()
+    }
+}
+
+impl Render for KkDiffActionsToolbar {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(controls) = &self.kk_diff {
+            KkDiffControls::render_actions(controls.clone(), window, cx).into_any_element()
+        } else {
+            gpui::Empty.into_any_element()
+        }
     }
 }
 

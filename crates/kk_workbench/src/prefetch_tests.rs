@@ -13,6 +13,7 @@ fn prefetch_bounds_content_and_primes_foreground_queries() -> Result<()> {
         .text();
         for (path, bytes) in [
             ("text.txt", "你好\n".as_bytes()),
+            ("--help", "literal path\n".as_bytes()),
             ("binary.bin", b"before\0after".as_slice()),
             ("encoding.bin", b"\xff\xfe".as_slice()),
             ("pointer.txt", pointer.as_bytes()),
@@ -55,6 +56,10 @@ fn prefetch_bounds_content_and_primes_foreground_queries() -> Result<()> {
             assert_eq!(link.information.file_type.as_deref(), Some("symlink"));
             assert!(link.contents.is_none());
         }
+        assert_eq!(
+            snapshot.prefetch_file(&revision, "--help").await?.contents,
+            Some(b"literal path\n".to_vec())
+        );
         let text = snapshot.prefetch_file(&revision, "text.txt").await?;
         assert!(text.is_text());
         assert_eq!(text.contents.as_deref(), Some("你好\n".as_bytes()));

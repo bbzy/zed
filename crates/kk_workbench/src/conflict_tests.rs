@@ -203,7 +203,7 @@ fn conflict_parsers_preserve_literal_markers_and_missing_newlines() -> Result<()
 #[test]
 fn conflict_resolution_is_private_exact_and_one_undo() -> Result<()> {
     smol::block_on(async {
-        let path = "quote\" $(do-not-run).txt";
+        let path = "-quote\" $(do-not-run).txt";
         let fixture = conflict_fixture(
             b"header\r\nbase\r\nfooter\r\n",
             b"header\r\nleft\r\nfooter\r\n",

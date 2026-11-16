@@ -5,6 +5,7 @@ use buffer_diff::BufferDiff;
 use editor::{
     DiffStyleControls, Editor, EditorEvent, EditorSettings, HiddenUnstagedDiffHunkRenderer,
     MultiBuffer, SplittableEditor,
+    actions::{GoToHunk, GoToPreviousHunk, SendReviewToAgent},
 };
 use futures::{FutureExt, select_biased};
 use gpui::{
@@ -21,7 +22,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use ui::{Color, Icon, IconName, SharedString, prelude::*};
+use ui::{Color, Divider, Icon, IconName, SharedString, Tooltip, prelude::*};
 use util::paths::PathExt as _;
 use workspace::{
     Item, ItemHandle, ItemNavHistory, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
@@ -460,6 +461,104 @@ impl Render for FileDiffStyleToolbar {
             .child(DiffStyleControls::new(editor))
             .into_any_element()
     }
+}
+
+pub fn diff_style_controls(
+    editor: Entity<SplittableEditor>,
+    showing_full_file: bool,
+    on_toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> gpui::Div {
+    h_flex()
+        .debug_selector(|| "solo-diff-style-controls".into())
+        .pl_0p5()
+        .gap_1()
+        .child(diff_context_control(showing_full_file, on_toggle))
+        .child(DiffStyleControls::new(editor))
+        .child(Divider::vertical().mr_1())
+}
+
+pub fn diff_context_control(
+    showing_full_file: bool,
+    on_toggle: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> IconButton {
+    let (icon, tooltip) = if showing_full_file {
+        (IconName::ChevronDownUp, "Show Changes Only")
+    } else {
+        (IconName::ChevronUpDown, "Show Full File")
+    };
+    IconButton::new("solo-diff-toggle-excerpts", icon)
+        .icon_size(IconSize::Small)
+        .tooltip(Tooltip::text(tooltip))
+        .on_click(on_toggle)
+}
+
+pub fn diff_navigation_controls(
+    editor: Entity<SplittableEditor>,
+    enabled: bool,
+    cx: &App,
+) -> impl IntoElement + use<> {
+    let focus = editor.focus_handle(cx);
+    let previous_editor = editor.clone();
+    h_group_sm()
+        .child(
+            IconButton::new("up", IconName::ArrowUp)
+                .aria_label("Go to Previous Hunk")
+                .icon_size(IconSize::Small)
+                .disabled(!enabled)
+                .tooltip(Tooltip::for_action_title_in(
+                    "Go to Previous Hunk",
+                    &GoToPreviousHunk,
+                    &focus,
+                ))
+                .on_click(move |_, window, cx| {
+                    dispatch_diff_action(&previous_editor, &GoToPreviousHunk, window, cx);
+                }),
+        )
+        .child(
+            IconButton::new("down", IconName::ArrowDown)
+                .aria_label("Go to Next Hunk")
+                .icon_size(IconSize::Small)
+                .disabled(!enabled)
+                .tooltip(Tooltip::for_action_title_in(
+                    "Go to Next Hunk",
+                    &GoToHunk,
+                    &focus,
+                ))
+                .on_click(move |_, window, cx| {
+                    dispatch_diff_action(&editor, &GoToHunk, window, cx);
+                }),
+        )
+}
+
+pub fn dispatch_diff_action(
+    editor: &Entity<SplittableEditor>,
+    action: &dyn gpui::Action,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let focus = editor.focus_handle(cx);
+    focus.focus(window, cx);
+    focus.dispatch_action(action, window, cx);
+}
+
+pub fn render_send_review_to_agent_button(
+    review_count: usize,
+    focus_handle: &FocusHandle,
+) -> Button {
+    Button::new(
+        "send-review",
+        format!("Send Review to Agent ({})", review_count),
+    )
+    .start_icon(
+        Icon::new(IconName::ZedAssistant)
+            .size(IconSize::Small)
+            .color(Color::Muted),
+    )
+    .tooltip(Tooltip::for_action_title_in(
+        "Send all review comments to the Agent panel",
+        &SendReviewToAgent,
+        focus_handle,
+    ))
 }
 
 #[cfg(test)]

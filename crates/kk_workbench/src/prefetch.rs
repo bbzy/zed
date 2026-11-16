@@ -116,22 +116,23 @@ impl Snapshot {
             let size: u64 = std::str::from_utf8(&size.stdout)?.trim().parse()?;
             information.size = Some(size);
             if size <= PREFETCH_FILE_BYTES as u64 {
-                let output = Command::new("git")
-                    .arg("--git-dir")
-                    .arg(&git_root)
-                    .args(["cat-file", "blob", object])
-                    .stdin(Stdio::null())
-                    .kill_on_drop(true)
-                    .output()
+                let bytes = self
+                    .read(&[
+                        "debug".into(),
+                        "object".into(),
+                        "file".into(),
+                        "--".into(),
+                        path.into(),
+                        object.into(),
+                    ])
                     .await?;
                 ensure!(
-                    output.status.success() && output.stdout.len() as u64 == size,
-                    "Cannot read complete file object: {}",
-                    String::from_utf8_lossy(&output.stderr)
+                    bytes.len() as u64 == size,
+                    "Cannot read complete file object"
                 );
-                information.contents(&output.stdout);
-                if !output.stdout.contains(&0) && std::str::from_utf8(&output.stdout).is_ok() {
-                    contents = Some(output.stdout);
+                information.contents(&bytes);
+                if !bytes.contains(&0) && std::str::from_utf8(&bytes).is_ok() {
+                    contents = Some(bytes);
                 }
             }
         }

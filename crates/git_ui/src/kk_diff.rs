@@ -1211,11 +1211,11 @@ impl KkDiff {
                             })
                             .unwrap_or_else(|| project::WorktreeId::from_usize(0))
                     });
-                    let blob = Arc::new(crate::commit_view::GitBlob {
+                    let blob = Arc::new(language::historical_file::HistoricalFile {
                         path: if let Some(project_path) = project_path {
-                            git::repository::RepoPath::from_rel_path(&project_path.path)
+                            project_path.path
                         } else {
-                            git::repository::RepoPath::new(&file_for_view.path)?
+                            util::rel_path::RelPath::from_unix_str(&file_for_view.path)?.into()
                         },
                         worktree_id,
                         is_deleted: false,
@@ -1223,7 +1223,7 @@ impl KkDiff {
                         display_name: file_for_view.path.clone(),
                     });
                     let buffer =
-                        crate::commit_view::build_buffer(text, blob, &registry, cx).await?;
+                        language::historical_file::build_buffer(text, blob, &registry, cx).await?;
                     buffer.update(cx, |buffer, cx| {
                         buffer.set_capability(Capability::ReadOnly, cx);
                         if presentation != DiffPresentation::Text {
@@ -2647,7 +2647,8 @@ impl Item for KkDiff {
         let state = selected.update(cx, SerializedEditorState::capture);
         cx.spawn_in(window, async move |_, cx| {
             let result = async {
-                let buffer = super::commit_view::build_buffer(text, file, &registry, cx).await?;
+                let buffer =
+                    language::historical_file::build_buffer(text, file, &registry, cx).await?;
                 buffer.update(cx, |buffer, cx| {
                     buffer.set_capability(Capability::ReadOnly, cx);
                     if !text_presentation {
@@ -4572,7 +4573,7 @@ mod tests {
         workspace.update_in(cx, |workspace, window, cx| {
             let toolbar = workspace.active_pane().read(cx).toolbar().clone();
             toolbar.update(cx, |toolbar, cx| {
-                let style = cx.new(super::super::solo_diff_view::SoloDiffStyleToolbar::new);
+                let style = cx.new(super::super::kk_diff_controls::KkDiffStyleToolbar::new);
                 toolbar.add_item(style, window, cx);
                 let search = cx.new(|cx| {
                     search::BufferSearchBar::new(
@@ -4582,7 +4583,7 @@ mod tests {
                     )
                 });
                 toolbar.add_item(search.clone(), window, cx);
-                let actions = cx.new(super::super::solo_diff_view::SoloDiffGitToolbar::new);
+                let actions = cx.new(super::super::kk_diff_controls::KkDiffActionsToolbar::new);
                 toolbar.add_item(actions, window, cx);
                 search
             })
@@ -6741,8 +6742,10 @@ mod tests {
         let historical = cx.new(|cx| {
             let mut buffer = Buffer::local("A\nB\nC\n", cx);
             buffer.file_updated(
-                Arc::new(crate::commit_view::GitBlob {
-                    path: git::repository::RepoPath::new("category.txt").expect("historical path"),
+                Arc::new(language::historical_file::HistoricalFile {
+                    path: util::rel_path::RelPath::from_unix_str("category.txt")
+                        .expect("historical path")
+                        .into(),
                     worktree_id: project::WorktreeId::from_usize(0),
                     is_deleted: false,
                     is_binary: false,

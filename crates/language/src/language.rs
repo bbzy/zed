@@ -10,6 +10,7 @@ mod available_languages;
 mod buffer;
 mod diagnostic;
 mod diagnostic_set;
+pub mod historical_file;
 mod language_registry;
 
 pub mod language_settings;

@@ -77,6 +77,7 @@ pub mod unstaged_diff;
 pub use blame_ui::GitBlameStatus;
 pub use conflict_view::MergeConflictIndicator;
 pub use kk_blame::KkBlameStatus;
+pub use kk_diff_controls::{KkDiffActionsToolbar, KkDiffStyleToolbar};
 
 pub fn init(cx: &mut App) {
     kk_blame::init(cx);

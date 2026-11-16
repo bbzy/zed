@@ -1,3 +1,4 @@
+use crate::commit_metadata::{AVATAR_BORDER_WIDTH, avatar_placeholder};
 use crate::commit_view::CommitView;
 use anyhow::Result;
 use askpass::AskPassDelegate;
@@ -77,8 +78,6 @@ pub(crate) fn commit_tag_chips(tag_names: &[SharedString]) -> Option<impl IntoEl
     )
 }
 
-const COMMIT_AVATAR_BORDER_WIDTH: Pixels = px(1.);
-
 pub struct CommitAvatar<'a> {
     sha: &'a SharedString,
     author_email: Option<SharedString>,
@@ -118,30 +117,14 @@ impl<'a> CommitAvatar<'a> {
     }
 
     pub fn rendered_size(size: impl Into<AbsoluteLength>, window: &Window) -> Pixels {
-        size.into().to_pixels(window.rem_size()) + COMMIT_AVATAR_BORDER_WIDTH * 2.
+        size.into().to_pixels(window.rem_size()) + AVATAR_BORDER_WIDTH * 2.
     }
 
     pub fn render(&'a self, window: &mut Window, cx: &mut App) -> AnyElement {
         let border_color = cx.theme().colors().border_variant;
 
         match self.avatar(window, cx) {
-            None => {
-                let container_size = self.size.map(|size| Self::rendered_size(size, window));
-
-                h_flex()
-                    .when_some(container_size, |this, size| this.size(size))
-                    .justify_center()
-                    .rounded_full()
-                    .border(COMMIT_AVATAR_BORDER_WIDTH)
-                    .border_color(border_color)
-                    .bg(cx.theme().colors().element_disabled)
-                    .child(
-                        Icon::new(IconName::Person)
-                            .color(Color::Muted)
-                            .size(IconSize::XSmall),
-                    )
-                    .into_any_element()
-            }
+            None => avatar_placeholder(self.size, window, cx),
             Some(avatar) => avatar
                 .when_some(self.size, |this, size| this.size(size))
                 .border_color(border_color)

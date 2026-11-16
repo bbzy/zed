@@ -1172,14 +1172,14 @@ impl KkBlameStatus {
                     .or_else(|| project.worktrees(cx).next().map(|worktree| worktree.read(cx).id()))
                     .unwrap_or_else(|| project::WorktreeId::from_usize(0))
             });
-            let blob = Arc::new(crate::commit_view::GitBlob {
-                path: git::repository::RepoPath::new(&text.1)?,
+            let blob = Arc::new(language::historical_file::HistoricalFile {
+                path: util::rel_path::RelPath::from_unix_str(&text.1)?.into(),
                 worktree_id,
                 is_deleted: empty,
                 is_binary: false,
                 display_name: text.1.clone(),
             });
-            let buffer = crate::commit_view::build_buffer(text.0, blob, &registry, cx).await?;
+            let buffer = language::historical_file::build_buffer(text.0, blob, &registry, cx).await?;
             buffer.update(cx, |buffer, cx| {
                 buffer.set_capability(Capability::ReadOnly, cx);
             });

@@ -359,20 +359,21 @@ impl Snapshot {
             );
             let size: usize = std::str::from_utf8(&size.stdout)?.trim().parse()?;
             ensure!(size <= 50 * 1024 * 1024, "Conflict input exceeds 50 MiB");
-            let output = Command::new("git")
-                .arg("--git-dir")
-                .arg(&git_root)
-                .args(["cat-file", "blob", id])
-                .stdin(Stdio::null())
-                .kill_on_drop(true)
-                .output()
+            let bytes = self
+                .read(&[
+                    "debug".into(),
+                    "object".into(),
+                    "file".into(),
+                    "--".into(),
+                    path.into(),
+                    id.clone(),
+                ])
                 .await?;
             ensure!(
-                output.status.success() && output.stdout.len() == size,
-                "Cannot read a complete conflict input from the KK Git store: {}",
-                String::from_utf8_lossy(&output.stderr)
+                bytes.len() == size,
+                "Cannot read a complete conflict input from KK"
             );
-            input.bytes = output.stdout;
+            input.bytes = bytes;
             blobs.insert(id.clone(), input.bytes.clone());
         }
 

@@ -1,6 +1,6 @@
 use crate::{
     commit_tooltip::{CommitAvatar, CommitTooltip, commit_tag_chips, shallow_boundary_notice},
-    commit_view::{CommitView, GitBlob, build_buffer, worktree_id_for_repo_path},
+    commit_view::{CommitView, worktree_id_for_repo_path},
 };
 use anyhow::Context as _;
 use editor::{BlameRenderer, Editor, GitBlame, MultiBuffer, hover_markdown_style};
@@ -14,6 +14,7 @@ use gpui::{
     ClipboardItem, Entity, Hsla, MouseButton, Pixels, Rems, ScrollHandle, Subscription, TextStyle,
     TextStyleRefinement, UnderlineStyle, WeakEntity, prelude::*,
 };
+use language::historical_file::{HistoricalFile, build_buffer};
 use markdown::{Markdown, MarkdownElement};
 use project::{
     git_store::Repository,
@@ -661,8 +662,8 @@ fn open_buffer_blame_at_revision(
                     })
                     .await?;
 
-                let file = Arc::new(GitBlob {
-                    path: path.clone(),
+                let file = Arc::new(HistoricalFile {
+                    path: path.as_ref().clone(),
                     worktree_id,
                     is_deleted: false,
                     is_binary: false,
@@ -754,8 +755,8 @@ fn existing_blame_editor(
                 return None;
             }
             let file = buffer.read(cx).file()?;
-            let blob = (file.as_ref() as &dyn std::any::Any).downcast_ref::<GitBlob>()?;
-            (blob.path == *path).then_some(editor)
+            let blob = (file.as_ref() as &dyn std::any::Any).downcast_ref::<HistoricalFile>()?;
+            (blob.path.as_ref() == &**path).then_some(editor)
         })
 }
 

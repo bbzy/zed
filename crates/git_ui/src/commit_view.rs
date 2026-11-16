@@ -3,7 +3,7 @@ use buffer_diff::BufferDiff;
 use collections::HashMap;
 use editor::{
     Addon, Editor, EditorEvent, EditorSettings, HiddenDiffHunkRenderer, MultiBuffer,
-    SplittableEditor, hover_markdown_style, multibuffer_context_lines,
+    SplittableEditor, multibuffer_context_lines,
 };
 use futures_lite::future::yield_now;
 use git::repository::{CommitDetails, RepoPath};
@@ -13,16 +13,15 @@ use git::{
     parse_git_remote_url,
 };
 use gpui::{
-    AnyElement, App, AppContext as _, AsyncWindowContext, ClipboardItem, Context, Entity,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
-    PromptLevel, Render, ScrollHandle, StatefulInteractiveElement as _, Styled, Task, WeakEntity,
-    Window, actions,
+    AnyElement, App, AppContext as _, AsyncWindowContext, Context, Entity, EventEmitter,
+    FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement, PromptLevel, Render,
+    ScrollHandle, Styled, Task, WeakEntity, Window, actions,
 };
 use language::{
-    Buffer, Capability, DiskState, File, LanguageRegistry, LineEnding, OffsetRangeExt as _,
-    ReplicaId, Rope, TextBuffer,
+    Buffer, Capability, LanguageRegistry, LineEnding, OffsetRangeExt as _,
+    historical_file::{HistoricalFile, build_buffer},
 };
-use markdown::{Markdown, MarkdownElement, MarkdownStyle};
+use markdown::Markdown;
 use multi_buffer::PathKey;
 use project::{
     Project, ProjectPath, WorktreeId,
@@ -32,12 +31,11 @@ use settings::{DiffViewStyle, Settings};
 use std::{
     any::{Any, TypeId},
     collections::HashSet,
-    path::PathBuf,
     sync::Arc,
 };
 use theme::ActiveTheme;
-use ui::{ContextMenu, DiffStat, Disclosure, Divider, Tooltip, WithScrollbar, prelude::*};
-use util::{ResultExt, paths::PathStyle, rel_path::RelPath, truncate_and_trailoff};
+use ui::{ContextMenu, DiffStat, Divider, Tooltip, prelude::*};
+use util::{ResultExt, paths::PathStyle, truncate_and_trailoff};
 use workspace::item::TabTooltipContent;
 use workspace::{
     Item, ItemHandle, ItemNavHistory, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
@@ -45,6 +43,7 @@ use workspace::{
     searchable::SearchableItemHandle,
 };
 
+use crate::commit_metadata::CommitHeader;
 use crate::commit_tooltip::CommitAvatar;
 use crate::git_panel::GitPanel;
 
@@ -73,231 +72,6 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
-pub(super) struct CommitHeader {
-    pub author_name: gpui::SharedString,
-    pub author_email: gpui::SharedString,
-    pub timestamp: Option<i64>,
-    pub description: String,
-    pub change_id_prefix: Option<String>,
-    pub identifiers: Vec<(&'static str, gpui::SharedString)>,
-    pub avatar: AnyElement,
-    pub editor: Entity<SplittableEditor>,
-    pub message: Entity<Markdown>,
-    pub expanded: bool,
-    pub message_scroll_handle: ScrollHandle,
-    pub on_toggle: std::rc::Rc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>,
-}
-
-impl CommitHeader {
-    pub fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let date_string = self
-            .timestamp
-            .and_then(|timestamp| time::OffsetDateTime::from_unix_timestamp(timestamp).ok())
-            .map(|date| {
-                time_format::format_localized_timestamp(
-                    date,
-                    time::OffsetDateTime::now_utc(),
-                    time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC),
-                    time_format::TimestampFormat::MediumAbsolute,
-                )
-            });
-        let avatar_size = rems_from_px(40_f32);
-        let avatar_size_px = avatar_size.to_pixels(window.rem_size());
-        let gutter_width = self.editor.update(cx, |editor, cx| {
-            let editor = editor.rhs_editor().clone();
-            editor.update(cx, |editor, cx| {
-                let snapshot = editor.snapshot(window, cx);
-                let style = editor.style(cx);
-                let font_id = window.text_system().resolve_font(&style.text.font());
-                let font_size = style.text.font_size.to_pixels(window.rem_size());
-                snapshot
-                    .gutter_dimensions(font_id, font_size, style, window, cx)
-                    .full_width()
-            })
-        });
-        let avatar_min_side_padding = rems_from_px(6_f32).to_pixels(window.rem_size());
-        let avatar_container_min = avatar_size_px + avatar_min_side_padding;
-        let avatar_container_width = gutter_width.max(avatar_container_min);
-
-        let has_more = self.description.trim().contains('\n');
-        let is_expanded = self.expanded;
-        let expand_tooltip = if is_expanded {
-            "Fold Commit Description"
-        } else {
-            "Expand Commit Description"
-        };
-
-        let message = self.render_commit_message(avatar_container_width, window, cx);
-        let on_toggle = self.on_toggle.clone();
-        v_flex()
-            .debug_selector(|| "commit-details".into())
-            .w_full()
-            .py_2p5()
-            .gap_2()
-            .border_b_1()
-            .border_color(cx.theme().colors().border_variant)
-            .child(
-                h_flex()
-                    .pr_2p5()
-                    .w_full()
-                    .flex_wrap()
-                    .justify_between()
-                    .child(
-                        h_flex()
-                            .child(
-                                h_flex()
-                                    .flex_none()
-                                    .w(avatar_container_width)
-                                    .justify_center()
-                                    .child(self.avatar),
-                            )
-                            .child(
-                                v_flex()
-                                    .child(
-                                        h_flex()
-                                            .gap_1()
-                                            .child(super::commit_metadata::person(self.author_name))
-                                            .when(has_more, |this| {
-                                                this.child(
-                                                    Disclosure::new(
-                                                        "commit-message-disclosure",
-                                                        is_expanded,
-                                                    )
-                                                    .closed_icon(IconName::ExpandVertical)
-                                                    .opened_icon(IconName::FoldVertical)
-                                                    .tooltip(Tooltip::text(expand_tooltip))
-                                                    .on_click(move |event, window, cx| {
-                                                        on_toggle(event, window, cx)
-                                                    }),
-                                                )
-                                            }),
-                                    )
-                                    .child(
-                                        h_flex()
-                                            .gap_1p5()
-                                            .when_some(date_string, |this, date| {
-                                                this.child(
-                                                    Label::new(date)
-                                                        .color(Color::Muted)
-                                                        .size(LabelSize::Small),
-                                                )
-                                                .child(
-                                                    Label::new("•")
-                                                        .size(LabelSize::Small)
-                                                        .color(Color::Muted)
-                                                        .alpha(0.5),
-                                                )
-                                            })
-                                            .child(
-                                                super::commit_metadata::person(self.author_email)
-                                                    .size(LabelSize::Small),
-                                            ),
-                                    ),
-                            ),
-                    )
-                    .child(h_flex().gap_1().children(self.identifiers.into_iter().map(
-                        |(label, identifier)| {
-                            copy_commit_identifier(
-                                label,
-                                identifier,
-                                self.change_id_prefix.clone(),
-                                cx,
-                            )
-                        },
-                    ))),
-            )
-            .children(message)
-    }
-
-    fn render_commit_message(
-        &self,
-        avatar_spacer: Pixels,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Option<impl IntoElement + use<>> {
-        let message = self.description.trim();
-        if message.is_empty() {
-            return None;
-        }
-
-        let markdown_style = MarkdownStyle {
-            soft_break_as_hard_break: true,
-            ..hover_markdown_style(window, cx)
-        };
-
-        let is_expanded = self.expanded;
-
-        let has_more = message.contains('\n');
-        let collapsed = has_more && !is_expanded;
-        let collapsed_height = window.line_height();
-        let max_expanded_height = window.line_height() * 12.;
-
-        Some(
-            h_flex()
-                .w_full()
-                .pr_2p5()
-                .child(h_flex().flex_none().w(avatar_spacer))
-                .child(
-                    div()
-                        .relative()
-                        .flex_1()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .id("commit-message")
-                                .size_full()
-                                .text_sm()
-                                .when(collapsed, |this| this.h(collapsed_height).overflow_hidden())
-                                .when(!collapsed, |this| {
-                                    this.max_h(max_expanded_height)
-                                        .overflow_y_scroll()
-                                        .track_scroll(&self.message_scroll_handle)
-                                })
-                                .child(MarkdownElement::new(self.message.clone(), markdown_style)),
-                        )
-                        .vertical_scrollbar_for(&self.message_scroll_handle, window, cx),
-                ),
-        )
-    }
-}
-
-fn copy_commit_identifier(
-    label: &'static str,
-    identifier: gpui::SharedString,
-    change_id_prefix: Option<String>,
-    cx: &App,
-) -> Button {
-    let copied = cx
-        .read_from_clipboard()
-        .and_then(|item| item.text())
-        .is_some_and(|text| text.trim() == identifier.as_ref());
-    Button::new(label, label)
-        .color(Color::Accent)
-        .start_icon(
-            Icon::new(if copied {
-                IconName::Check
-            } else {
-                IconName::Copy
-            })
-            .size(IconSize::Small)
-            .color(if copied { Color::Success } else { Color::Muted }),
-        )
-        .tooltip({
-            super::commit_metadata::tooltip_with_prefix(
-                vec![(
-                    format!("Copy {label}"),
-                    identifier.to_string(),
-                    Color::Accent,
-                )],
-                change_id_prefix,
-            )
-        })
-        .on_click(move |_, _, cx| {
-            cx.stop_propagation();
-            cx.write_to_clipboard(ClipboardItem::new_string(identifier.to_string()));
-        })
-}
-
 pub struct CommitView {
     commit: CommitDetails,
     editor: Entity<SplittableEditor>,
@@ -313,14 +87,6 @@ pub struct CommitView {
     is_shallow_boundary: bool,
     file_filter: Option<RepoPath>,
     _load_diff_task: Task<Result<()>>,
-}
-
-pub(crate) struct GitBlob {
-    pub(crate) path: RepoPath,
-    pub(crate) worktree_id: WorktreeId,
-    pub(crate) is_deleted: bool,
-    pub(crate) is_binary: bool,
-    pub(crate) display_name: String,
 }
 
 pub(crate) fn worktree_id_for_repo_path(
@@ -612,8 +378,8 @@ impl CommitView {
                     .unwrap_or_else(|| file.path.display(PathStyle::local()).to_string());
                 let display_name = format!("{short_sha} - {file_name}");
 
-                let file = Arc::new(GitBlob {
-                    path: file.path.clone(),
+                let file = Arc::new(HistoricalFile {
+                    path: file.path.as_ref().clone(),
                     is_deleted,
                     is_binary,
                     worktree_id,
@@ -1132,85 +898,6 @@ impl CommitView {
     }
 }
 
-impl language::File for GitBlob {
-    fn as_local(&self) -> Option<&dyn language::LocalFile> {
-        None
-    }
-
-    fn disk_state(&self) -> DiskState {
-        DiskState::Historic {
-            was_deleted: self.is_deleted,
-        }
-    }
-
-    fn path_style(&self, _: &App) -> PathStyle {
-        PathStyle::local()
-    }
-
-    fn path(&self) -> &Arc<RelPath> {
-        self.path.as_ref()
-    }
-
-    fn full_path(&self, _: &App) -> PathBuf {
-        self.path.as_std_path().to_path_buf()
-    }
-
-    fn file_name<'a>(&'a self, _: &'a App) -> &'a str {
-        self.display_name.as_ref()
-    }
-
-    fn worktree_id(&self, _: &App) -> WorktreeId {
-        self.worktree_id
-    }
-
-    fn to_proto(&self, _cx: &App) -> language::proto::File {
-        unimplemented!()
-    }
-
-    fn is_private(&self) -> bool {
-        false
-    }
-
-    fn can_open(&self) -> bool {
-        !self.is_binary
-    }
-}
-
-pub(crate) async fn build_buffer(
-    mut text: String,
-    blob: Arc<dyn File>,
-    language_registry: &Arc<language::LanguageRegistry>,
-    cx: &mut AsyncWindowContext,
-) -> Result<Entity<Buffer>> {
-    let line_ending = LineEnding::detect(&text);
-    LineEnding::normalize(&mut text);
-    let text = Rope::from(text);
-    let language =
-        cx.update(|_, cx| language_registry.language_for_file(&blob, Some(&text), cx))?;
-    let language = if let Some(language_id) = language {
-        language_registry
-            .load_language(language_id)
-            .await
-            .ok()
-            .and_then(|e| e.log_err())
-    } else {
-        None
-    };
-    let buffer = cx.new(|cx| {
-        let buffer = TextBuffer::new_normalized(
-            ReplicaId::LOCAL,
-            cx.entity_id().as_non_zero_u64().into(),
-            line_ending,
-            text,
-        );
-        let mut buffer = Buffer::build(buffer, Some(blob), Capability::ReadWrite, cx);
-        buffer.set_language_registry(language_registry.clone());
-        buffer.set_language_async(language, cx);
-        buffer
-    });
-    Ok(buffer)
-}
-
 async fn build_buffer_diff(
     mut old_text: Option<String>,
     buffer: &Entity<Buffer>,
@@ -1601,7 +1288,7 @@ mod tests {
     use super::*;
     use gpui::{EmptyView, TestAppContext};
     use indoc::indoc;
-    use language::{Language, LanguageConfig, LanguageMatcher, markdown_lang};
+    use language::{File, Language, LanguageConfig, LanguageMatcher, markdown_lang};
     use settings::SettingsStore;
 
     #[gpui::test]
@@ -1626,8 +1313,10 @@ mod tests {
             Some *emphasized* text.
         "}
         .to_string();
-        let blob = Arc::new(GitBlob {
-            path: RepoPath::new("notes.md").unwrap(),
+        let blob = Arc::new(HistoricalFile {
+            path: util::rel_path::RelPath::from_unix_str("notes.md")
+                .unwrap()
+                .into(),
             worktree_id: WorktreeId::from_usize(0),
             is_deleted: false,
             is_binary: false,
@@ -1691,8 +1380,10 @@ mod tests {
                 ("web/tsconfig.json", "tsconfig.json @ abc1234"),
             ]
             .map(|(path, display_name)| {
-                let blob = Arc::new(GitBlob {
-                    path: RepoPath::new(path).expect("valid repository path"),
+                let blob = Arc::new(HistoricalFile {
+                    path: util::rel_path::RelPath::from_unix_str(path)
+                        .expect("valid repository path")
+                        .into(),
                     worktree_id: WorktreeId::from_usize(0),
                     is_deleted: false,
                     is_binary: false,
