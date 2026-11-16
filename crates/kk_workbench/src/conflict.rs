@@ -4,8 +4,7 @@ use crate::{
 use anyhow::{Context as _, Result, ensure};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use smol::process::Command;
-use std::{collections::HashMap, ops::Range, path::PathBuf, process::Stdio};
+use std::{collections::HashMap, ops::Range, path::PathBuf};
 
 const SNAPSHOT_CONFIG: &str = "ui.conflict-marker-style=\"snapshot\"";
 const CONFLICT_PATHS: &str = "json(conflicted_files.map(|file| stringify(file.path())))";
@@ -335,7 +334,6 @@ impl Snapshot {
             ])
             .await?;
         let mut inputs = parse_conflict_inputs(std::str::from_utf8(&raw)?, path)?;
-        let git_root = self.repository().internal_git_root().await?;
         let mut blobs = HashMap::<String, Vec<u8>>::new();
         for input in &mut inputs {
             let Some(id) = &input.id else { continue };
@@ -344,33 +342,11 @@ impl Snapshot {
                 continue;
             }
 
-            let size = Command::new("git")
-                .arg("--git-dir")
-                .arg(&git_root)
-                .args(["cat-file", "-s", id])
-                .stdin(Stdio::null())
-                .kill_on_drop(true)
-                .output()
-                .await?;
-            ensure!(
-                size.status.success(),
-                "Cannot read a conflict input from the KK Git store: {}",
-                String::from_utf8_lossy(&size.stderr)
-            );
-            let size: usize = std::str::from_utf8(&size.stdout)?.trim().parse()?;
+            let size = self.repository().file_object_size(id).await?;
             ensure!(size <= 50 * 1024 * 1024, "Conflict input exceeds 50 MiB");
-            let bytes = self
-                .read(&[
-                    "debug".into(),
-                    "object".into(),
-                    "file".into(),
-                    "--".into(),
-                    path.into(),
-                    id.clone(),
-                ])
-                .await?;
+            let bytes = self.repository().file_object_content(id).await?;
             ensure!(
-                bytes.len() == size,
+                bytes.len() as u64 == size,
                 "Cannot read a complete conflict input from KK"
             );
             input.bytes = bytes;

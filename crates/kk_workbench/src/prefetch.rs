@@ -1,8 +1,6 @@
 use crate::{FileInformation, Snapshot, remote::Read};
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
-use smol::process::Command;
-use std::process::Stdio;
 
 pub const PREFETCH_FILE_BYTES: usize = 2 * 1024 * 1024;
 
@@ -94,42 +92,10 @@ impl Snapshot {
                 .object_id
                 .as_deref()
                 .context("Missing file object ID")?;
-            ensure!(
-                matches!(object.len(), 40 | 64)
-                    && object.bytes().all(|byte| byte.is_ascii_hexdigit()),
-                "Invalid file object ID"
-            );
-            let git_root = self.repository().internal_git_root().await?;
-            let size = Command::new("git")
-                .arg("--git-dir")
-                .arg(&git_root)
-                .args(["cat-file", "-s", object])
-                .stdin(Stdio::null())
-                .kill_on_drop(true)
-                .output()
-                .await?;
-            ensure!(
-                size.status.success(),
-                "Cannot inspect file object: {}",
-                String::from_utf8_lossy(&size.stderr)
-            );
-            let size: u64 = std::str::from_utf8(&size.stdout)?.trim().parse()?;
+            let size = self.repository().file_object_size(object).await?;
             information.size = Some(size);
             if size <= PREFETCH_FILE_BYTES as u64 {
-                let bytes = self
-                    .read(&[
-                        "debug".into(),
-                        "object".into(),
-                        "file".into(),
-                        "--".into(),
-                        path.into(),
-                        object.into(),
-                    ])
-                    .await?;
-                ensure!(
-                    bytes.len() as u64 == size,
-                    "Cannot read complete file object"
-                );
+                let bytes = self.file_content_uncached(revision, path).await?;
                 information.contents(&bytes);
                 if !bytes.contains(&0) && std::str::from_utf8(&bytes).is_ok() {
                     contents = Some(bytes);

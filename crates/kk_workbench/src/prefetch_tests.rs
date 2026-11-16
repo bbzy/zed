@@ -102,15 +102,8 @@ fn prefetch_bounds_content_and_primes_foreground_queries() -> Result<()> {
         }
         let probe = snapshot.prefetch_file(&revision, "pointer.txt").await?;
         assert!(!probe.is_text());
-        assert_eq!(
-            probe
-                .information
-                .pointer
-                .as_ref()
-                .map(|pointer| pointer.size),
-            Some(4_000_000_000)
-        );
-        assert_eq!(probe.contents.as_deref(), Some(pointer.as_bytes()));
+        assert_eq!(probe.information.size, Some(4_000_000_000));
+        assert!(probe.contents.is_none());
         let missing = snapshot.prefetch_file(&revision, "missing.txt").await?;
         assert_eq!(missing.information.exists, Some(false));
         assert_eq!(

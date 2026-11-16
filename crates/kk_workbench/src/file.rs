@@ -5,8 +5,8 @@ use crate::{
 use anyhow::{Context as _, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use smol::{io::AsyncReadExt as _, process::Command};
-use std::{collections::BTreeSet, path::PathBuf, process::Stdio};
+use smol::io::AsyncReadExt as _;
+use std::collections::BTreeSet;
 
 #[derive(Debug)]
 pub enum SparseCheckout {
@@ -371,6 +371,25 @@ impl Snapshot {
 }
 
 impl Repository {
+    pub(crate) async fn file_object_size(&self, object: &str) -> Result<u64> {
+        validate_file_object_id(object)?;
+        let output = self
+            .command(&["--ignore-working-copy", "file", "size", object])
+            .await?;
+        std::str::from_utf8(&output.stdout)?
+            .trim()
+            .parse()
+            .context("Invalid file size returned by KK")
+    }
+
+    pub(crate) async fn file_object_content(&self, object: &str) -> Result<Vec<u8>> {
+        validate_file_object_id(object)?;
+        Ok(self
+            .command(&["--ignore-working-copy", "file", "content", object])
+            .await?
+            .stdout)
+    }
+
     pub async fn excluded_sparse_files(&self, paths: &[String]) -> Result<Vec<String>> {
         if let Some(remote) = self.remote() {
             return remote
@@ -491,37 +510,6 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn internal_git_root(&self) -> Result<PathBuf> {
-        let marker = self.root().join(".kk/repo");
-        let repository = if smol::fs::metadata(&marker).await?.is_dir() {
-            marker
-        } else {
-            self.root()
-                .join(".kk")
-                .join(smol::fs::read_to_string(marker).await?)
-        };
-        let store = smol::fs::canonicalize(repository.join("store")).await?;
-        let target = smol::fs::read_to_string(store.join("git_target")).await?;
-        let git_root = smol::fs::canonicalize(store.join(target)).await?;
-        ensure!(
-            git_root == store.join("git"),
-            "KK requires internal bare Git storage"
-        );
-        let output = Command::new("git")
-            .arg("--git-dir")
-            .arg(&git_root)
-            .args(["rev-parse", "--is-bare-repository"])
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output()
-            .await?;
-        ensure!(
-            output.status.success() && output.stdout == b"true\n",
-            "KK requires internal bare Git storage"
-        );
-        Ok(git_root)
-    }
-
     pub async fn lfs_content(&self, pointer: &LfsPointer) -> Result<Vec<u8>> {
         if let Some(remote) = self.remote() {
             return remote
@@ -540,34 +528,13 @@ impl Repository {
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
             "Invalid LFS object ID"
         );
-        let git_root = self.internal_git_root().await?;
-        let output = Command::new("git")
-            .arg("--git-dir")
-            .arg(&git_root)
-            .args(["config", "--path", "--get", "lfs.storage"])
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output()
-            .await?;
+        let size = self.file_object_size(&pointer.hash).await?;
         ensure!(
-            output.status.success() || output.status.code() == Some(1),
-            "Could not read LFS storage: {}",
-            String::from_utf8_lossy(&output.stderr)
+            size == pointer.size,
+            "Invalid local LFS size for {}",
+            pointer.hash
         );
-        let configured = std::str::from_utf8(&output.stdout)?.trim();
-        let storage = if configured.is_empty() {
-            git_root.join("lfs")
-        } else {
-            git_root.join(configured)
-        };
-        let object = storage
-            .join("objects")
-            .join(&pointer.hash[..2])
-            .join(&pointer.hash[2..4])
-            .join(&pointer.hash);
-        let bytes = smol::fs::read(object).await.context(
-            "LFS content is not available locally; fetch the content and reopen the diff",
-        )?;
+        let bytes = self.file_object_content(&pointer.hash).await?;
         ensure!(
             bytes.len() as u64 == pointer.size
                 && format!("{:x}", Sha256::digest(&bytes)) == pointer.hash,
@@ -695,4 +662,12 @@ impl Repository {
 
         Ok(information)
     }
+}
+
+fn validate_file_object_id(object: &str) -> Result<()> {
+    ensure!(
+        matches!(object.len(), 40 | 64) && object.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "Invalid file object ID"
+    );
+    Ok(())
 }
