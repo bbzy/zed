@@ -1374,10 +1374,16 @@ impl KkDiff {
         } else {
             let pane = workspace.active_pane().clone();
             let settings = PreviewTabsSettings::get_global(cx);
-            let existing = view
-                .project_entry_ids(cx)
-                .first()
-                .and_then(|entry| pane.read(cx).item_for_entry(*entry, cx));
+            let existing = view.project_entry_ids(cx).first().and_then(|entry| {
+                pane.read(cx)
+                    .items()
+                    .find(|item| {
+                        item.buffer_kind(cx) == ItemBufferKind::Singleton
+                            && item.singleton_view_type(cx) == view.singleton_view_type(cx)
+                            && item.project_entry_ids(cx).as_slice() == [*entry]
+                    })
+                    .map(|item| item.boxed_clone())
+            });
             let permanent = existing
                 .as_ref()
                 .is_some_and(|item| !pane.read(cx).is_active_preview_item(item.item_id()));
@@ -2785,6 +2791,9 @@ impl Item for KkDiff {
     fn buffer_kind(&self, _: &App) -> ItemBufferKind {
         // Excerpts render the diff, but the item edits one file.
         ItemBufferKind::Singleton
+    }
+    fn singleton_view_type(&self) -> Option<TypeId> {
+        Some(TypeId::of::<Self>())
     }
     fn active_project_path(&self, cx: &App) -> Option<project::ProjectPath> {
         self.editor.read(cx).active_project_path(cx)

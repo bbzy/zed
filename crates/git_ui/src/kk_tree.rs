@@ -3195,6 +3195,171 @@ mod tests {
     }
 
     #[gpui::test(iterations = 3)]
+    async fn kk_open_file_keeps_diff_and_reuses_plain_editor(cx: &mut TestAppContext) {
+        cx.background_executor.allow_parking();
+        let (_directory, repository) = cx
+            .background_spawn(async { futures_lite::future::block_on(category_repository()) })
+            .await
+            .expect("repository");
+        let root = repository.snapshot.repository().root().to_owned();
+        cx.update(|cx| {
+            let mut settings = SettingsStore::test(cx);
+            settings
+                .set_user_settings(r#"{"reveal_if_open":true}"#, cx)
+                .expect("settings");
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+            init(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(&root, serde_json::json!({"c.txt": "current work\n"}))
+            .await;
+        let project = Project::test(fs, [root.as_path()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |view, _| view.workspace().clone());
+        let panel = cx
+            .update(|window, cx| KkPanel::load(workspace.downgrade(), window.to_async(cx)))
+            .await
+            .expect("panel");
+        let row = panel.update(cx, |panel, cx| {
+            panel.repositories = vec![repository];
+            panel.update_tree(cx);
+            panel
+                .visible_files
+                .iter()
+                .find(|file| {
+                    file.file.path == "c.txt" && file.id.section.starts_with("comparison:")
+                })
+                .expect("comparison file")
+                .clone()
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.focus_panel::<KkPanel>(window, cx);
+        });
+        let diff = cx
+            .update(|window, cx| {
+                KkDiff::open(
+                    row.snapshot.clone(),
+                    row.target.clone(),
+                    row.file.clone(),
+                    row.working_copy,
+                    workspace.downgrade(),
+                    DiffOpenMode::Open,
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .expect("open diff first");
+        let id = TreeRowId::File(row.id.clone());
+        click_row_icon(&panel, &id, "ICON-File", cx);
+        cx.condition(&panel, |panel, _| panel.file_batches.is_empty())
+            .await;
+        let editor = workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.items(cx).count(), 2);
+            assert!(workspace.pane_for_item_id(diff.entity_id()).is_some());
+            workspace
+                .active_item(cx)
+                .and_then(|item| item.downcast::<editor::Editor>())
+                .expect("Open File activates a plain editor")
+        });
+        let buffer = editor.read_with(cx, |editor, cx| editor.active_buffer(cx).expect("buffer"));
+        buffer.update(cx, |buffer, cx| {
+            buffer.edit([(0..0, "unsaved\n")], None, cx)
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activate_item(&diff, true, true, window, cx);
+        });
+        let menu = panel.update_in(cx, |panel, window, cx| {
+            panel.file_menu(
+                0,
+                row.target.clone(),
+                row.file.clone(),
+                row.working_copy,
+                gpui::point(px(100.), px(100.)),
+                window,
+                cx,
+            );
+            panel
+                .context_menu
+                .as_ref()
+                .expect("file context menu")
+                .0
+                .clone()
+        });
+        menu.update_in(cx, |menu, window, cx| {
+            menu.select_first(&menu::SelectFirst, window, cx);
+            menu.confirm(&menu::Confirm, window, cx);
+        });
+        panel
+            .update(cx, |panel, _| panel.load_tasks.remove("open-diff"))
+            .expect("context menu starts opening")
+            .await;
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.items(cx).count(), 2);
+            assert_eq!(
+                workspace.active_item(cx).expect("active file").item_id(),
+                editor.entity_id()
+            );
+            assert_eq!(buffer.read(cx).text(), "unsaved\ncurrent work\n");
+            assert!(buffer.read(cx).is_dirty());
+            assert_eq!(
+                workspace.find_project_item::<editor::Editor>(workspace.active_pane(), &buffer, cx),
+                Some(editor.clone()),
+                "the earlier diff must not hide the plain editor"
+            );
+        });
+        diff.update_in(cx, |diff, window, cx| diff.open_file_in_project(window, cx));
+        panel
+            .update(cx, |panel, _| panel.load_tasks.remove("open-diff"))
+            .expect("diff Open File starts opening")
+            .await;
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.items(cx).count(), 2);
+            assert_eq!(
+                workspace.active_item(cx).expect("active file").item_id(),
+                editor.entity_id()
+            );
+        });
+        let other_pane = workspace.update_in(cx, |workspace, window, cx| {
+            let source = workspace.active_pane().clone();
+            let destination =
+                workspace.split_pane(source.clone(), workspace::SplitDirection::Right, window, cx);
+            workspace::move_item(
+                &source,
+                &destination,
+                editor.entity_id(),
+                0,
+                true,
+                window,
+                cx,
+            );
+            workspace.activate_item(&diff, true, true, window, cx);
+            destination
+        });
+        diff.update_in(cx, |diff, window, cx| diff.open_file_in_project(window, cx));
+        panel
+            .update(cx, |panel, _| panel.load_tasks.remove("open-diff"))
+            .expect("opening an existing file in another pane")
+            .await;
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.active_pane(), &other_pane);
+            assert_eq!(workspace.items(cx).count(), 2);
+            assert_eq!(
+                workspace.active_item(cx).expect("active file").item_id(),
+                editor.entity_id()
+            );
+            assert_eq!(buffer.read(cx).text(), "unsaved\ncurrent work\n");
+        });
+        panel.read_with(cx, |panel, _| {
+            assert!(panel.error.is_none(), "{:?}", panel.error)
+        });
+    }
+
+    #[gpui::test(iterations = 3)]
     async fn inline_file_actions_and_toolbar_use_the_clicked_entry(cx: &mut TestAppContext) {
         cx.background_executor.allow_parking();
         let (directory, mut repository) = cx

@@ -140,6 +140,7 @@ async fn kk_remote_panel_discovers_opens_classifies_and_preserves_later_saves(
 
 async fn run_remote_panel(cx: &mut TestAppContext, server_cx: &mut TestAppContext) -> Result<()> {
     let fixture = RemoteFixture::create(cx, server_cx).await?;
+    cx.update(editor::init);
     let project = fixture.project.clone();
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
@@ -216,6 +217,7 @@ async fn run_remote_panel(cx: &mut TestAppContext, server_cx: &mut TestAppContex
     assert!(!workspace.read_with(cx, |workspace, _| {
         workspace.has_notification(&notification_id)
     }));
+    panel.update(cx, |panel, _| panel.error = None);
     let parent = snapshot.exact_revision("@-").await?;
     let comparison = Comparison::load(&snapshot, Comparison::new(&parent).intent).await?;
     let file = comparison.files.first().context("changed file")?.clone();
@@ -233,6 +235,18 @@ async fn run_remote_panel(cx: &mut TestAppContext, server_cx: &mut TestAppContex
     assert!(!buffer.read_with(cx, |buffer, _| {
         buffer.file().expect("remote file").is_local()
     }));
+    let plain = workspace.update_in(cx, |workspace, window, cx| {
+        workspace.open_project_item::<editor::Editor>(
+            None,
+            buffer.clone(),
+            true,
+            true,
+            true,
+            false,
+            window,
+            cx,
+        )
+    });
     let diff = cx
         .update(|window, cx| {
             KkDiff::open(
@@ -247,6 +261,36 @@ async fn run_remote_panel(cx: &mut TestAppContext, server_cx: &mut TestAppContex
             )
         })
         .await?;
+    workspace.read_with(cx, |workspace, cx| {
+        assert_eq!(workspace.items(cx).count(), 2);
+        assert!(workspace.pane_for_item_id(plain.entity_id()).is_some());
+        assert_eq!(
+            workspace.active_item(cx).expect("active diff").item_id(),
+            diff.entity_id()
+        );
+    });
+    panel.update_in(cx, |panel, window, cx| {
+        let row = FileRow::new(
+            &panel.repositories[0],
+            comparison.diff_target(),
+            file.clone(),
+            "comparison",
+            true,
+        );
+        panel.run_file_action(FileAction::Open(FileOpenKind::Current), row, window, cx);
+    });
+    cx.condition(&panel, |panel, _| panel.file_batches.is_empty())
+        .await;
+    panel.read_with(cx, |panel, _| {
+        assert!(panel.error.is_none(), "Open File: {:?}", panel.error);
+    });
+    workspace.read_with(cx, |workspace, cx| {
+        assert_eq!(workspace.items(cx).count(), 2);
+        assert_eq!(
+            workspace.active_item(cx).expect("active file").item_id(),
+            plain.entity_id()
+        );
+    });
     let editor = cx.update(|_, cx| {
         use workspace::item::ItemHandle as _;
         diff.act_as_type(std::any::TypeId::of::<editor::Editor>(), cx)
@@ -260,6 +304,39 @@ async fn run_remote_panel(cx: &mut TestAppContext, server_cx: &mut TestAppContex
     );
     buffer.update(cx, |buffer, cx| {
         buffer.edit([(0..0, "draft\n")], None, cx);
+    });
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.activate_item(&diff, true, true, window, cx)
+    });
+    let menu = panel.update_in(cx, |panel, window, cx| {
+        panel.file_menu(
+            0,
+            comparison.diff_target(),
+            file.clone(),
+            true,
+            gpui::point(gpui::px(100.), gpui::px(100.)),
+            window,
+            cx,
+        );
+        panel.context_menu.as_ref().expect("file menu").0.clone()
+    });
+    menu.update_in(cx, |menu, window, cx| {
+        menu.select_first(&menu::SelectFirst, window, cx);
+        menu.confirm(&menu::Confirm, window, cx);
+    });
+    panel
+        .update(cx, |panel, _| panel.load_tasks.remove("open-diff"))
+        .context("Open File task")?
+        .await;
+    workspace.read_with(cx, |workspace, cx| {
+        assert_eq!(workspace.items(cx).count(), 2);
+        assert_eq!(
+            workspace.active_item(cx).expect("active file").item_id(),
+            plain.entity_id()
+        );
+        assert_eq!(plain.read(cx).active_buffer(cx), Some(buffer.clone()));
+        assert_eq!(buffer.read(cx).text(), "draft\ncaptured\n");
+        assert!(buffer.read(cx).is_dirty());
     });
     panel.read_with(cx, |panel, cx| {
         assert!(panel.file_is_dirty(&fixture.root, &file, cx));

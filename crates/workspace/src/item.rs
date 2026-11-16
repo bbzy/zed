@@ -242,6 +242,12 @@ pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
         ItemBufferKind::None
     }
 
+    /// Specialized single-file views can coexist with the default view of their file.
+    /// Only the default group is reused when opening a project path.
+    fn singleton_view_type(&self) -> Option<TypeId> {
+        None
+    }
+
     /// Returns the project path that should be treated as active for this item.
     ///
     /// Singleton items use their only project item by default. Items backed by
@@ -512,6 +518,7 @@ pub trait ItemHandle: 'static + Send {
         _: &mut dyn FnMut(EntityId, &dyn project::ProjectItem),
     );
     fn buffer_kind(&self, cx: &App) -> ItemBufferKind;
+    fn singleton_view_type(&self, cx: &App) -> Option<TypeId>;
     fn boxed_clone(&self) -> Box<dyn ItemHandle>;
     fn can_split(&self, cx: &App) -> bool;
     fn clone_on_split(
@@ -735,6 +742,10 @@ impl<T: Item> ItemHandle for Entity<T> {
 
     fn buffer_kind(&self, cx: &App) -> ItemBufferKind {
         self.read(cx).buffer_kind(cx)
+    }
+
+    fn singleton_view_type(&self, cx: &App) -> Option<TypeId> {
+        self.read(cx).singleton_view_type()
     }
 
     fn boxed_clone(&self) -> Box<dyn ItemHandle> {

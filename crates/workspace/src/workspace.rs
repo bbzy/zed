@@ -5236,7 +5236,9 @@ impl Workspace {
     ) -> Option<Entity<Pane>> {
         let pane_contains_project_item = |pane: &Entity<Pane>| {
             pane.read(cx).items().any(|item| {
-                if item.buffer_kind(cx) != ItemBufferKind::Singleton {
+                if item.buffer_kind(cx) != ItemBufferKind::Singleton
+                    || item.singleton_view_type(cx).is_some()
+                {
                     return false;
                 }
 
@@ -5544,17 +5546,28 @@ impl Workspace {
         let entry_id = project_item.entry_id(cx);
         let project_path = project_item.project_path(cx);
 
+        let pane = pane.read(cx);
         let mut item = None;
         if let Some(entry_id) = entry_id {
-            item = pane.read(cx).item_for_entry(entry_id, cx);
+            item = pane.items().find_map(|item| {
+                let typed = item.downcast::<T>()?;
+                (item.buffer_kind(cx) == ItemBufferKind::Singleton
+                    && item.project_entry_ids(cx).as_slice() == [entry_id])
+                .then_some(typed)
+            });
         }
         if item.is_none()
             && let Some(project_path) = project_path
         {
-            item = pane.read(cx).item_for_path(project_path, cx);
+            item = pane.items().find_map(|item| {
+                let typed = item.downcast::<T>()?;
+                (item.buffer_kind(cx) == ItemBufferKind::Singleton
+                    && item.project_path(cx).as_ref() == Some(&project_path))
+                .then_some(typed)
+            });
         }
 
-        item.and_then(|item| item.downcast::<T>())
+        item
     }
 
     pub fn is_project_item_open<T>(

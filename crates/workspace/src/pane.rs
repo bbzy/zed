@@ -1084,6 +1084,7 @@ impl Pane {
         if let Some(project_entry_id) = project_entry_id {
             for (index, item) in self.items.iter().enumerate() {
                 if item.buffer_kind(cx) == ItemBufferKind::Singleton
+                    && item.singleton_view_type(cx).is_none()
                     && item.project_entry_ids(cx).as_slice() == [project_entry_id]
                 {
                     let item = item.boxed_clone();
@@ -1094,6 +1095,7 @@ impl Pane {
         } else {
             for (index, item) in self.items.iter().enumerate() {
                 if item.buffer_kind(cx) == ItemBufferKind::Singleton
+                    && item.singleton_view_type(cx).is_none()
                     && item.project_path(cx).as_ref() == Some(&project_path)
                 {
                     let item = item.boxed_clone();
@@ -1286,12 +1288,10 @@ impl Pane {
             if existing_item.item_id() == item.item_id() {
                 true
             } else if existing_item.buffer_kind(cx) == ItemBufferKind::Singleton {
-                existing_item
-                    .project_entry_ids(cx)
-                    .first()
-                    .is_some_and(|existing_entry_id| {
-                        Some(existing_entry_id) == project_entry_id.as_ref()
-                    })
+                existing_item.singleton_view_type(cx) == item.singleton_view_type(cx)
+                    && existing_item.project_entry_ids(cx).first().is_some_and(
+                        |existing_entry_id| Some(existing_entry_id) == project_entry_id.as_ref(),
+                    )
             } else {
                 false
             }
