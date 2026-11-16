@@ -5922,7 +5922,7 @@ async fn test_remote_restore_unstaged_hunk_clears_diff(
 
     cx.update_window_entity(&editor, |editor, window, cx| {
         editor.select_all(&editor::actions::SelectAll, window, cx);
-        editor.git_restore(&git::Restore, window, cx);
+        editor.restore_diff(&editor::actions::RestoreDiff, window, cx);
     });
     cx.executor().run_until_parked();
 

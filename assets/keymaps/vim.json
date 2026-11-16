@@ -536,10 +536,10 @@
       "g w": "vim::HelixJumpToWord",
       "g .": "vim::HelixGotoLastModification",
       "g o": "editor::ToggleSelectedDiffHunks", // Zed specific
-      "g shift-o": "git::ToggleStaged", // Zed specific
-      "g shift-r": "git::Restore", // Zed specific
-      "g u": "git::StageAndNext", // Zed specific
-      "g shift-u": "git::UnstageAndNext", // Zed specific
+       // Zed specific
+      "g shift-r": "editor::RestoreDiff", // Zed specific
+       // Zed specific
+       // Zed specific
 
       // Window mode
       "space w v": "pane::SplitRight",
@@ -770,10 +770,10 @@
       "s": "vim::PushDeleteSurrounds",
       "v": "vim::PushForcedMotion", // "d v"
       "o": "editor::ToggleSelectedDiffHunks", // "d o"
-      "shift-o": "git::ToggleStaged",
-      "p": "git::Restore", // "d p"
-      "u": "git::StageAndNext", // "d u"
-      "shift-u": "git::UnstageAndNext", // "d shift-u"
+      
+      "p": "editor::RestoreDiff", // "d p"
+       // "d u"
+       // "d shift-u"
     },
   },
   {
@@ -1014,20 +1014,7 @@
       "shift-n": null,
     },
   },
-  {
-    "context": "GitCommit > Editor && VimControl && vim_mode == normal",
-    "bindings": {
-      "ctrl-c": "menu::Cancel",
-      "escape": "menu::Cancel",
-    },
-  },
-  {
-    "context": "CommitEditor > Editor && VimControl && !menu",
-    "bindings": {
-      "tab": "git_panel::FocusChanges",
-      "shift-tab": "git_panel::FocusChanges",
-    },
-  },
+
   {
     "context": "Editor && (VimControl || vim_mode == insert) && edit_prediction && edit_prediction_mode == eager && !showing_completions",
     "bindings": {

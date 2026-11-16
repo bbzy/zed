@@ -1,10 +1,10 @@
+use crate::file_diff_view::build_buffer_diff;
 use anyhow::Result;
 use buffer_diff::BufferDiff;
 use editor::{
     Editor, EditorEvent, EditorSettings, HiddenUnstagedDiffHunkRenderer, MultiBuffer,
     SplittableEditor, multibuffer_context_lines,
 };
-use git_ui_core::file_diff_view::build_buffer_diff;
 use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, FocusHandle, Focusable, Font,
     IntoElement, Render, SharedString, Subscription, Task, Window,

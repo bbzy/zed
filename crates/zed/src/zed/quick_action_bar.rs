@@ -15,12 +15,9 @@ use gpui::{
     FocusHandle, Focusable, InteractiveElement, ParentElement, Render, Styled, Subscription, Task,
     WeakEntity, Window, anchored, deferred, point,
 };
-use project::{
-    DisableAiSettings,
-    project_settings::{DiagnosticSeverity, ProjectSettings},
-};
+use project::{DisableAiSettings, project_settings::DiagnosticSeverity};
 use search::{BufferSearchBar, buffer_search};
-use settings::{GitDiffBaseSetting, Settings, SettingsStore, update_settings_file};
+use settings::{Settings, SettingsStore};
 use ui::{
     ButtonStyle, ContextMenu, ContextMenuEntry, DocumentationSide, IconButton, IconName, IconSize,
     PopoverMenu, PopoverMenuHandle, Tooltip, prelude::*,
@@ -132,8 +129,6 @@ impl Render for QuickActionBar {
             && editor_value.diagnostics_max_severity != DiagnosticSeverity::Off;
         let supports_inline_diagnostics = editor_value.inline_diagnostics_enabled();
         let inline_diagnostics_enabled = editor_value.show_inline_diagnostics();
-        let git_blame_inline_enabled = editor_value.git_blame_inline_enabled();
-        let show_git_blame_gutter = editor_value.show_git_blame_gutter();
         let auto_signature_help_enabled = editor_value.auto_signature_help_enabled(cx);
         let show_line_numbers = editor_value.line_numbers_enabled(cx);
         let has_edit_prediction_provider = editor_value.edit_prediction_provider().is_some();
@@ -361,13 +356,6 @@ impl Render for QuickActionBar {
         let editor_settings_dropdown = {
             let vim_mode_enabled = VimModeSetting::get_global(cx).0;
             let helix_mode_enabled = HelixModeSetting::get_global(cx).0;
-            let diff_against_default_branch =
-                ProjectSettings::get_global(cx).git.diff_base == GitDiffBaseSetting::DefaultBranch;
-            let fs = self
-                .workspace
-                .upgrade()
-                .map(|workspace| workspace.read(cx).app_state().fs.clone());
-
             PopoverMenu::new("editor-settings")
                 .trigger_with_tooltip(
                     IconButton::new("toggle_editor_settings_icon", IconName::Filter)
@@ -632,72 +620,6 @@ impl Render for QuickActionBar {
                                     }
                                 },
                             );
-
-                            menu = menu.separator();
-
-                            menu = menu.toggleable_entry(
-                                "Inline Git Blame",
-                                git_blame_inline_enabled,
-                                IconPosition::Start,
-                                Some(editor::actions::ToggleGitBlameInline.boxed_clone()),
-                                {
-                                    let editor = editor.clone();
-                                    move |window, cx| {
-                                        editor
-                                            .update(cx, |editor, cx| {
-                                                editor.toggle_git_blame_inline(
-                                                    &editor::actions::ToggleGitBlameInline,
-                                                    window,
-                                                    cx,
-                                                )
-                                            })
-                                            .ok();
-                                    }
-                                },
-                            );
-
-                            menu = menu.toggleable_entry(
-                                "Column Git Blame",
-                                show_git_blame_gutter,
-                                IconPosition::Start,
-                                Some(git::Blame.boxed_clone()),
-                                {
-                                    let editor = editor.clone();
-                                    move |window, cx| {
-                                        editor
-                                            .update(cx, |editor, cx| {
-                                                editor.toggle_git_blame(
-                                                    &git::Blame,
-                                                    window,
-                                                    cx,
-                                                )
-                                            })
-                                            .ok();
-                                    }
-                                },
-                            );
-
-                            if let Some(fs) = fs.clone() {
-                                menu = menu.toggleable_entry(
-                                    "Diff Against Default Branch",
-                                    diff_against_default_branch,
-                                    IconPosition::Start,
-                                    None,
-                                    {
-                                        move |_window, cx| {
-                                            let diff_base = if diff_against_default_branch {
-                                                GitDiffBaseSetting::Head
-                                            } else {
-                                                GitDiffBaseSetting::DefaultBranch
-                                            };
-                                            update_settings_file(fs.clone(), cx, move |settings, _| {
-                                                settings.git.get_or_insert_default().diff_base =
-                                                    Some(diff_base);
-                                            });
-                                        }
-                                    },
-                                );
-                            }
 
                             menu = menu.separator();
 

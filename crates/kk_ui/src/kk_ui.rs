@@ -1,5 +1,7 @@
 use gpui::App;
 
+pub mod clone;
+
 mod kk_blame;
 mod kk_classification;
 mod kk_comparison;

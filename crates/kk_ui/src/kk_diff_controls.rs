@@ -848,13 +848,13 @@ impl KkDiffControls {
                         .disabled(!selected_restore)
                         .tooltip(Tooltip::for_action_title_in(
                             "Restore selected hunk",
-                            &git::Restore,
+                            &editor::actions::RestoreDiff,
                             &focus,
                         ))
                         .on_click(move |_, window, cx| {
                             git_ui_core::file_diff_view::dispatch_diff_action(
                                 &editor,
-                                &git::Restore,
+                                &editor::actions::RestoreDiff,
                                 window,
                                 cx,
                             )

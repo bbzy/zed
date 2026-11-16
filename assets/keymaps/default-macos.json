@@ -140,9 +140,7 @@
       "cmd-;": "editor::ToggleLineNumbers",
       "cmd-'": "editor::ToggleSelectedDiffHunks",
       "cmd-\"": "editor::ExpandAllDiffHunks",
-      "cmd-alt-g b": "git::Blame",
-      "cmd-alt-g m": "git::OpenModifiedFiles",
-      "cmd-alt-g r": "git::ReviewDiff",
+
       "cmd-i": "editor::ShowSignatureHelp",
       "f9": "editor::ToggleBreakpoint",
       "shift-f9": "editor::EditLogBreakpoint",
@@ -222,10 +220,8 @@
     "context": "Editor && !agent_diff && !AgentPanel",
     "use_key_equivalents": true,
     "bindings": {
-      "cmd-alt-z": "git::Restore",
-      "cmd-alt-y": "git::ToggleStaged",
-      "cmd-y": "git::StageAndNext",
-      "cmd-shift-y": "git::UnstageAndNext",
+      "cmd-alt-z": "editor::RestoreDiff",
+
     },
   },
   {
@@ -352,7 +348,7 @@
       "ctrl-alt-pageup": "agent::ScrollOutputToPreviousMessage",
       "ctrl-alt-pagedown": "agent::ScrollOutputToNextMessage",
       "shift-ctrl-r": "agent::OpenAgentDiff",
-      "shift-ctrl-d": "git::Diff",
+      
       "shift-alt-y": "agent::KeepAll",
       "shift-alt-z": "agent::RejectAll",
       "shift-alt-u": "agent::UndoLastReject",
@@ -713,7 +709,7 @@
       "ctrl-cmd-o": ["projects::OpenRemote", { "from_existing_connection": false }],
       "ctrl-cmd-shift-o": ["projects::OpenRemote", { "from_existing_connection": true }],
       "cmd-ctrl-b": "branches::OpenRecent",
-      "cmd-ctrl-w": "git::Worktree",
+      
       "ctrl-~": "workspace::NewTerminal",
       "cmd-s": "workspace::Save",
       "cmd-k s": "workspace::SaveWithoutFormat",
@@ -760,7 +756,7 @@
       "cmd-shift-m": "diagnostics::Deploy",
       "cmd-shift-e": "project_panel::ToggleFocus",
       "cmd-shift-b": "outline_panel::ToggleFocus",
-      "ctrl-shift-g": "git_panel::ToggleFocus",
+      
       "cmd-shift-d": "debug_panel::ToggleFocus",
       "cmd-?": "agent::ToggleFocus",
       "cmd-alt-s": "workspace::SaveAll",
@@ -1113,113 +1109,7 @@
       "alt-enter": "variable_list::AddWatch",
     },
   },
-  {
-    "context": "GitPanel",
-    "bindings": {
-      "cmd-1": "git_panel::ActivateChangesTab",
-      "cmd-2": "git_panel::ActivateHistoryTab",
-    },
-  },
-  {
-    "context": "GitPanel && (ChangesList || HistoryList) && !GitBranchSelector && !GitRepositorySelector",
-    "use_key_equivalents": true,
-    "bindings": {
-      "up": "menu::SelectPrevious",
-      "down": "menu::SelectNext",
-      "shift-up": "menu::SelectPrevious",
-      "shift-down": "menu::SelectNext",
-      "enter": "menu::Confirm",
-      "escape": "menu::Cancel",
-    },
-  },
-  {
-    "context": "GitPanel && ChangesList && !GitBranchSelector && !GitRepositorySelector",
-    "use_key_equivalents": true,
-    "bindings": {
-      "up": "git_panel::PreviousEntry",
-      "down": "git_panel::NextEntry",
-      "cmd-up": "git_panel::FirstEntry",
-      "cmd-down": "git_panel::LastEntry",
-      "left": "git_panel::CollapseSelectedEntry",
-      "right": "git_panel::ExpandSelectedEntry",
-      "cmd-alt-y": "git::ToggleStaged",
-      "space": "git::ToggleStaged",
-      "shift-space": "git::StageRange",
-      "cmd-y": "git::StageFile",
-      "cmd-shift-y": "git::UnstageFile",
-      "cmd-alt-c": "workspace::CopyPath",
-      "alt-cmd-shift-c": "workspace::CopyRelativePath",
-      "alt-down": "git_panel::FocusEditor",
-      "tab": "git_panel::FocusEditor",
-      "shift-tab": "git_panel::FocusEditor",
-      "backspace": ["git::RestoreFile", { "skip_prompt": false }],
-      "delete": ["git::RestoreFile", { "skip_prompt": false }],
-      "cmd-backspace": ["git::RestoreFile", { "skip_prompt": true }],
-      "cmd-delete": ["git::RestoreFile", { "skip_prompt": true }],
-    },
-  },
-  {
-    "context": "GitPanel && CommitEditor",
-    "use_key_equivalents": true,
-    "bindings": {
-      "escape": "git::Cancel",
-    },
-  },
-  {
-    "context": "GitDiff > Editor",
-    "use_key_equivalents": true,
-    "bindings": {
-      "cmd-enter": "git::Commit",
-      "cmd-shift-enter": "git::Amend",
-      "cmd-ctrl-y": "git::StageAll",
-      "cmd-ctrl-shift-y": "git::UnstageAll",
-      "cmd-alt-z": "git::RestoreAndNext",
-    },
-  },
-  {
-    "context": "CommitEditor > Editor",
-    "use_key_equivalents": true,
-    "bindings": {
-      "enter": "editor::Newline",
-      "cmd-enter": "git::Commit",
-      "cmd-shift-enter": "git::Amend",
-      "tab": "git_panel::FocusChanges",
-      "shift-tab": "git_panel::FocusChanges",
-      "alt-up": "git_panel::FocusChanges",
-      "shift-escape": "git::ExpandCommitEditor",
-      "alt-shift-escape": "git::ToggleFillCommitEditor",
-      "alt-tab": "git::GenerateCommitMessage",
-    },
-  },
-  {
-    "context": "GitPanel",
-    "use_key_equivalents": true,
-    "bindings": {
-      "ctrl-g ctrl-g": "git::Fetch",
-      "ctrl-g up": "git::Push",
-      "ctrl-g down": "git::Pull",
-      "ctrl-g shift-down": "git::PullRebase",
-      "ctrl-g shift-up": "git::ForcePush",
-      "ctrl-g d": "git::Diff",
-      "ctrl-g backspace": "git::RestoreTrackedFiles",
-      "ctrl-g shift-backspace": "git::TrashUntrackedFiles",
-      "cmd-ctrl-y": "git::StageAll",
-      "cmd-ctrl-shift-y": "git::UnstageAll",
-      "cmd-enter": "git::Commit",
-      "cmd-shift-enter": "git::Amend",
-    },
-  },
-  {
-    "context": "GitCommit > Editor && mode == auto_height",
-    "use_key_equivalents": true,
-    "bindings": {
-      "enter": "editor::Newline",
-      "escape": "menu::Cancel",
-      "cmd-enter": "git::Commit",
-      "cmd-shift-enter": "git::Amend",
-      "alt-tab": "git::GenerateCommitMessage",
-    },
-  },
+
   {
     // While a debug session is live, `Pause`/`Stop`/`RerunSession` take over their F-keys
     // (region navigation stays on `cmd-f6` / `shift-f6`), so they're inert when not debugging.
@@ -1363,14 +1253,7 @@
       "ctrl-backspace": "tab_switcher::CloseSelectedItem",
     },
   },
-  {
-    "context": "StashList || (StashList > Picker > Editor)",
-    "use_key_equivalents": true,
-    "bindings": {
-      "ctrl-shift-backspace": "stash_picker::DropStashItem",
-      "ctrl-shift-v": "stash_picker::ShowStashItem",
-    },
-  },
+  
   {
     "context": "Terminal",
     "use_key_equivalents": true,
@@ -1638,15 +1521,7 @@
       "cmd-}": "settings_editor::FocusNextFile",
     },
   },
-  {
-    "context": "StashDiff > Editor",
-    "use_key_equivalents": true,
-    "bindings": {
-      "ctrl-space": "git::ApplyCurrentStash",
-      "ctrl-shift-space": "git::PopCurrentStash",
-      "ctrl-shift-backspace": "git::DropCurrentStash",
-    },
-  },
+  
   {
     "context": "SettingsWindow > NavigationMenu",
     "use_key_equivalents": true,
@@ -1670,16 +1545,7 @@
       "alt-right": "dev::EditPredictionContextGoForward",
     },
   },
-  {
-    "context": "GitBranchSelector || (GitBranchSelector > Picker > Editor)",
-    "use_key_equivalents": true,
-    "bindings": {
-      "cmd-shift-backspace": "branch_picker::DeleteBranch",
-      "cmd-alt-shift-backspace": "branch_picker::ForceDeleteBranch",
-      "cmd-shift-i": "branch_picker::CycleBranchFilter",
-      "cmd-k": "branch_picker::ToggleFilterMenu",
-    },
-  },
+  
   {
     "context": "ImageViewer",
     "use_key_equivalents": true,
@@ -1702,13 +1568,7 @@
       "cmd-4": "new_process_modal::ActivateLaunchTab",
     },
   },
-  {
-    "context": "GitPicker",
-    "bindings": {
-      "cmd-1": "git_picker::ActivateBranchesTab",
-      "cmd-2": "git_picker::ActivateStashTab",
-    },
-  },
+  
   {
     "context": "WorktreePicker || (WorktreePicker > Picker > Editor)",
     "use_key_equivalents": true,
@@ -1757,20 +1617,7 @@
       "escape": "notebook::EnterCommandMode",
     },
   },
-  {
-    "context": "GitGraph",
-    "bindings": {
-      "tab": "git_graph::FocusNextTabStop",
-      "shift-tab": "git_graph::FocusPreviousTabStop",
-    },
-  },
-  {
-    "context": "GitGraphSearchBar > Editor",
-    "bindings": {
-      "tab": "git_graph::FocusNextTabStop",
-      "shift-tab": "git_graph::FocusPreviousTabStop",
-    },
-  },
+
   {
     "context": "SkillCreator",
     "use_key_equivalents": true,

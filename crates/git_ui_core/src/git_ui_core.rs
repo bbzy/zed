@@ -10,9 +10,11 @@ use workspace::Workspace;
 pub mod askpass_modal;
 pub mod created_worktrees;
 pub mod file_diff_view;
+pub mod multi_diff_view;
 pub mod notifications;
 pub mod picker_prompt;
 pub mod revision_metadata;
+pub mod text_diff_view;
 pub mod worktree_names;
 pub mod worktree_picker;
 pub mod worktree_service;
@@ -115,4 +117,19 @@ pub fn open_file_history(
         return;
     };
     opener(workspace, path, window, cx);
+}
+
+pub fn init(cx: &mut App) {
+    cx.observe_new(|workspace: &mut Workspace, _, _| {
+        workspace.register_action(
+            |workspace, action: &editor::actions::DiffClipboardWithSelectionData, window, cx| {
+                if let Some(task) =
+                    text_diff_view::TextDiffView::open(action, workspace, window, cx)
+                {
+                    task.detach();
+                }
+            },
+        );
+    })
+    .detach();
 }

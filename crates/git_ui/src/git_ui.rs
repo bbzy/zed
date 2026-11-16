@@ -50,7 +50,7 @@ pub mod git_panel;
 mod git_panel_settings;
 pub mod git_picker;
 mod git_runtime_diagnostics;
-pub mod multi_diff_view;
+pub use git_ui_core::multi_diff_view;
 pub use git_ui_core::picker_prompt;
 pub mod project_diff;
 pub(crate) mod remote_output;
@@ -58,7 +58,7 @@ pub mod repository_selector;
 pub mod solo_diff_view;
 pub mod staged_diff;
 pub mod stash_picker;
-pub mod text_diff_view;
+pub use git_ui_core::text_diff_view;
 pub mod unstaged_diff;
 
 pub use blame_ui::GitBlameStatus;

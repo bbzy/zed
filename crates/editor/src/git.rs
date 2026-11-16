@@ -2,8 +2,7 @@ pub(super) mod blame;
 
 use super::*;
 use ::git::{
-    Oid, Restore, blame::BlameEntry, commit::ParsedCommitMessage, repository::RepoPath,
-    status::FileStatus,
+    Oid, blame::BlameEntry, commit::ParsedCommitMessage, repository::RepoPath, status::FileStatus,
 };
 use buffer_diff::{BufferDiff, DiffHunkStatus, DiffHunkStatusKind};
 use project::git_store::Repository;
@@ -492,7 +491,12 @@ impl Editor {
         }
     }
 
-    pub fn git_restore(&mut self, _: &Restore, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn restore_diff(
+        &mut self,
+        _: &crate::actions::RestoreDiff,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.diff_hunk_action_target.is_none() && self.read_only(cx) {
             return;
         }
@@ -3333,7 +3337,7 @@ pub fn render_diff_hunk_controls(
                         move |_window, cx| {
                             Tooltip::for_action_in(
                                 "Restore Hunk",
-                                &::git::Restore,
+                                &crate::actions::RestoreDiff,
                                 &focus_handle,
                                 cx,
                             )

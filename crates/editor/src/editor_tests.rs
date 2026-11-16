@@ -31394,7 +31394,7 @@ async fn test_multibuffer_reverts(cx: &mut TestAppContext) {
     editor.update_in(cx, |editor, window, cx| {
         assert_eq!(editor.display_text(cx), "\n\nXaaa\nXbbb\nXccc\n\nXfff\nXggg\n\nXjjj\n\n\nXlll\nXmmm\nXnnn\n\nXqqq\nXrrr\n\nXuuu\n\n\nXvvv\nXwww\nXxxx\n\nX{{{\nX|||\n\nX\u{7f}\u{7f}\u{7f}");
         editor.select_all(&SelectAll, window, cx);
-        editor.git_restore(&Default::default(), window, cx);
+        editor.restore_diff(&Default::default(), window, cx);
     });
     cx.executor().run_until_parked();
 
@@ -31420,7 +31420,7 @@ async fn test_multibuffer_reverts(cx: &mut TestAppContext) {
         editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
             s.select_ranges(Some(Point::new(0, 0)..Point::new(5, 0)));
         });
-        editor.git_restore(&Default::default(), window, cx);
+        editor.restore_diff(&Default::default(), window, cx);
     });
 
     // Now, when all ranges selected belong to buffer_1, the revert should succeed,
@@ -31791,7 +31791,7 @@ async fn test_merge_base_diff_hunks_are_read_only(cx: &mut TestAppContext) {
     });
     editor.update_in(cx, |editor, window, cx| {
         editor.select_all(&SelectAll, window, cx);
-        editor.git_restore(&Default::default(), window, cx);
+        editor.restore_diff(&Default::default(), window, cx);
         editor.toggle_staged_selected_diff_hunks(&Default::default(), window, cx);
     });
     cx.run_until_parked();
@@ -42683,7 +42683,7 @@ fn assert_hunk_revert(
             .map(|hunk| hunk.status().kind)
             .collect::<Vec<_>>();
 
-        editor.git_restore(&Default::default(), window, cx);
+        editor.restore_diff(&Default::default(), window, cx);
         reverted_hunk_statuses
     });
     cx.executor().run_until_parked();

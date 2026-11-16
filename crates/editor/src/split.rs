@@ -3387,7 +3387,7 @@ mod tests {
 
     #[gpui::test]
     async fn test_reverting_deletion_hunk(cx: &mut gpui::TestAppContext) {
-        use git::Restore;
+        use crate::actions::RestoreDiff;
         use rope::Point;
         use unindent::Unindent as _;
 
@@ -3452,7 +3452,7 @@ mod tests {
             editor.change_selections(crate::SelectionEffects::no_scroll(), window, cx, |s| {
                 s.select_ranges([Point::new(1, 0)..Point::new(1, 0)]);
             });
-            editor.git_restore(&Restore, window, cx);
+            editor.restore_diff(&RestoreDiff, window, cx);
         });
 
         cx.run_until_parked();

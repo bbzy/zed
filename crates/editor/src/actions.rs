@@ -600,6 +600,8 @@ actions!(
         GoToDeclarationSplit,
         /// Goes to definition in a split pane.
         GoToDefinitionSplit,
+        /// Restores selected changes from the diff base.
+        RestoreDiff,
         /// Goes to the next diff hunk.
         GoToHunk,
         /// Goes to the previous diff hunk.

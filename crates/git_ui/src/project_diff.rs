@@ -1857,7 +1857,7 @@ mod tests {
 
         editor
             .update_in(cx, |editor, window, cx| {
-                editor.git_restore(&Default::default(), window, cx);
+                editor.restore_diff(&Default::default(), window, cx);
                 editor.save(SaveOptions::default(), project.clone(), window, cx)
             })
             .await
@@ -2003,7 +2003,7 @@ mod tests {
                 let prev_buffer_hunks = buffer_editor
                     .diff_hunks_in_ranges(&[editor::Anchor::Min..editor::Anchor::Max], snapshot)
                     .collect::<Vec<_>>();
-                buffer_editor.git_restore(&Default::default(), window, cx);
+                buffer_editor.restore_diff(&Default::default(), window, cx);
                 prev_buffer_hunks
             });
         assert_eq!(prev_buffer_hunks.len(), 1);

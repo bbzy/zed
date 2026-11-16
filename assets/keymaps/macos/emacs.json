@@ -3,12 +3,7 @@
 // To see the default key bindings run `zed: open default keymap`
 // from the command palette.
 [
-  {
-    "context": "!GitPanel",
-    "bindings": {
-      "ctrl-g": "menu::Cancel",
-    },
-  },
+  
   {
     // Workaround to avoid falling back to default bindings.
     // Unbind so Zed ignores these keys and lets emacs handle them.

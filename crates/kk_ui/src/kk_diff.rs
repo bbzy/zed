@@ -4875,7 +4875,7 @@ mod tests {
                     );
                 });
             });
-            cx.dispatch_action(git::Restore);
+            cx.dispatch_action(editor::actions::RestoreDiff);
             cx.run_until_parked();
             assert_eq!(
                 buffer.read_with(cx, |buffer, _| buffer.text()),
@@ -4900,7 +4900,7 @@ mod tests {
             });
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.dispatch_action(git::Restore);
+        cx.dispatch_action(editor::actions::RestoreDiff);
         cx.run_until_parked();
         assert_eq!(buffer.read_with(cx, |buffer, _| buffer.text()), original);
         assert!(single.read_with(cx, |view, cx| view.can_save(cx)));

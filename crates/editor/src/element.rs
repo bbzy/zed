@@ -710,7 +710,7 @@ impl EditorElement {
         register_action(editor, window, Editor::reload_file);
 
         if !editor.read(cx).read_only(cx) || editor.read(cx).diff_hunk_action_target.is_some() {
-            register_action(editor, window, Editor::git_restore);
+            register_action(editor, window, Editor::restore_diff);
         }
 
         if !editor.read(cx).read_only(cx) || editor.read(cx).notifies_read_only_edits() {

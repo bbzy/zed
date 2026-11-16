@@ -2516,7 +2516,7 @@ pub(crate) mod tests {
             .expect("working editor");
         right.update_in(cx, |right, window, cx| {
             assert!(right.can_restore_selected_hunks(window, cx));
-            right.git_restore(&git::Restore, window, cx);
+            right.restore_diff(&editor::actions::RestoreDiff, window, cx);
         });
         cx.run_until_parked();
         assert_eq!(
@@ -2529,7 +2529,7 @@ pub(crate) mod tests {
         cx.run_until_parked();
         assert_eq!(buffer.read_with(cx, |buffer, _| buffer.text()), "");
         right.update_in(cx, |right, window, cx| {
-            right.git_restore(&git::Restore, window, cx)
+            right.restore_diff(&editor::actions::RestoreDiff, window, cx)
         });
         buffer.update(cx, |buffer, cx| {
             buffer.set_has_bom(true);
