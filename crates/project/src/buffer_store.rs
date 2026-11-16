@@ -1052,17 +1052,6 @@ impl BufferStore {
             buffer: buffer_entity.downgrade(),
         };
 
-        let handle = cx.entity().downgrade();
-        buffer_entity.update(cx, move |_, cx| {
-            cx.on_release(move |buffer, cx| {
-                handle
-                    .update(cx, |_, cx| {
-                        cx.emit(BufferStoreEvent::BufferDropped(buffer.remote_id()))
-                    })
-                    .ok();
-            })
-            .detach()
-        });
         let _expect_path_to_exist;
         match self.opened_buffers.entry(remote_id) {
             hash_map::Entry::Vacant(entry) => {
@@ -1084,6 +1073,18 @@ impl BufferStore {
                 _expect_path_to_exist = true;
             }
         }
+
+        let handle = cx.entity().downgrade();
+        buffer_entity.update(cx, move |_, cx| {
+            cx.on_release(move |buffer, cx| {
+                handle
+                    .update(cx, |_, cx| {
+                        cx.emit(BufferStoreEvent::BufferDropped(buffer.remote_id()))
+                    })
+                    .ok();
+            })
+            .detach()
+        });
 
         if let Some(path) = path {
             self.path_to_buffer_id.insert(path, remote_id);
@@ -1530,8 +1531,8 @@ impl BufferStore {
                 }
                 return;
             }
-            debug_panic!(
-                "peer_id {} closed buffer_id {} which was either not open or already closed",
+            log::warn!(
+                "peer_id {} closed buffer_id {} which was not shared or was already closed; ignoring stale close",
                 peer_id,
                 buffer_id
             )
@@ -1947,5 +1948,83 @@ fn apply_initial_line_ending(buffer: &mut Buffer, cx: &mut Context<Buffer>) {
     };
     if buffer.line_ending() != desired {
         buffer.set_line_ending(desired, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Project;
+    use fs::FakeFs;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    async fn stale_close_does_not_crash_or_close_other_peer(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings = settings::SettingsStore::test(cx);
+            cx.set_global(settings);
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/buffers", serde_json::json!({"main.txt": "text"}))
+            .await;
+        let project = Project::test(fs, [std::path::Path::new("/buffers")], cx).await;
+        let buffer = project
+            .update(cx, |project, cx| {
+                project.open_local_buffer("/buffers/main.txt", cx)
+            })
+            .await
+            .expect("open buffer");
+        let buffers = project.read_with(cx, |project, _| project.buffer_store().clone());
+        let first = proto::PeerId::default();
+        let second = proto::PeerId { owner_id: 1, id: 1 };
+        for peer in [first, second] {
+            buffers
+                .update(cx, |store, cx| {
+                    store.create_buffer_for_peer(&buffer, peer, cx)
+                })
+                .await
+                .expect("share buffer");
+        }
+
+        let buffer_id = buffer.read_with(cx, |buffer, _| buffer.remote_id().to_proto());
+        for peer in [first, first] {
+            BufferStore::handle_close_buffer(
+                buffers.clone(),
+                TypedEnvelope {
+                    sender_id: peer,
+                    original_sender_id: None,
+                    message_id: 1,
+                    payload: proto::CloseBuffer {
+                        project_id: 0,
+                        buffer_id,
+                    },
+                    received_at: Instant::now(),
+                },
+                cx.to_async(),
+            )
+            .await
+            .expect("ignore stale close");
+            assert!(buffers.read_with(cx, |store, _| store.has_shared_buffers()));
+        }
+
+        buffers.update(cx, |store, _| store.forget_shared_buffers());
+        BufferStore::handle_close_buffer(
+            buffers.clone(),
+            TypedEnvelope {
+                sender_id: second,
+                original_sender_id: None,
+                message_id: 2,
+                payload: proto::CloseBuffer {
+                    project_id: 0,
+                    buffer_id,
+                },
+                received_at: Instant::now(),
+            },
+            cx.to_async(),
+        )
+        .await
+        .expect("ignore close after reset");
+        assert!(!buffers.read_with(cx, |store, _| store.has_shared_buffers()));
     }
 }
