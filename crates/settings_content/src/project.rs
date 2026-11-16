@@ -78,9 +78,6 @@ pub struct ProjectSettingsContent {
     /// Configuration for how direnv configuration should be loaded
     pub load_direnv: Option<DirenvSettings>,
 
-    /// The list of custom Git hosting providers.
-    pub git_hosting_providers: Option<ExtendingVec<GitHostingProviderConfig>>,
-
     /// Whether to disable all AI features in Zed.
     ///
     /// Default: false
@@ -90,7 +87,7 @@ pub struct ProjectSettingsContent {
 crate::fallible_options::flattened_deserialize!(ProjectSettingsContent {
     sections: { all_languages, worktree },
     options: {
-        terminal, context_server_timeout, load_direnv, git_hosting_providers, disable_ai,
+        terminal, context_server_timeout, load_direnv, disable_ai,
     },
     defaults: { lsp, dap, context_servers },
 });
@@ -199,10 +196,7 @@ pub struct WorktreeSettingsContent {
     /// Maximum directory depth to eagerly index outside of git repositories;
     /// contents of directories at this depth or deeper are indexed on demand.
     /// Repositories rooted shallower than this depth are always indexed fully.
-    /// In projects that are not rooted at a git repository, repositories directly
-    /// inside a root folder activate their git features immediately; deeper ones
-    /// activate on first use.
-    /// `0` means no limit and activates all git repositories immediately.
+    /// `0` means no depth limit.
     ///
     /// Default: 5
     pub file_scan_depth: Option<u32>,
@@ -630,106 +624,12 @@ impl std::fmt::Debug for ContextServerCommand {
 
 #[with_fallible_options]
 #[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
-pub struct GitSettings {
-    /// Whether or not to enable git integration.
-    ///
-    /// Default: true
-    #[serde(flatten)]
-    pub enabled: Option<GitEnabledSettings>,
-    /// Whether or not to show the git gutter.
-    ///
-    /// Default: tracked_files
-    pub git_gutter: Option<GitGutterSetting>,
-    /// Sets the debounce threshold (in milliseconds) after which changes are reflected in the git gutter.
-    ///
-    /// Default: 0
-    pub gutter_debounce: Option<u64>,
-    /// Whether or not to show git blame data inline in
-    /// the currently focused line.
-    ///
-    /// Default: on
-    pub inline_blame: Option<InlineBlameSettings>,
-    /// Git blame settings.
-    pub blame: Option<BlameSettings>,
-    /// Which information to show in the branch picker.
-    ///
-    /// Default: on
-    pub branch_picker: Option<BranchPickerSettingsContent>,
-    /// File diff settings.
+pub struct DiffSettingsContent {
+    /// Whether to show diff indicators in the editor gutter.
+    #[serde(alias = "git_gutter")]
+    pub gutter: Option<DiffGutterSetting>,
     pub file_diff: Option<FileDiffSettingsContent>,
-    /// How hunks are displayed visually in the editor.
-    ///
-    /// Default: staged_hollow
-    pub hunk_style: Option<GitHunkStyleSetting>,
-    /// Which base git features (gutter, file colors, git::Diff) diff against.
-    ///
-    /// Default: head
-    pub diff_base: Option<GitDiffBaseSetting>,
-    /// How file paths are displayed in the git gutter.
-    ///
-    /// Default: file_name_first
-    pub path_style: Option<GitPathStyle>,
-    /// Whether to show the stage and restore buttons on diff hunks.
-    ///
-    /// Default: true
-    pub show_stage_restore_buttons: Option<bool>,
-    /// Directory where git worktrees are created, relative to the repository
-    /// working directory.
-    ///
-    /// When the resolved directory is outside the project root, the
-    /// project's directory name is automatically appended so that
-    /// sibling repos don't collide. For example, with the default
-    /// `"../worktrees"` and a project at `~/code/zed`, worktrees are
-    /// created under `~/code/worktrees/zed/`.
-    ///
-    /// When the resolved directory is inside the project root, no
-    /// extra component is added (it's already project-scoped).
-    ///
-    /// Examples:
-    /// - `"../worktrees"` — `~/code/worktrees/<project>/` (default)
-    /// - `".git/zed-worktrees"` — `<project>/.git/zed-worktrees/`
-    /// - `"my-worktrees"` — `<project>/my-worktrees/`
-    ///
-    /// Trailing slashes are ignored.
-    ///
-    /// Default: ../worktrees
-    pub worktree_directory: Option<String>,
-    /// Settings for automatically fetching the default branch's remote and the current branch's upstream remote.
-    pub auto_fetch: Option<AutoFetchSettingsContent>,
-}
-
-#[with_fallible_options]
-#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
-#[serde(rename_all = "snake_case")]
-pub struct AutoFetchSettingsContent {
-    /// Whether to automatically fetch in the background.
-    ///
-    /// Default: false
-    pub enabled: Option<bool>,
-    /// How long to wait between automatic fetches, in seconds.
-    /// Only used when `enabled` is true. (min: 15)
-    ///
-    /// Default: 60
-    pub interval_secs: Option<u64>,
-}
-
-#[with_fallible_options]
-#[derive(Clone, Copy, Debug, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
-#[serde(rename_all = "snake_case")]
-pub struct GitEnabledSettings {
-    pub disable_git: Option<bool>,
-    pub enable_status: Option<bool>,
-    pub enable_diff: Option<bool>,
-}
-
-impl GitEnabledSettings {
-    pub fn is_git_status_enabled(&self) -> bool {
-        !self.disable_git.unwrap_or(false) && self.enable_status.unwrap_or(true)
-    }
-
-    pub fn is_git_diff_enabled(&self) -> bool {
-        !self.disable_git.unwrap_or(false) && self.enable_diff.unwrap_or(true)
-    }
+    pub hunk_style: Option<DiffHunkStyleSetting>,
 }
 
 #[derive(
@@ -746,87 +646,12 @@ impl GitEnabledSettings {
     strum::VariantNames,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum GitGutterSetting {
-    /// Show git gutter in tracked files.
+pub enum DiffGutterSetting {
+    /// Show diff indicators for buffers with a comparison.
     #[default]
     TrackedFiles,
-    /// Hide git gutter
+    /// Hide diff indicators
     Hide,
-}
-
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    PartialEq,
-    Default,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-    MergeFrom,
-    strum::VariantArray,
-    strum::VariantNames,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum InlineBlameLocation {
-    /// Show git blame inline at the current line.
-    #[default]
-    Inline,
-    /// Show git blame in the status bar at the bottom of the window.
-    StatusBar,
-}
-
-#[with_fallible_options]
-#[derive(Clone, Copy, Debug, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
-#[serde(rename_all = "snake_case")]
-pub struct InlineBlameSettings {
-    /// Whether or not to show git blame data inline in
-    /// the currently focused line.
-    ///
-    /// Default: true
-    pub enabled: Option<bool>,
-    /// Whether to only show the inline blame information
-    /// after a delay once the cursor stops moving.
-    ///
-    /// Default: 0
-    pub delay_ms: Option<DelayMs>,
-    /// Where to render the blame information when enabled.
-    ///
-    /// Default: inline
-    pub location: Option<InlineBlameLocation>,
-    /// The amount of padding between the end of the source line and the start
-    /// of the inline blame in units of columns.
-    ///
-    /// Default: 7
-    pub padding: Option<u32>,
-    /// The minimum column number to show the inline blame information at
-    ///
-    /// Default: 0
-    pub min_column: Option<u32>,
-    /// Whether to show commit summary as part of the inline blame.
-    ///
-    /// Default: false
-    pub show_commit_summary: Option<bool>,
-}
-
-#[with_fallible_options]
-#[derive(Clone, Copy, Debug, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
-#[serde(rename_all = "snake_case")]
-pub struct BlameSettings {
-    /// Whether to show the avatar of the author of the commit.
-    ///
-    /// Default: true
-    pub show_avatar: Option<bool>,
-}
-
-#[with_fallible_options]
-#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
-#[serde(rename_all = "snake_case")]
-pub struct BranchPickerSettingsContent {
-    /// Whether to show author name as part of the commit information.
-    ///
-    /// Default: false
-    pub show_author_name: Option<bool>,
 }
 
 #[with_fallible_options]
@@ -853,61 +678,12 @@ pub struct FileDiffSettingsContent {
     strum::VariantNames,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum GitHunkStyleSetting {
+pub enum DiffHunkStyleSetting {
     /// Show unstaged hunks with a filled background and staged hunks hollow.
     #[default]
     StagedHollow,
     /// Show unstaged hunks hollow and staged hunks with a filled background.
     UnstagedHollow,
-}
-
-#[derive(
-    Clone,
-    Copy,
-    PartialEq,
-    Debug,
-    Default,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-    MergeFrom,
-    strum::VariantArray,
-    strum::VariantNames,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum GitDiffBaseSetting {
-    /// Diff against HEAD: show working (uncommitted) changes.
-    #[default]
-    Head,
-    /// Diff against the merge base between HEAD and the repository's
-    /// default branch: show all changes on the branch.
-    ///
-    /// Repositories where no default branch can be resolved fall back
-    /// to `head` behavior.
-    DefaultBranch,
-}
-
-#[with_fallible_options]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    PartialEq,
-    Default,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-    MergeFrom,
-    strum::VariantArray,
-    strum::VariantNames,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum GitPathStyle {
-    /// Show file name first, then path
-    #[default]
-    FileNameFirst,
-    /// Show full path first
-    FilePathFirst,
 }
 
 #[with_fallible_options]
@@ -1022,40 +798,58 @@ pub enum DiagnosticSeverityContent {
     All,
 }
 
-/// A custom Git hosting provider.
-#[with_fallible_options]
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
-pub struct GitHostingProviderConfig {
-    /// The type of the provider.
-    ///
-    /// Must be one of `github`, `gitlab`, `bitbucket`, `gitea`, `forgejo`, `gerrit`, `sourcehut`, `tangled`, or `gitiles`.
-    pub provider: GitHostingProviderKind,
-
-    /// The base URL for the provider (e.g., "https://code.corp.big.com").
-    pub base_url: String,
-
-    /// The display name for the provider (e.g., "BigCorp GitHub").
-    pub name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
-#[serde(rename_all = "snake_case")]
-pub enum GitHostingProviderKind {
-    Github,
-    Gitlab,
-    Bitbucket,
-    Gitea,
-    Forgejo,
-    Gerrit,
-    SourceHut,
-    Tangled,
-    Gitiles,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::merge_from::MergeFrom;
+
+    #[test]
+    fn legacy_diff_display_settings_use_neutral_keys_when_serialized() {
+        let content: crate::SettingsContent = serde_json::from_str(
+            r#"{
+            "git": {
+                "git_gutter": "hide",
+                "hunk_style": "unstaged_hollow",
+                "file_diff": { "show_full_file": false },
+                "inline_blame": { "enabled": true }
+            },
+            "gutter": { "git_gutter_width": "default" },
+            "scrollbar": { "git_diff": false },
+            "git_panel": { "status_style": "label_color", "dock": "left" }
+        }"#,
+        )
+        .unwrap();
+        let diff = content.diff.as_ref().unwrap();
+        assert_eq!(diff.gutter, Some(DiffGutterSetting::Hide));
+        assert_eq!(diff.hunk_style, Some(DiffHunkStyleSetting::UnstagedHollow));
+        assert_eq!(diff.file_diff.unwrap().show_full_file, Some(false));
+        assert_eq!(content.editor.scrollbar.as_ref().unwrap().diff, Some(false));
+        assert_eq!(
+            content.legacy_git_panel.as_ref().unwrap().status_style,
+            Some(crate::StatusStyle::LabelColor)
+        );
+        let serialized = serde_json::to_value(content).unwrap();
+        assert!(serialized.get("git").is_none());
+        assert!(serialized.get("git_panel").is_none());
+        assert_eq!(serialized["diff"]["gutter"], "hide");
+        assert_eq!(serialized["scrollbar"]["diff"], false);
+        assert!(serialized["diff"].get("inline_blame").is_none());
+    }
+
+    #[test]
+    fn current_diff_settings_take_precedence_over_legacy_settings() {
+        let content: crate::SettingsContent = serde_json::from_str(
+            r#"{
+            "git": { "git_gutter": "hide" },
+            "diff": { "gutter": "tracked_files" }
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            content.diff.unwrap().gutter,
+            Some(DiffGutterSetting::TrackedFiles)
+        );
+    }
 
     fn exclusions(globs: &[&str]) -> WorktreeSettingsContent {
         WorktreeSettingsContent {

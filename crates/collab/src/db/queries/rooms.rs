@@ -610,11 +610,6 @@ impl Database {
 
         let mut worktrees = Vec::new();
         let db_worktrees = project.find_related(worktree::Entity).all(tx).await?;
-        let db_repos = project
-            .find_related(project_repository::Entity)
-            .all(tx)
-            .await?;
-
         for db_worktree in db_worktrees {
             let mut worktree = RejoinedWorktree {
                 id: db_worktree.id as u64,
@@ -623,13 +618,10 @@ impl Database {
                 visible: db_worktree.visible,
                 updated_entries: Default::default(),
                 removed_entries: Default::default(),
-                updated_repositories: Default::default(),
-                removed_repositories: Default::default(),
                 diagnostic_summaries: Default::default(),
                 settings_files: Default::default(),
                 scan_id: db_worktree.scan_id as u64,
                 completed_scan_id: db_worktree.completed_scan_id as u64,
-                root_repo_common_dir: db_worktree.root_repo_common_dir,
             };
 
             let rejoined_worktree = rejoined_project
@@ -686,133 +678,6 @@ impl Database {
             }
 
             worktrees.push(worktree);
-        }
-
-        let mut removed_repositories = Vec::new();
-        let mut updated_repositories = Vec::new();
-        for db_repo in db_repos {
-            let rejoined_repository = rejoined_project
-                .repositories
-                .iter()
-                .find(|repo| repo.id == db_repo.id as u64);
-
-            let repository_filter = if let Some(rejoined_repository) = rejoined_repository {
-                project_repository::Column::ScanId.gt(rejoined_repository.scan_id)
-            } else {
-                project_repository::Column::IsDeleted.eq(false)
-            };
-
-            let db_repositories = project_repository::Entity::find()
-                .filter(
-                    Condition::all()
-                        .add(project_repository::Column::ProjectId.eq(project.id))
-                        .add(repository_filter),
-                )
-                .all(tx)
-                .await?;
-
-            for db_repository in db_repositories.into_iter() {
-                if db_repository.is_deleted {
-                    removed_repositories.push(db_repository.id as u64);
-                } else {
-                    let status_entry_filter = if let Some(rejoined_repository) = rejoined_repository
-                    {
-                        project_repository_statuses::Column::ScanId.gt(rejoined_repository.scan_id)
-                    } else {
-                        project_repository_statuses::Column::IsDeleted.eq(false)
-                    };
-
-                    let mut db_statuses = project_repository_statuses::Entity::find()
-                        .filter(
-                            Condition::all()
-                                .add(project_repository_statuses::Column::ProjectId.eq(project.id))
-                                .add(
-                                    project_repository_statuses::Column::RepositoryId
-                                        .eq(db_repository.id),
-                                )
-                                .add(status_entry_filter),
-                        )
-                        .stream(tx)
-                        .await?;
-                    let mut removed_statuses = Vec::new();
-                    let mut updated_statuses = Vec::new();
-
-                    while let Some(db_status) = db_statuses.next().await {
-                        let db_status: project_repository_statuses::Model = db_status?;
-                        if db_status.is_deleted {
-                            removed_statuses.push(db_status.repo_path.clone());
-                        } else {
-                            updated_statuses.push(db_status_to_proto(db_status)?);
-                        }
-                    }
-
-                    let current_merge_conflicts = db_repository
-                        .current_merge_conflicts
-                        .as_ref()
-                        .map(|conflicts| serde_json::from_str(conflicts))
-                        .transpose()?
-                        .unwrap_or_default();
-
-                    let branch_summary = db_repository
-                        .branch_summary
-                        .as_ref()
-                        .map(|branch_summary| serde_json::from_str(branch_summary))
-                        .transpose()?
-                        .unwrap_or_default();
-
-                    let head_commit_details = db_repository
-                        .head_commit_details
-                        .as_ref()
-                        .map(|head_commit_details| serde_json::from_str(head_commit_details))
-                        .transpose()?
-                        .unwrap_or_default();
-
-                    let entry_ids = serde_json::from_str(&db_repository.entry_ids)
-                        .context("failed to deserialize repository's entry ids")?;
-
-                    if let Some(legacy_worktree_id) = db_repository.legacy_worktree_id {
-                        if let Some(worktree) = worktrees
-                            .iter_mut()
-                            .find(|worktree| worktree.id as i64 == legacy_worktree_id)
-                        {
-                            worktree.updated_repositories.push(proto::RepositoryEntry {
-                                repository_id: db_repository.id as u64,
-                                updated_statuses,
-                                removed_statuses,
-                                current_merge_conflicts,
-                                branch_summary,
-                            });
-                        }
-                    } else {
-                        updated_repositories.push(proto::UpdateRepository {
-                            entry_ids,
-                            updated_statuses,
-                            removed_statuses,
-                            current_merge_conflicts,
-                            branch_summary,
-                            head_commit_details,
-                            branch_list: Vec::new(),
-                            branch_list_error: None,
-                            project_id: project_id.to_proto(),
-                            id: db_repository.id as u64,
-                            abs_path: db_repository.abs_path.clone(),
-                            scan_id: db_repository.scan_id as u64,
-                            is_last_update: true,
-                            merge_message: db_repository.merge_message,
-                            stash_entries: Vec::new(),
-                            remote_upstream_url: db_repository.remote_upstream_url.clone(),
-                            remote_origin_url: db_repository.remote_origin_url.clone(),
-                            repository_dir_abs_path: db_repository.repository_dir_abs_path,
-                            common_dir_abs_path: db_repository.common_dir_abs_path,
-                            linked_worktrees: db_repository
-                                .linked_worktrees
-                                .as_deref()
-                                .and_then(|s| serde_json::from_str(s).ok())
-                                .unwrap_or_default(),
-                        });
-                    }
-                }
-            }
         }
 
         let language_servers = project
@@ -889,8 +754,6 @@ impl Database {
             id: project_id,
             old_connection_id,
             collaborators,
-            updated_repositories,
-            removed_repositories,
             worktrees,
             language_servers,
         }))

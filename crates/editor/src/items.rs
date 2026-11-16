@@ -12,7 +12,6 @@ use collections::{HashMap, HashSet};
 use file_icons::FileIcons;
 use fs::MTime;
 use futures::{channel::oneshot, future::try_join_all};
-use git::status::GitSummary;
 use gpui::{
     AnyElement, App, AsyncWindowContext, Context, Entity, EntityId, EventEmitter, Font,
     IntoElement, ParentElement, Pixels, SharedString, Styled, Task, WeakEntity, Window, point,
@@ -27,7 +26,6 @@ use lsp::DiagnosticSeverity;
 use multi_buffer::{BufferOffset, MultiBufferOffset, MultiBufferRow, PathKey};
 use project::{
     File, Project, ProjectItem as _, ProjectPath,
-    git_store::GitStore,
     lsp_store::{FormatTrigger, LanguageServerShowDocumentRequest},
     project_settings::ProjectSettings,
     search::SearchQuery,
@@ -769,31 +767,16 @@ impl Item for Editor {
     }
 
     fn tab_content(&self, params: TabContentParams, _: &Window, cx: &App) -> AnyElement {
-        let label_color = if ItemSettings::get_global(cx).git_status {
-            self.buffer()
-                .read(cx)
-                .as_singleton()
-                .and_then(|buffer| {
-                    let buffer = buffer.read(cx);
-                    let path = buffer.project_path(cx)?;
-                    let buffer_id = buffer.remote_id();
-                    let project = self.project()?.read(cx);
-                    let entry = project.entry_for_path(&path, cx)?;
-                    let status = project
-                        .git_store()
-                        .read(cx)
-                        .display_status_for_buffer_id(buffer_id, cx)?;
-
-                    Some(entry_git_aware_label_color(
-                        status.summary(),
-                        entry.is_ignored,
-                        params.selected,
-                    ))
-                })
-                .unwrap_or_else(|| entry_label_color(params.selected))
-        } else {
-            entry_label_color(params.selected)
-        };
+        let label_color = self
+            .buffer()
+            .read(cx)
+            .as_singleton()
+            .and_then(|buffer| {
+                let buffer = buffer.read(cx);
+                self.status_for_buffer_id(buffer.remote_id(), cx)
+            })
+            .map(|status| crate::file_status_label_color(Some(status)))
+            .unwrap_or_else(|| entry_label_color(params.selected));
 
         let description = params.detail.and_then(|detail| {
             let description = self.tab_description(detail, cx)?;
@@ -1013,7 +996,6 @@ impl Item for Editor {
                         &buffers_to_save,
                         format_trigger,
                         editor.buffer(),
-                        project.read(cx).git_store(),
                         cx,
                     );
                     format_target.map(|target| {
@@ -1143,10 +1125,9 @@ impl Item for Editor {
         if let Some(workspace_entity) = &workspace.weak_handle().upgrade() {
             cx.subscribe(
                 workspace_entity,
-                |editor, _, event: &workspace::Event, cx| {
+                |editor, _, event: &workspace::Event, _cx| {
                     if let workspace::Event::ModalOpened = event {
                         editor.mouse_context_menu.take();
-                        editor.hide_blame_popover(true, cx);
                     }
                 },
             )
@@ -2286,17 +2267,18 @@ pub fn entry_diagnostic_aware_icon_decoration_and_color(
     }
 }
 
-pub fn entry_git_aware_label_color(git_status: GitSummary, ignored: bool, selected: bool) -> Color {
-    let tracked = git_status.index + git_status.worktree;
-    if git_status.conflict > 0 {
-        Color::Conflict
-    } else if tracked.deleted > 0 {
-        Color::Deleted
-    } else if tracked.modified > 0 {
-        Color::Modified
-    } else if tracked.added > 0 || git_status.untracked > 0 {
-        Color::Created
-    } else if ignored {
+pub fn entry_status_label_color(
+    status: Option<buffer_diff::FileStatus>,
+    ignored: bool,
+    selected: bool,
+) -> Color {
+    if let Some(status) = status {
+        let color = crate::file_status_label_color(Some(status));
+        if color != Color::Default {
+            return color;
+        }
+    }
+    if ignored {
         Color::Ignored
     } else {
         entry_label_color(selected)
@@ -2535,15 +2517,14 @@ fn chunk_search_range(
 
 /// Decides what to format based on the `format_on_save` settings of the saved buffers.
 ///
-/// In the modifications modes, only lines with unstaged changes are formatted.
-/// When no git diff is available for a buffer, `modifications` skips formatting while `modifications_if_available`
+/// In the modifications modes, only changed lines in the active diff are formatted.
+/// When no diff is available for a buffer, `modifications` skips formatting while `modifications_if_available`
 /// falls back to formatting entire buffers.
 /// When a diff is available but empty, nothing is formatted in either mode.
 fn compute_format_target(
     buffers: &HashSet<Entity<Buffer>>,
     trigger: FormatTrigger,
     multi_buffer: &Entity<MultiBuffer>,
-    git_store: &Entity<GitStore>,
     cx: &App,
 ) -> Option<FormatTarget> {
     if trigger == FormatTrigger::Manual {
@@ -2551,7 +2532,6 @@ fn compute_format_target(
     }
 
     let multi_buffer_snapshot = multi_buffer.read(cx).snapshot(cx);
-    let git_store = git_store.read(cx);
 
     let mut fall_back_to_full_format = false;
     let mut modified_ranges: Vec<Range<Point>> = Vec::new();
@@ -2566,9 +2546,7 @@ fn compute_format_target(
             FormatOnSave::Modifications | FormatOnSave::ModificationsIfAvailable => {}
         }
 
-        let Some(diff_snapshot) = git_store
-            .get_unstaged_diff(buffer.remote_id(), cx)
-            .map(|diff| diff.read(cx).snapshot(cx))
+        let Some(diff_snapshot) = multi_buffer_snapshot.diff_for_buffer_id(buffer.remote_id())
         else {
             if settings.format_on_save == FormatOnSave::ModificationsIfAvailable {
                 fall_back_to_full_format = true;
@@ -2576,7 +2554,7 @@ fn compute_format_target(
             continue;
         };
 
-        let anchor_ranges = compute_modified_ranges(&buffer.snapshot(), &diff_snapshot);
+        let anchor_ranges = compute_modified_ranges(&buffer.snapshot(), diff_snapshot);
         let flat_anchors = anchor_ranges
             .iter()
             .flat_map(|range| [range.start, range.end])
@@ -3444,7 +3422,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn test_compute_modified_ranges_git_diff(cx: &mut gpui::TestAppContext) {
+    fn test_compute_modified_ranges_diff(cx: &mut gpui::TestAppContext) {
         let base_text = "line0\nline1\nline2\nline3\nline4\nline5\nline6\n";
         // Modify line1 and line5 to create two non-adjacent hunks.
         let buffer_text = "line0\nMOD1\nline2\nline3\nline4\nMOD5\nline6\n";

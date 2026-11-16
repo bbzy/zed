@@ -1,10 +1,10 @@
 use super::kk_settings::KkWorkbenchSettings;
 use buffer_diff::BufferDiff;
+use diff_ui::file_diff_view::{diff_context_control, diff_style_controls};
 use editor::display_map::ToDisplayPoint as _;
 use editor::{
     DefaultDiffHunkRenderer, DiffHunkRenderer, Editor, EditorEvent, RowExt as _, SplittableEditor,
 };
-use git_ui_core::file_diff_view::{diff_context_control, diff_style_controls};
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, Focusable as _, Render, ScrollHandle,
     Subscription, WeakEntity, Window,
@@ -50,7 +50,7 @@ pub(super) struct KkDiffControls {
     pub editor: Entity<SplittableEditor>,
     pub showing_full_file: bool,
     ignore_trim_whitespace: bool,
-    pub status: Option<git::status::FileStatus>,
+    pub status: Option<buffer_diff::FileStatus>,
     pub generic_style_controls: bool,
     pub aggregate: bool,
     pub comparison_view: Option<WeakEntity<super::kk_multi_diff::KkMultiDiff>>,
@@ -481,7 +481,7 @@ impl KkDiffControls {
         }
         let right = self.editor.read(cx).rhs_editor().clone();
         right.update(cx, |editor, cx| {
-            editor.set_allow_git_diff_scrollbar_markers(self.showing_full_file, cx);
+            editor.set_allow_diff_scrollbar_markers(self.showing_full_file, cx);
         });
         cx.notify();
     }
@@ -730,7 +730,7 @@ impl KkDiffControls {
                             .icon_size(IconSize::Small)
                             .tooltip(Tooltip::text("Buffer Search"))
                             .on_click(move |_, window, cx| {
-                                git_ui_core::file_diff_view::dispatch_diff_action(
+                                diff_ui::file_diff_view::dispatch_diff_action(
                                     &search_editor,
                                     &zed_actions::buffer_search::Deploy::find(),
                                     window,
@@ -836,7 +836,7 @@ impl KkDiffControls {
                 ))
                 .child(Divider::vertical().ml_1())
             })
-            .child(git_ui_core::file_diff_view::diff_navigation_controls(
+            .child(diff_ui::file_diff_view::diff_navigation_controls(
                 editor.clone(),
                 has_changes,
                 cx,
@@ -852,7 +852,7 @@ impl KkDiffControls {
                             &focus,
                         ))
                         .on_click(move |_, window, cx| {
-                            git_ui_core::file_diff_view::dispatch_diff_action(
+                            diff_ui::file_diff_view::dispatch_diff_action(
                                 &editor,
                                 &editor::actions::RestoreDiff,
                                 window,
@@ -874,12 +874,12 @@ impl KkDiffControls {
             })
             .when(review_count > 0, |this| {
                 this.child(Divider::vertical()).child(
-                    git_ui_core::file_diff_view::render_send_review_to_agent_button(
+                    diff_ui::file_diff_view::render_send_review_to_agent_button(
                         review_count,
                         &focus,
                     )
                     .on_click(move |_, window, cx| {
-                        git_ui_core::file_diff_view::dispatch_diff_action(
+                        diff_ui::file_diff_view::dispatch_diff_action(
                             &editor,
                             &editor::actions::SendReviewToAgent,
                             window,
@@ -988,7 +988,7 @@ impl DiffHunkRenderer for KkDiffHunkRenderer {
 
 pub(super) fn file_breadcrumbs(
     text: gpui::SharedString,
-    status: Option<git::status::FileStatus>,
+    status: Option<buffer_diff::FileStatus>,
     cx: &App,
 ) -> (Vec<language::HighlightedText>, Option<gpui::Font>) {
     let mut highlights = Vec::new();
@@ -1109,7 +1109,7 @@ impl Render for KkDiffStyleToolbar {
                 .when_some(
                     show_status_icon.then_some(status).flatten(),
                     |this, status| {
-                        this.child(git_ui_core::file_diff_view::file_status_icon(status, cx))
+                        this.child(diff_ui::file_diff_view::file_status_icon(status, cx))
                     },
                 )
                 .into_any_element();

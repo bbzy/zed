@@ -46,7 +46,7 @@ pub fn clone_and_open(
                             .arg("clone")
                             .arg(&*repo_url)
                             .arg(&destination)
-                            .stdin(std::process::Stdio::null())
+                            .stdin(util::command::Stdio::null())
                             .kill_on_drop(true)
                             .output()
                             .await?;

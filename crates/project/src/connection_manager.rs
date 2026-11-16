@@ -87,13 +87,7 @@ impl Manager {
                         let project_id = project.remote_id()?;
                         projects.insert(project_id, handle.clone());
                         let mut worktrees = Vec::new();
-                        let mut repositories = Vec::new();
-                        for (id, repository) in project.repositories(cx) {
-                            repositories.push(proto::RejoinRepository {
-                                id: id.to_proto(),
-                                scan_id: repository.read(cx).scan_id,
-                            });
-                        }
+
                         for worktree in project.worktrees(cx) {
                             let worktree = worktree.read(cx);
                             worktrees.push(proto::RejoinWorktree {
@@ -104,7 +98,6 @@ impl Manager {
                         Some(proto::RejoinProject {
                             id: project_id,
                             worktrees,
-                            repositories,
                         })
                     } else {
                         None

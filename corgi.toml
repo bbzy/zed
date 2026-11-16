@@ -69,7 +69,6 @@ gpui = [
     "../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf",
     "../../assets/fonts/lilex/Lilex-Regular.ttf",
 ]
-git_ui = ["src/commit_message_prompt.txt"]
 editor = ["../grammars/src/**"]
 edit_prediction = ["license_patterns/**"]
 agent_skills = ["builtin/**"]
@@ -84,7 +83,7 @@ extension_host = ["../extension_api/wit/**"]
 # cbindgen reads the renderer source directly from build.rs to generate shader bindings.
 gpui_apple = ["../gpui/src/**", "src/metal_renderer.rs", "src/shaders.metal"]
 eval_cli = ["../zed/Cargo.toml"]
-prompt_store = ["../git_ui/src/commit_message_prompt.txt"]
+prompt_store = ["src/legacy_commit_message_prompt.txt"]
 release_channel = ["../zed/RELEASE_CHANNEL"]
 cli = ["../../script/uninstall.sh"]
 remote_server = ["../zed/Cargo.toml"]

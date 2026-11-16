@@ -1107,14 +1107,13 @@ pub enum FormatOnSave {
     On,
     /// Files should not be formatted on save.
     Off,
-    /// Only lines with unstaged changes are formatted on save.
-    /// Requires source control and LSP range formatting support.
-    /// If no git diff is available or if the LSP doesn't support
+    /// Only lines changed in the active comparison are formatted on save.
+    /// Requires an active comparison and LSP range formatting support.
+    /// If no comparison is available or if the LSP doesn't support
     /// range formatting, formatting is skipped.
     Modifications,
-    /// Only lines with unstaged changes are formatted on save.
-    /// If no git diff is available (e.g., when source control is
-    /// unavailable) or if the LSP doesn't support range formatting,
+    /// Only lines changed in the active comparison are formatted on save.
+    /// If no comparison is available or if the LSP doesn't support range formatting,
     /// falls back to formatting the whole file.
     ModificationsIfAvailable,
 }

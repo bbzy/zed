@@ -13,7 +13,6 @@ use command_palette_hooks::CommandPaletteFilter;
 use editor::{Editor, EditorElement, EditorStyle};
 use extension_host::{ExtensionIndexEntry, ExtensionManifest, ExtensionStore};
 use fuzzy::{StringMatch, StringMatchCandidate, match_strings};
-use git::{GitHostingProviderRegistry, parse_git_remote_url};
 use gpui::{
     Action, App, ClipboardItem, Context, DismissEvent, Entity, EventEmitter, Focusable,
     InteractiveElement, KeyContext, ParentElement, Render, Styled, Task, TaskExt, TextStyle,
@@ -302,7 +301,6 @@ enum Feature {
     ExtensionRuff,
     ExtensionTailwind,
     ExtensionTy,
-    Git,
     LanguageBash,
     LanguageC,
     LanguageCpp,
@@ -311,7 +309,6 @@ enum Feature {
     LanguageReact,
     LanguageRust,
     LanguageTypescript,
-    OpenIn,
     Vim,
 }
 
@@ -332,7 +329,6 @@ fn keywords_by_feature() -> &'static BTreeMap<Feature, Vec<&'static str>> {
             (Feature::ExtensionRuff, vec!["ruff"]),
             (Feature::ExtensionTailwind, vec!["tail", "tailwind"]),
             (Feature::ExtensionTy, vec!["ty"]),
-            (Feature::Git, vec!["git"]),
             (Feature::LanguageBash, vec!["sh", "bash"]),
             (Feature::LanguageC, vec!["c", "clang"]),
             (Feature::LanguageCpp, vec!["c++", "cpp", "clang"]),
@@ -343,19 +339,6 @@ fn keywords_by_feature() -> &'static BTreeMap<Feature, Vec<&'static str>> {
             (
                 Feature::LanguageTypescript,
                 vec!["type", "typescript", "ts"],
-            ),
-            (
-                Feature::OpenIn,
-                vec![
-                    "github",
-                    "gitlab",
-                    "bitbucket",
-                    "codeberg",
-                    "sourcehut",
-                    "permalink",
-                    "link",
-                    "open in",
-                ],
             ),
             (Feature::Vim, vec!["vim"]),
         ])
@@ -391,7 +374,6 @@ enum FetchDebounce {
 pub struct ExtensionsPage {
     workspace: WeakEntity<Workspace>,
     extension_store: Entity<ExtensionStore>,
-    provider_registry: Arc<GitHostingProviderRegistry>,
     list: UniformListScrollHandle,
     fetch_state: ExtensionFetchState,
     filter: ExtensionFilter,
@@ -452,12 +434,10 @@ impl ExtensionsPage {
             cx.subscribe(&query_editor, Self::on_query_change).detach();
 
             let scroll_handle = UniformListScrollHandle::new();
-            let provider_registry = GitHostingProviderRegistry::default_global(cx);
 
             let mut this = Self {
                 workspace: workspace.weak_handle(),
                 extension_store,
-                provider_registry,
                 list: scroll_handle,
                 fetch_state: ExtensionFetchState::Fetching,
                 filter: ExtensionFilter::All,
@@ -476,12 +456,6 @@ impl ExtensionsPage {
             this.fetch_extensions(FetchDebounce::Immediate, None, cx);
             this
         })
-    }
-
-    fn get_repository_icon(&self, repository_url: &str) -> IconName {
-        parse_git_remote_url(Arc::clone(&self.provider_registry), repository_url)
-            .map(|(provider, _)| ui::git_hosting_provider_icon(provider.name().as_str()))
-            .unwrap_or(IconName::Link)
     }
 
     fn on_extension_installed(
@@ -752,10 +726,7 @@ impl ExtensionsPage {
             } => {
                 let extension = self.installed_search_results.get(index)?;
                 let manifest = extension.manifest.clone();
-                let repository_icon = manifest
-                    .repository
-                    .as_deref()
-                    .map(|url| self.get_repository_icon(url));
+                let repository_icon = manifest.repository.as_deref().map(|_| IconName::Link);
                 let card = if extension.dev {
                     ExtensionCard::for_dev(manifest, extension_store)
                 } else {
@@ -777,7 +748,7 @@ impl ExtensionsPage {
         let weak_self = cx.weak_entity();
         Some(
             ExtensionCard::for_remote(extension, extension_store, cx)
-                .repository_icon(self.get_repository_icon(&extension.manifest.repository))
+                .repository_icon(IconName::Link)
                 .context_menu(move |extension_id, authors, window, cx| {
                     let this = weak_self.upgrade()?;
                     Some(Self::render_remote_extension_context_menu(
@@ -1234,12 +1205,6 @@ impl ExtensionsPage {
                 false,
                 cx,
             ),
-            Feature::Git => self.render_feature_upsell_banner(
-                "Zed comes with basic Git support—more features are coming in the future.",
-                "https://zed.dev/docs/git",
-                false,
-                cx,
-            ),
             Feature::LanguageBash => self.render_feature_upsell_banner(
                 "Shell support is built-in to Zed!",
                 "https://zed.dev/docs/languages/bash",
@@ -1285,12 +1250,6 @@ impl ExtensionsPage {
             Feature::LanguageTypescript => self.render_feature_upsell_banner(
                 "Typescript support is built-in to Zed!",
                 "https://zed.dev/docs/languages/typescript",
-                false,
-                cx,
-            ),
-            Feature::OpenIn => self.render_feature_upsell_banner(
-                "Zed supports linking to a source line on GitHub and others.",
-                "https://zed.dev/docs/git#git-integrations",
                 false,
                 cx,
             ),

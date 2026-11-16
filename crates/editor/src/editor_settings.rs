@@ -5,7 +5,7 @@ use language::CursorShape;
 use project::project_settings::DiagnosticSeverity;
 pub use settings::{
     CodeLens, CompletionDetailAlignment, CompletionMenuItemKind, CurrentLineHighlight, DelayMs,
-    DiffViewStyle, DisplayIn, DocumentColorsRenderMode, DoubleClickInMultibuffer, GitGutterWidth,
+    DiffGutterWidth, DiffViewStyle, DisplayIn, DocumentColorsRenderMode, DoubleClickInMultibuffer,
     GoToDefinitionFallback, GoToDefinitionScrollStrategy, MinimapThumb, MinimapThumbBorder,
     MultiCursorModifier, OpenResultsIn, ScrollBeyondLastLine, ScrollbarDiagnostics,
     SeedQuerySetting, ShowMinimap, SnippetSortOrder,
@@ -111,7 +111,7 @@ pub struct Toolbar {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Scrollbar {
     pub show: ShowScrollbar,
-    pub git_diff: bool,
+    pub diff: bool,
     pub selected_text: bool,
     pub selected_symbol: bool,
     pub search_results: bool,
@@ -156,7 +156,7 @@ pub struct Gutter {
     pub breakpoints: bool,
     pub bookmarks: bool,
     pub folds: bool,
-    pub git_gutter_width: settings::GitGutterWidth,
+    pub diff_gutter_width: settings::DiffGutterWidth,
 }
 
 /// Forcefully enable or disable the scrollbar for each axis
@@ -224,7 +224,7 @@ impl Settings for EditorSettings {
         let search = editor.search.unwrap();
         let drag_and_drop_selection = editor.drag_and_drop_selection.unwrap();
         let sticky_scroll = editor.sticky_scroll.unwrap();
-        let file_diff = content.git.as_ref().unwrap().file_diff.unwrap();
+        let file_diff = content.diff.as_ref().unwrap().file_diff.unwrap();
         Self {
             cursor_blink: editor.cursor_blink.unwrap(),
             cursor_shape: editor.cursor_shape.map(Into::into),
@@ -248,7 +248,7 @@ impl Settings for EditorSettings {
             },
             scrollbar: Scrollbar {
                 show: scrollbar.show.map(ui_scrollbar_settings_from_raw).unwrap(),
-                git_diff: scrollbar.git_diff.unwrap(),
+                diff: scrollbar.diff.unwrap(),
                 selected_text: scrollbar.selected_text.unwrap(),
                 selected_symbol: scrollbar.selected_symbol.unwrap(),
                 search_results: scrollbar.search_results.unwrap(),
@@ -274,7 +274,7 @@ impl Settings for EditorSettings {
                 bookmarks: gutter.bookmarks.unwrap(),
                 breakpoints: gutter.breakpoints.unwrap(),
                 folds: gutter.folds.unwrap(),
-                git_gutter_width: gutter.git_gutter_width.unwrap(),
+                diff_gutter_width: gutter.diff_gutter_width.unwrap(),
             },
             scroll_beyond_last_line: editor.scroll_beyond_last_line.unwrap(),
             vertical_scroll_margin: editor.vertical_scroll_margin.unwrap() as f64,

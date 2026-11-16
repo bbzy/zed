@@ -11,7 +11,6 @@ use language::{
 };
 use project::{
     LanguageServerProgress, LspStoreEvent, ProgressToken, Project, ProjectEnvironmentEvent,
-    git_store::{GitStoreEvent, Repository},
 };
 use smallvec::SmallVec;
 use std::{
@@ -25,7 +24,7 @@ use ui::{ContextMenu, PopoverMenu, PopoverMenuHandle, Tooltip, prelude::*};
 use util::truncate_and_trailoff;
 use workspace::{StatusItemView, Workspace, item::ItemHandle};
 
-const GIT_OPERATION_DELAY: Duration = Duration::from_millis(0);
+const FS_OPERATION_DELAY: Duration = Duration::from_millis(0);
 pub const DEFERRED_SCAN_MESSAGE_TIMEOUT: Duration = Duration::from_secs(10);
 
 actions!(
@@ -202,16 +201,6 @@ impl ActivityIndicator {
                 &project.read(cx).environment().clone(),
                 |_, _, event, cx| match event {
                     ProjectEnvironmentEvent::ErrorsUpdated => cx.notify(),
-                },
-            )
-            .detach();
-
-            cx.subscribe(
-                &project.read(cx).git_store().clone(),
-                |_, _, event: &GitStoreEvent, cx| {
-                    if let project::git_store::GitStoreEvent::JobsUpdated = event {
-                        cx.notify()
-                    }
                 },
             )
             .detach();
@@ -454,27 +443,9 @@ impl ActivityIndicator {
             });
         }
 
-        let current_job = self
-            .project
-            .read(cx)
-            .active_repository(cx)
-            .map(|r| r.read(cx))
-            .and_then(Repository::current_job);
-        // Show any long-running git command
-        if let Some(job_info) = current_job
-            && Instant::now() - job_info.start >= GIT_OPERATION_DELAY
-        {
-            return Some(Content {
-                icon: ActivityIcon::LoadingSpinner,
-                message: job_info.message.into(),
-                on_click: None,
-                tooltip_message: None,
-            });
-        }
-
         // Show any long-running fs command
         for fs_job in &self.fs_jobs {
-            if Instant::now().duration_since(fs_job.start) >= GIT_OPERATION_DELAY {
+            if Instant::now().duration_since(fs_job.start) >= FS_OPERATION_DELAY {
                 return Some(Content {
                     icon: ActivityIcon::LoadingSpinner,
                     message: fs_job.message.clone().into(),
@@ -719,7 +690,10 @@ impl ActivityIndicator {
         Some(Content {
             icon: ActivityIcon::Icon(IconName::Info),
             message: "Partial file index".to_string(),
-            tooltip_message: Some("Directories outside of git repositories and deeper than the `file_scan_depth` setting will be indexed on demand.".to_string()),
+            tooltip_message: Some(
+                "Directories deeper than the `file_scan_depth` setting will be indexed on demand."
+                    .to_string(),
+            ),
             on_click: Some(Arc::new(|this, _, cx| {
                 this.deferred_scan_message = DeferredScanMessage::Dismissed;
                 cx.notify();

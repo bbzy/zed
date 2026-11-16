@@ -2,11 +2,10 @@ use crate::{
     DisplayPoint, Editor, MultiBuffer, MultiBufferSnapshot, RowExt,
     display_map::{HighlightKey, ToDisplayPoint},
 };
-use buffer_diff::DiffHunkStatusKind;
+use buffer_diff::{BufferDiff, DiffHunkStatusKind};
 use collections::BTreeMap;
 use futures::Future;
 
-use git::repository::RepoPath;
 use gpui::{
     AnyWindowHandle, App, Context, Entity, Focusable as _, Keystroke, Pixels, Point,
     VisualTestContext, Window, WindowHandle, prelude::*,
@@ -34,6 +33,22 @@ use util::{
 
 use super::{build_editor, build_editor_with_project};
 
+pub fn attach_diff(
+    buffer: &Entity<Buffer>,
+    multi_buffer: &Entity<MultiBuffer>,
+    base: &str,
+    cx: &mut App,
+) {
+    let diff = cx.new(|cx| {
+        cx.observe(buffer, |diff: &mut BufferDiff, buffer, cx| {
+            diff.recalculate_diff_sync(&buffer.read(cx).text_snapshot(), cx);
+        })
+        .detach();
+        BufferDiff::new_with_base_text(base, &buffer.read(cx).text_snapshot(), cx)
+    });
+    multi_buffer.update(cx, |multi_buffer, cx| multi_buffer.add_diff(diff, cx));
+}
+
 pub struct EditorTestContext {
     pub cx: gpui::VisualTestContext,
     pub window: AnyWindowHandle,
@@ -48,7 +63,6 @@ impl EditorTestContext {
         fs.insert_tree(
             root,
             serde_json::json!({
-                ".git": {},
                 "file": "",
             }),
         )
@@ -329,55 +343,18 @@ impl EditorTestContext {
         }
     }
 
-    pub fn set_head_text(&mut self, diff_base: &str) {
+    pub fn set_diff_base(&mut self, diff_base: &str) {
         self.cx.run_until_parked();
-        let fs =
-            self.update_editor(|editor, _, cx| editor.project().unwrap().read(cx).fs().as_fake());
-        let path = self.update_buffer(|buffer, _| buffer.file().unwrap().path().clone());
-        fs.set_head_for_repo(
-            &Self::root_path().join(".git"),
-            &[(path.as_unix_str(), diff_base.to_string())],
-            "deadbeef",
-        );
-        self.cx.run_until_parked();
-    }
-
-    pub fn clear_index_text(&mut self) {
-        self.cx.run_until_parked();
-        let fs =
-            self.update_editor(|editor, _, cx| editor.project().unwrap().read(cx).fs().as_fake());
-        fs.set_index_for_repo(&Self::root_path().join(".git"), &[]);
+        self.update_editor(|editor, _, cx| {
+            let buffer = editor
+                .buffer
+                .read(cx)
+                .as_singleton()
+                .expect("singleton test buffer");
+            attach_diff(&buffer, &editor.buffer, diff_base, cx);
+        });
         self.cx.run_until_parked();
     }
-
-    pub fn set_index_text(&mut self, diff_base: &str) {
-        self.cx.run_until_parked();
-        let fs =
-            self.update_editor(|editor, _, cx| editor.project().unwrap().read(cx).fs().as_fake());
-        let path = self.update_buffer(|buffer, _| buffer.file().unwrap().path().clone());
-        fs.set_index_for_repo(
-            &Self::root_path().join(".git"),
-            &[(path.as_unix_str(), diff_base.to_string())],
-        );
-        self.cx.run_until_parked();
-    }
-
-    #[track_caller]
-    pub fn assert_index_text(&mut self, expected: Option<&str>) {
-        let fs =
-            self.update_editor(|editor, _, cx| editor.project().unwrap().read(cx).fs().as_fake());
-        let path = self.update_buffer(|buffer, _| buffer.file().unwrap().path().clone());
-        let mut found = None;
-        fs.with_git_state(&Self::root_path().join(".git"), false, |git_state| {
-            found = git_state
-                .index_contents
-                .get(&RepoPath::from_rel_path(&path))
-                .cloned();
-        })
-        .unwrap();
-        assert_eq!(expected.map(str::as_bytes), found.as_deref());
-    }
-
     /// Change the editor's text and selections using a string containing
     /// embedded range markers that represent the ranges and directions of
     /// each selection.

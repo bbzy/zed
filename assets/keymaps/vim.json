@@ -95,7 +95,6 @@
       "g r a": "editor::ToggleCodeActions",
       "g g": "vim::StartOfDocument",
       "g h": "editor::Hover",
-      "g B": "editor::BlameHover",
       "g d": "editor::GoToDefinition",
       "g shift-d": "editor::GoToDeclaration",
       "g y": "editor::GoToTypeDefinition",

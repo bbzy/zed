@@ -1,5 +1,5 @@
 use crate::editable_context::EditHistoryContextEntry;
-use anyhow::{Context as _, Result, bail};
+use anyhow::Result;
 use gpui::{AppContext as _, AsyncApp, Entity};
 use language::{Buffer, Point, ToPoint as _};
 use project::Project;
@@ -12,7 +12,6 @@ use std::{
     time::Instant,
 };
 use text::Anchor;
-use util::command::new_command;
 
 const BM25_CONTEXT_QUERY_LINE_COUNT: u32 = 20;
 const BM25_CONTEXT_EDIT_HISTORY_QUERY_ENTRY_COUNT: usize = 8;
@@ -58,6 +57,7 @@ pub async fn collect_bm25_context(
 
 struct Bm25ContextQuery {
     worktree_abs_path: PathBuf,
+    relative_paths: Vec<PathBuf>,
     worktree_root_name: String,
     active_path: String,
     cursor_excerpt: String,
@@ -71,30 +71,37 @@ fn build_query(
     edit_history: &[EditHistoryContextEntry],
     cx: &mut AsyncApp,
 ) -> Option<Bm25ContextQuery> {
-    let (worktree_abs_path, worktree_root_name, active_path, cursor_excerpt) = cx.update(|cx| {
-        let buffer = active_buffer.read(cx);
-        let file = buffer.file()?;
-        let project = project.read(cx);
-        if !project.is_local() {
-            return None;
-        }
-        let worktree = project.worktree_for_id(file.worktree_id(cx), cx)?;
-        let worktree = worktree.read(cx);
-        if !worktree.is_local() {
-            return None;
-        }
+    let (worktree_abs_path, worktree_root_name, active_path, cursor_excerpt, relative_paths) =
+        cx.update(|cx| {
+            let buffer = active_buffer.read(cx);
+            let file = buffer.file()?;
+            let project = project.read(cx);
+            if !project.is_local() {
+                return None;
+            }
+            let worktree = project.worktree_for_id(file.worktree_id(cx), cx)?;
+            let worktree = worktree.read(cx);
+            if !worktree.is_local() {
+                return None;
+            }
 
-        let snapshot = buffer.snapshot();
-        let range = expanded_anchor_range(&snapshot, cursor_position..cursor_position);
-        let cursor_excerpt = snapshot.text_for_range(range).collect::<String>();
+            let snapshot = buffer.snapshot();
+            let range = expanded_anchor_range(&snapshot, cursor_position..cursor_position);
+            let cursor_excerpt = snapshot.text_for_range(range).collect::<String>();
 
-        Some((
-            worktree.abs_path(),
-            worktree.root_name().as_unix_str().to_string(),
-            file.path().as_unix_str().to_string(),
-            cursor_excerpt,
-        ))
-    })?;
+            Some((
+                worktree.abs_path(),
+                worktree.root_name().as_unix_str().to_string(),
+                file.path().as_unix_str().to_string(),
+                cursor_excerpt,
+                worktree
+                    .snapshot()
+                    .files(false, 0)
+                    .filter(|entry| !entry.is_private)
+                    .map(|entry| entry.path.as_std_path().to_path_buf())
+                    .collect(),
+            ))
+        })?;
 
     let edit_history_excerpts = edit_history
         .iter()
@@ -110,6 +117,7 @@ fn build_query(
 
     Some(Bm25ContextQuery {
         worktree_abs_path: worktree_abs_path.to_path_buf(),
+        relative_paths,
         worktree_root_name,
         active_path,
         cursor_excerpt,
@@ -143,7 +151,7 @@ async fn collect_bm25_context_from_disk(
     }
 
     let started_at = Instant::now();
-    let index = Bm25Index::build(&query.worktree_abs_path).await?;
+    let index = Bm25Index::build(&query.worktree_abs_path, query.relative_paths.clone());
     let elapsed = started_at.elapsed();
     log::debug!(
         "built BM25 context index: candidate_files:{}, indexed_files:{}, indexed_bytes:{}, chunks:{}, terms:{}, latency:{elapsed:?}",
@@ -209,8 +217,7 @@ struct DocumentsForFile {
 }
 
 impl Bm25Index {
-    async fn build(worktree_abs_path: &Path) -> Result<Self> {
-        let relative_paths = git_ls_files(worktree_abs_path).await?;
+    fn build(worktree_abs_path: &Path, relative_paths: Vec<PathBuf>) -> Self {
         let mut stats = Bm25IndexStats {
             candidate_file_count: relative_paths.len(),
             ..Default::default()
@@ -247,12 +254,12 @@ impl Bm25Index {
         stats.document_count = documents.len();
         stats.term_count = document_frequencies.len();
 
-        Ok(Self {
+        Self {
             documents,
             document_frequencies,
             average_document_len,
             stats,
-        })
+        }
     }
 
     fn search(
@@ -359,40 +366,6 @@ impl Bm25Index {
         score
     }
 }
-
-async fn git_ls_files(worktree_abs_path: &Path) -> Result<Vec<PathBuf>> {
-    let output = new_command("git")
-        .arg("ls-files")
-        .arg("-z")
-        .current_dir(worktree_abs_path)
-        .output()
-        .await
-        .with_context(|| {
-            format!(
-                "failed to run git ls-files in {}",
-                worktree_abs_path.display()
-            )
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "git ls-files failed in {} with status {}: {}",
-            worktree_abs_path.display(),
-            output.status,
-            stderr.trim()
-        );
-    }
-
-    let output =
-        String::from_utf8(output.stdout).context("git ls-files output was not valid UTF-8")?;
-    Ok(output
-        .split('\0')
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .collect())
-}
-
 fn documents_for_file(
     worktree_abs_path: &Path,
     relative_path: PathBuf,

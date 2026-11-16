@@ -6,13 +6,21 @@
 
 use std::process::Command;
 
-fn git_sha() -> Option<String> {
+fn commit_sha() -> Option<String> {
     if let Ok(sha) = std::env::var("ZED_COMMIT_SHA") {
         return Some(sha);
     }
 
-    Command::new("git")
-        .args(["rev-parse", "HEAD"])
+    Command::new("kk")
+        .args([
+            "--ignore-working-copy",
+            "log",
+            "--no-graph",
+            "-r",
+            "@",
+            "-T",
+            "commit_id",
+        ])
         .output()
         .ok()
         .filter(|output| output.status.success())
@@ -20,7 +28,7 @@ fn git_sha() -> Option<String> {
 }
 
 fn product_version() -> String {
-    let commit_sha = git_sha();
+    let commit_sha = commit_sha();
     let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
     let channel = std::env::var("RELEASE_CHANNEL").unwrap_or_else(|_| "dev".into());
     let build_id = std::env::var("GITHUB_RUN_NUMBER").ok();

@@ -907,7 +907,7 @@ See [Copilot Enterprise](../ai/use-an-existing-subscription.md#copilot-enterpris
 - `"unified"`: Show changes inline with added and deleted lines stacked vertically
 - `"split"`: Display old and new versions side by side in separate panes (default)
 
-See [Git documentation](../git.md#diff-view-styles) for more details.
+See [KK Workbench documentation](../kk-workbench.md#diff-view-styles) for more details.
 
 ## Minimum Split Diff Width {#minimum-split-diff-width}
 
@@ -919,7 +919,7 @@ See [Git documentation](../git.md#diff-view-styles) for more details.
 
 Non-negative numbers.
 `0` disables the automatic fallback to unified view.
-See [Diff View Styles](../git.md#diff-view-styles).
+See [Diff View Styles](../kk-workbench.md#diff-view-styles).
 
 ## Word Diff Enabled {#word-diff-enabled}
 
@@ -931,7 +931,7 @@ See [Diff View Styles](../git.md#diff-view-styles).
 
 `boolean` values
 
-See [Word Diff Highlighting](../git.md#word-diff-highlighting).
+See [Word Diff Highlighting](../kk-workbench.md#word-diff-highlighting).
 
 ## Disable AI
 
@@ -1409,7 +1409,7 @@ Numbers from `0` to `106`, with `0` disabling contrast adjustment.
     "breakpoints": true,
     "folds": true,
     "min_line_number_digits": 4,
-    "git_gutter_width": "default"
+    "diff_gutter_width": "default"
   }
 }
 ```
@@ -1422,7 +1422,7 @@ Numbers from `0` to `106`, with `0` disabling contrast adjustment.
 - `breakpoints`: Whether to show breakpoints in the gutter
 - `folds`: Whether to show fold buttons in the gutter
 - `min_line_number_digits`: Minimum number of characters to reserve space for in the gutter
-- `git_gutter_width`: The width, in pixels, of the git diff hunk indicators in the gutter. When `default`, the width scales with the buffer font size
+- `diff_gutter_width`: The width, in pixels, of the git diff hunk indicators in the gutter. When `default`, the width scales with the buffer font size
 
 ## Hide Mouse
 
@@ -1603,13 +1603,13 @@ Cursor indicators appear as small marks on the scrollbar showing where other col
 
 `boolean` values
 
-### Git Diff Indicators
+### Diff Indicators
 
-- Description: Whether to show git diff indicators in the scrollbar.
-- Setting: `git_diff`
+- Description: Whether to show diff indicators in the scrollbar.
+- Setting: `diff`
 - Default: `true`
 
-Git diff indicators appear as colored marks showing lines that have been added, modified, or deleted compared to the git HEAD.
+Diff indicators mark added, modified, and deleted lines in the active comparison.
 
 **Options**
 
@@ -2054,7 +2054,6 @@ See [Tab Switcher](../tab-switcher.md).
   "tabs": {
     "close_position": "right",
     "file_icons": false,
-    "git_status": false,
     "activate_on_close": "history",
     "show_close_button": "hover",
     "show_diagnostics": "off"
@@ -2094,12 +2093,6 @@ See [Tab Switcher](../tab-switcher.md).
 
 - Description: Whether to show the file icon for a tab.
 - Setting: `file_icons`
-- Default: `false`
-
-### Git Status
-
-- Description: Whether or not to show Git file status in tab.
-- Setting: `git_status`
 - Default: `false`
 
 ### Activate on close
@@ -2964,7 +2957,6 @@ How the limit applies, case by case:
 
 Directories loaded on demand stay indexed, but are deferred again after a restart or after a settings change triggers a worktree rescan.
 
-`file_scan_depth` bounds where git repositories can be discovered; [repository activation](../git.md#repository-activation) decides what a discovered repository costs.
 Note that any non-zero value defers git activation for repositories that are not directly inside a project root folder, no matter how large the value is; raising the limit indexes more directories eagerly but does not activate deeper repositories any earlier.
 In multi-folder projects, depth is measured from each root folder separately.
 
@@ -3152,320 +3144,23 @@ To interpret all `.c` files as C++, files called `MyLockFile` as TOML and files 
 }
 ```
 
-## Git
+## File Comparisons
 
-- Description: Configuration for git-related features.
-- Setting: `git`
+- Description: Display options shared by file comparisons and KK Workbench.
+- Setting: `diff`
 - Default:
 
 ```json [settings]
 {
-  "git": {
-    "git_gutter": "tracked_files",
-    "inline_blame": {
-      "enabled": true
-    },
-    "branch_picker": {
-      "show_author_name": true
-    },
+  "diff": {
+    "gutter": "tracked_files",
+    "file_diff": { "show_full_file": true },
     "hunk_style": "staged_hollow"
   }
 }
 ```
 
-### Git Integration and Display {#git-integration-and-display}
-
-These settings belong inside the `git` object.
-
-| Setting                      | Default             | Description                                                            |
-| ---------------------------- | ------------------- | ---------------------------------------------------------------------- |
-| `disable_git`                | `false`             | Disable all Git integration, overriding the individual switches.       |
-| `enable_status`              | `true`              | Enable Git status tracking.                                            |
-| `enable_diff`                | `true`              | Enable Git diff display.                                               |
-| `blame.show_avatar`          | `true`              | Show the commit author's avatar in blame information.                  |
-| `file_diff.show_full_file`   | `true`              | Show the full file when opening a file diff, rather than changes only. |
-| `path_style`                 | `"file_name_first"` | Use `"file_name_first"` or `"file_path_first"` in Git views.           |
-| `show_stage_restore_buttons` | `true`              | Show stage and restore buttons on diff hunks.                          |
-
-### Git Gutter
-
-- Description: Whether or not to show the git gutter.
-- Setting: `git_gutter`
-- Default: `tracked_files`
-
-**Options**
-
-1. Show git gutter in tracked files
-
-```json [settings]
-{
-  "git": {
-    "git_gutter": "tracked_files"
-  }
-}
-```
-
-2. Hide git gutter
-
-```json [settings]
-{
-  "git": {
-    "git_gutter": "hide"
-  }
-}
-```
-
-### Gutter Debounce
-
-- Description: Sets the debounce threshold (in milliseconds) after which changes are reflected in the git gutter.
-- Setting: `gutter_debounce`
-- Default: `0`
-
-**Options**
-
-`integer` values representing milliseconds
-
-Example:
-
-```json [settings]
-{
-  "git": {
-    "gutter_debounce": 100
-  }
-}
-```
-
-### Inline Git Blame
-
-- Description: Whether or not to show git blame information inline, on the currently focused line.
-- Setting: `inline_blame`
-- Default:
-
-```json [settings]
-{
-  "git": {
-    "inline_blame": {
-      "enabled": true,
-      "location": "inline"
-    }
-  }
-}
-```
-
-**Options**
-
-1. Disable inline git blame:
-
-```json [settings]
-{
-  "git": {
-    "inline_blame": {
-      "enabled": false
-    }
-  }
-}
-```
-
-2. Only show inline git blame after a delay (that starts after cursor stops moving):
-
-```json [settings]
-{
-  "git": {
-    "inline_blame": {
-      "delay_ms": 500
-    }
-  }
-}
-```
-
-3. Show git blame in the status bar at the bottom of the window:
-
-```json [settings]
-{
-  "git": {
-    "inline_blame": {
-      "location": "status_bar"
-    }
-  }
-}
-```
-
-4. Show a commit summary next to the commit date and author:
-
-```json [settings]
-{
-  "git": {
-    "inline_blame": {
-      "show_commit_summary": true
-    }
-  }
-}
-```
-
-5. Use this as the minimum column at which to display inline blame information:
-
-```json [settings]
-{
-  "git": {
-    "inline_blame": {
-      "min_column": 80
-    }
-  }
-}
-```
-
-6. Set the padding between the end of the line and the inline blame hint, in ems:
-
-```json [settings]
-{
-  "git": {
-    "inline_blame": {
-      "padding": 10
-    }
-  }
-}
-```
-
-### Branch Picker
-
-- Description: Configuration related to the branch picker.
-- Setting: `branch_picker`
-- Default:
-
-```json [settings]
-{
-  "git": {
-    "branch_picker": {
-      "show_author_name": true
-    }
-  }
-}
-```
-
-**Options**
-
-1. Hide the author name in the branch picker:
-
-```json [settings]
-{
-  "git": {
-    "branch_picker": {
-      "show_author_name": false
-    }
-  }
-}
-```
-
-### Hunk Style
-
-- Description: What styling we should use for the diff hunks.
-- Setting: `hunk_style`
-- Default:
-
-```json [settings]
-{
-  "git": {
-    "hunk_style": "staged_hollow"
-  }
-}
-```
-
-**Options**
-
-1. Show the staged hunks faded out and with a border:
-
-```json [settings]
-{
-  "git": {
-    "hunk_style": "staged_hollow"
-  }
-}
-```
-
-2. Show unstaged hunks faded out and with a border:
-
-```json [settings]
-{
-  "git": {
-    "hunk_style": "unstaged_hollow"
-  }
-}
-```
-
-### Diff Base
-
-- Description: Whether git features show changes relative to HEAD (uncommitted changes) or to the default branch (all changes on the current branch). Also available in the editor controls menu as "Diff Against Default Branch".
-- Setting: `diff_base`
-- Default:
-
-```json [settings]
-{
-  "git": {
-    "diff_base": "head"
-  }
-}
-```
-
-**Options**
-
-1. Show working changes relative to HEAD:
-
-```json [settings]
-{
-  "git": {
-    "diff_base": "head"
-  }
-}
-```
-
-2. Show all branch changes relative to the merge base with the repository's default branch:
-
-```json [settings]
-{
-  "git": {
-    "diff_base": "default_branch"
-  }
-}
-```
-
-### Auto Fetch
-
-- Description: Whether and how often to automatically fetch the default branch's remote and the current branch's upstream remote in the background. If the default branch is local, its upstream remote is used. If both refer to the same remote, it is fetched only once. Other remotes are not fetched. Auto-fetch never prompts for credentials, so it relies on credentials that can be supplied without interaction, such as an SSH agent or a credential helper answering from a keychain. It is also disabled for repositories in worktrees you have not trusted.
-- Setting: `auto_fetch`
-- Default:
-
-```json [settings]
-{
-  "git": {
-    "auto_fetch": {
-      "enabled": false,
-      "interval_secs": 60
-    }
-  }
-}
-```
-
-**Options**
-
-- `enabled`: Whether to automatically fetch in the background. Disabling it stops future fetches without interrupting a fetch already queued or running.
-- `interval_secs`: How long to wait between automatic fetches, in seconds, starting after the previous fetch completes. Only applies when `enabled` is `true`. Values below 15 are clamped to 15.
-
-In remote development, auto-fetch runs on the host that owns the checkout and
-sends repository updates to your local Zed window. Your user settings are forwarded
-to the SSH server; server settings override them. In a shared project, the host's
-settings control auto-fetch for all collaborators. Configure `git.auto_fetch` in
-user or server settings; Git settings are not read from project `.zed/settings.json`
-files.
-
-## Git Commit Buffer Font Size {#git-commit-buffer-font-size}
-
-- Description: Font size for commit messages in the Git Panel and commit modal, in pixels.
-- Setting: `git_commit_buffer_font_size`
-- Default: `12`
-
-**Options**
-
-Numbers from `6` to `100` pixels, inclusive.
+Set `gutter` to `hide` to hide comparison indicators. `file_diff.show_full_file` controls whether newly opened comparisons show the full file. `hunk_style` accepts `staged_hollow` or `unstaged_hollow` for the two hunk styles.
 
 ## Go to Definition Fallback
 
@@ -6407,9 +6102,6 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 ```json [settings]
 {
   "title_bar": {
-    "show_branch_status_icon": false,
-    "show_branch_name": true,
-    "show_worktree_name": true,
     "show_project_items": true,
     "show_onboarding_banner": true,
     "show_user_picture": true,
@@ -6612,7 +6304,6 @@ See [Changing Vim Mode Settings](../vim.md#changing-vim-mode-settings) for a mor
     "entry_spacing": "comfortable",
     "file_icons": true,
     "folder_indicator": "icon",
-    "git_status": true,
     "indent_size": 20,
     "auto_reveal_entries": true,
     "auto_fold_dirs": true,
@@ -6632,7 +6323,6 @@ See [Changing Vim Mode Settings](../vim.md#changing-vim-mode-settings) for a mor
     "hide_gitignore": false,
     "title_tooltip_delay": "default",
     "diagnostic_badges": false,
-    "git_status_indicator": false,
     "hide_root": false,
     "hide_hidden": false,
     "starts_open": true,
@@ -6708,34 +6398,6 @@ These settings belong inside the `project_panel` object.
 {
   "project_panel": {
     "entry_spacing": "standard"
-  }
-}
-```
-
-### Git Status
-
-- Description: Indicates newly created and updated files
-- Setting: `git_status`
-- Default: `true`
-
-**Options**
-
-1. Default enable git status
-
-```json [settings]
-{
-  "project_panel": {
-    "git_status": true
-  }
-}
-```
-
-2. Default disable git status
-
-```json [settings]
-{
-  "project_panel": {
-    "git_status": false
   }
 }
 ```
@@ -7053,7 +6715,6 @@ See [Agent Panel](#agent-panel) for width, flexible sizing, and Threads Sidebar 
 | `auto_compact.threshold`               | `"90%"`                                         | Percentage of context capacity, positive tokens-used count, or negative tokens-remaining count.       |
 | `enable_feedback`                      | `true`                                          | Show feedback controls where supported and permitted by organization policy.                          |
 | `inline_assistant_use_streaming_tools` | `true`                                          | Use streaming tools for inline assists when supported by the selected model.                          |
-| `commit_message_include_project_rules` | `true`                                          | Include project instruction files when generating Git commit messages.                                |
 | `notify_when_agent_waiting`            | `"primary_screen"`                              | Notification display: `"primary_screen"`, `"all_screens"`, or `"never"`.                              |
 | `play_sound_when_agent_done`           | `"never"`                                       | Completion and input-required sounds: `"never"`, `"when_hidden"`, or `"always"`.                      |
 | `expand_edit_card`                     | `true`                                          | Expand new edit cards to show diffs.                                                                  |
@@ -7231,114 +6892,6 @@ Each adapter accepts optional `binary`, `args`, and `env` fields to customize ho
 
 See the [debugger page](../debugger.md) for more information about debugging support within Zed.
 
-## Git Panel
-
-- Description: Setting to customize the behavior of the git panel.
-- Setting: `git_panel`
-- Default:
-
-```json [settings]
-{
-  "git_panel": {
-    "button": true,
-    "dock": "right",
-    "default_width": 360,
-    "status_style": "icon",
-    "file_icons": false,
-    "folder_indicator": "icon",
-    "fallback_branch_name": "main",
-    "sort_by": "path",
-    "group_by": "status",
-    "collapse_untracked_diff": false,
-    "tree_view": false,
-    "scrollbar": {
-      "show": null
-    },
-    "starts_open": false,
-    "show_count_badge": false,
-    "diff_stats": true,
-    "commit_title_max_length": 0,
-    "entry_primary_click_action": "project_diff",
-    "commit_editor": "expanded"
-  }
-}
-```
-
-**Options**
-
-- `button`: Whether to show the git panel button in the status bar
-- `dock`: Where to dock the git panel. Can be `left` or `right`
-- `default_width`: Default width of the git panel
-- `status_style`: How to display git status. Can be `label_color` or `icon`
-- `file_icons`: Whether to show file icons in the git panel
-- `folder_indicator`: What to show for directories in the git panel. Can be `icon`, `chevron`, or `both`
-- `fallback_branch_name`: What branch name to use if `init.defaultBranch` is not set
-- `sort_by`: How to sort entries in the git panel. Can be `path` or `name`
-- `group_by`: How to group entries in the git panel. Can be `none` or `status`
-- `collapse_untracked_diff`: Whether to collapse untracked files in the diff panel
-- `tree_view`: Whether to show entries in tree or flat view in the panel
-- `scrollbar`: When to show the scrollbar in the git panel
-- `starts_open`: Whether the git panel should open on startup
-- `commit_editor`: Whether the commit message editor is shown in the git panel by default. Can be `expanded` or `collapsed`
-- `show_count_badge`: Whether to show a badge on the git panel icon with the count of uncommitted changes
-- `diff_stats`: Whether to show the addition/deletion change count next to each file in the git panel
-- `commit_title_max_length`: Maximum length of the commit message title before a warning is shown. Set to `0` to disable
-- `entry_primary_click_action`: Default action when clicking a changed file in the git panel. Can be `project_diff`, `file_diff`, or `view_file`
-
-## Git Worktree Directory
-
-- Description: Directory where git worktrees are created, relative to the repository working directory.
-- Setting: `git.worktree_directory`
-- Default: `"../worktrees"`
-
-When the resolved directory falls outside the project root, the project's directory name is automatically appended so that sibling repos don't collide. For example, with the default `"../worktrees"` and a project at `~/code/zed`, worktrees are created under `~/code/worktrees/zed/`.
-
-When the resolved directory is inside the project root, no extra component is added (it's already project-scoped).
-
-**Examples**:
-
-- `"../worktrees"` — `~/code/worktrees/<project>/` (default)
-- `".git/zed-worktrees"` — `<project>/.git/zed-worktrees/`
-- `"my-worktrees"` — `<project>/my-worktrees/`
-
-Trailing slashes are ignored.
-
-```json [settings]
-{
-  "git": {
-    "worktree_directory": "../worktrees"
-  }
-}
-```
-
-## Git Hosting Providers
-
-- Description: Register self-hosted GitHub, GitLab, or Bitbucket instances so commit hashes, issue references, and permalinks resolve to the right host.
-- Setting: `git_hosting_providers`
-- Default: `[]`
-
-**Options**
-
-Each entry accepts:
-
-- `provider`: One of `github`, `gitlab`, or `bitbucket`
-- `name`: Display name for the instance
-- `base_url`: Base URL, e.g. `https://git.example.corp`
-
-You can define these in user or project settings; project settings are merged on top of user settings.
-
-```json [settings]
-{
-  "git_hosting_providers": [
-    {
-      "provider": "github",
-      "name": "BigCorp GitHub",
-      "base_url": "https://git.example.corp"
-    }
-  ]
-}
-```
-
 ## Outline Panel
 
 - Description: Customize outline panel
@@ -7353,7 +6906,6 @@ You can define these in user or project settings; project settings are merged on
     "dock": "right",
     "file_icons": true,
     "folder_indicator": "icon",
-    "git_status": true,
     "indent_size": 20,
     "auto_reveal_entries": true,
     "auto_fold_dirs": true,

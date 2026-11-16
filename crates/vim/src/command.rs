@@ -1742,7 +1742,7 @@ fn generate_commands(_: &App) -> Vec<VimCommand> {
             .range(act_on_range),
         VimCommand::new(("dif", "fupdate"), editor::actions::ToggleSelectedDiffHunks)
             .range(act_on_range),
-        VimCommand::str(("rev", "ert"), "git::Restore").range(act_on_range),
+        VimCommand::str(("rev", "ert"), "editor::RestoreDiff").range(act_on_range),
         VimCommand::new(("d", "elete"), VisualDeleteLine).range(select_range),
         VimCommand::new(("y", "ank"), gpui::NoAction).range(|_, range| {
             Some(
@@ -1773,7 +1773,6 @@ fn generate_commands(_: &App) -> Vec<VimCommand> {
         VimCommand::str(("T", "erm"), "terminal_panel::Toggle"),
         VimCommand::str(("C", "ollab"), "collab_panel::ToggleFocus"),
         VimCommand::str(("A", "I"), "agent::ToggleFocus"),
-        VimCommand::str(("G", "it"), "git_panel::ToggleFocus"),
         VimCommand::str(("D", "ebug"), "debug_panel::ToggleFocus"),
         VimCommand::new(("noh", "lsearch"), search::buffer_search::Dismiss),
         VimCommand::new(("$", ""), EndOfDocument),

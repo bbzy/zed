@@ -21,7 +21,6 @@ use project::{
     buffer_store::{BufferStore, BufferStoreEvent},
     context_server_store::ContextServerStore,
     debugger::{breakpoint_store::BreakpointStore, dap_store::DapStore},
-    git_store::GitStore,
     image_store::ImageId,
     lsp_store::log_store::{
         self, GlobalLogStore, LanguageServerKind, LanguageServerLogKey, LogKind,
@@ -73,7 +72,6 @@ pub struct HeadlessProject {
     pub next_entry_id: Arc<AtomicUsize>,
     pub languages: Arc<LanguageRegistry>,
     pub extensions: Entity<HeadlessExtensionStore>,
-    pub git_store: Entity<GitStore>,
     pub environment: Entity<ProjectEnvironment>,
     pub profiling_collector: gpui::ProfilingCollector,
     // Used mostly to keep alive the toolchain store for RPC handlers.
@@ -193,18 +191,6 @@ impl HeadlessProject {
             dap_store
         });
 
-        let git_store = cx.new(|cx| {
-            let mut store = GitStore::local(
-                &worktree_store,
-                buffer_store.clone(),
-                environment.clone(),
-                fs.clone(),
-                cx,
-            );
-            store.shared(REMOTE_SERVER_PROJECT_ID, session.clone(), cx);
-            store
-        });
-
         let prettier_store = cx.new(|cx| {
             PrettierStore::new(
                 node_runtime.clone(),
@@ -221,7 +207,6 @@ impl HeadlessProject {
                 worktree_store.clone(),
                 toolchain_store.read(cx).as_language_toolchain_store(),
                 environment.clone(),
-                git_store.clone(),
                 cx,
             );
             task_store.shared(REMOTE_SERVER_PROJECT_ID, session.clone(), cx);
@@ -314,7 +299,6 @@ impl HeadlessProject {
         session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &dap_store);
         session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &breakpoint_store);
         session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &settings_observer);
-        session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &git_store);
         session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &agent_server_store);
         session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &context_server_store);
 
@@ -366,7 +350,6 @@ impl HeadlessProject {
         DapStore::init(&session, cx);
         // todo(debugger): Re init breakpoint store when we set it up for collab
         BreakpointStore::init(&session);
-        GitStore::init(&session);
         AgentServerStore::init_headless(&session);
         ContextServerStore::init_headless(&session);
 
@@ -438,7 +421,6 @@ impl HeadlessProject {
             context_server_store,
             languages,
             extensions,
-            git_store,
             environment,
             profiling_collector: gpui::ProfilingCollector::new(startup_time),
             _toolchain_store: toolchain_store,
@@ -687,10 +669,6 @@ impl HeadlessProject {
             proto::AddWorktreeResponse {
                 worktree_id: worktree.id().to_proto(),
                 canonicalized_path: canonicalized.to_string_lossy().into_owned(),
-                root_repo_common_dir: worktree
-                    .root_repo_common_dir()
-                    .map(|p| p.to_string_lossy().into_owned()),
-                root_repo_is_linked_worktree: worktree.root_repo_is_linked_worktree(),
             }
         });
 

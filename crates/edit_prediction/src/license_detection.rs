@@ -317,10 +317,7 @@ impl LicenseDetectionWatcher {
                         }
                     }
                 }
-                worktree::Event::DeletedEntry(_)
-                | worktree::Event::UpdatedGitRepositories(_)
-                | worktree::Event::UpdatedRootRepoCommonDir { .. }
-                | worktree::Event::Deleted => {}
+                worktree::Event::DeletedEntry(_) | worktree::Event::Deleted => {}
             });
 
         let worktree_snapshot = worktree.read(cx).snapshot();

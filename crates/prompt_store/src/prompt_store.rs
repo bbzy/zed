@@ -73,7 +73,7 @@ impl BuiltInPrompt {
     /// Returns the default content for this built-in prompt.
     pub fn default_content(&self) -> &'static str {
         match self {
-            Self::CommitMessage => include_str!("../../git_ui/src/commit_message_prompt.txt"),
+            Self::CommitMessage => include_str!("legacy_commit_message_prompt.txt"),
         }
     }
 }

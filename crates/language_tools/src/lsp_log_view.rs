@@ -1430,7 +1430,7 @@ fn initialize_new_editor(
         let mut editor = Editor::multi_line(window, cx);
         editor.hide_minimap_by_default(window, cx);
         editor.set_text(content, window, cx);
-        editor.set_show_git_diff_gutter(false, cx);
+        editor.set_show_diff_gutter(false, cx);
         editor.set_show_runnables(false, cx);
         editor.set_show_bookmarks(false, cx);
         editor.set_show_breakpoints(false, cx);

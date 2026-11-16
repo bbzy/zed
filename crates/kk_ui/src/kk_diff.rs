@@ -390,24 +390,18 @@ pub(super) fn copy_selected_references(
 
 struct DiffAddon(WeakEntity<KkDiff>);
 
-pub(super) fn file_status(file: &ChangedFile) -> git::status::FileStatus {
-    use git::status::{FileStatus, StatusCode, TrackedStatus, UnmergedStatus, UnmergedStatusCode};
+pub(super) fn file_status(file: &ChangedFile) -> buffer_diff::FileStatus {
+    use buffer_diff::FileStatus;
     if file.has_conflict {
-        return FileStatus::Unmerged(UnmergedStatus {
-            first_head: UnmergedStatusCode::Updated,
-            second_head: UnmergedStatusCode::Updated,
-        });
+        return FileStatus::Conflicted;
     }
-    FileStatus::Tracked(TrackedStatus {
-        index_status: StatusCode::Unmodified,
-        worktree_status: match file.change_type {
-            ChangeKind::Modified => StatusCode::Modified,
-            ChangeKind::Added => StatusCode::Added,
-            ChangeKind::Deleted => StatusCode::Deleted,
-            ChangeKind::Renamed => StatusCode::Renamed,
-            ChangeKind::Copied => StatusCode::Copied,
-        },
-    })
+    match file.change_type {
+        ChangeKind::Modified => FileStatus::Modified,
+        ChangeKind::Added => FileStatus::Added,
+        ChangeKind::Deleted => FileStatus::Deleted,
+        ChangeKind::Renamed => FileStatus::Renamed,
+        ChangeKind::Copied => FileStatus::Copied,
+    }
 }
 
 impl editor::Addon for DiffAddon {
@@ -415,7 +409,7 @@ impl editor::Addon for DiffAddon {
         &self,
         _: language::BufferId,
         cx: &App,
-    ) -> Option<git::status::FileStatus> {
+    ) -> Option<buffer_diff::FileStatus> {
         Some(file_status(&self.0.upgrade()?.read(cx).file))
     }
     fn extend_context_menu(
@@ -504,9 +498,21 @@ impl DiffContents {
         Ok(target.is_text() && !file.has_conflict)
     }
 
-    async fn text(snapshot: &Snapshot, mut bytes: Vec<u8>, resolve_lfs: bool) -> Result<String> {
-        if resolve_lfs && let Some(pointer) = kk_workbench::LfsPointer::parse(&bytes) {
-            bytes = snapshot.repository().lfs_content(&pointer).await?;
+    async fn text(
+        snapshot: &Snapshot,
+        mut bytes: Vec<u8>,
+        source: Option<(&str, &str, bool)>,
+    ) -> Result<String> {
+        if let Some((revision, path, merged)) = source
+            && let Some(pointer) = kk_workbench::LfsPointer::parse(&bytes)
+        {
+            bytes = if merged {
+                snapshot
+                    .merged_parent_lfs_content(revision, path, &pointer)
+                    .await?
+            } else {
+                snapshot.lfs_content(revision, path, &pointer).await?
+            };
         }
 
         ensure!(
@@ -572,7 +578,18 @@ impl DiffContents {
                 None
             };
             let base = if let Some(bytes) = bytes {
-                Some(Arc::<str>::from(Self::text(snapshot, bytes, true).await?))
+                Some(Arc::<str>::from(
+                    Self::text(
+                        snapshot,
+                        bytes,
+                        Some((
+                            base_revision.as_deref().unwrap_or(&target_revision),
+                            original_path,
+                            merged_parent.is_some(),
+                        )),
+                    )
+                    .await?,
+                ))
             } else {
                 None
             };
@@ -601,7 +618,7 @@ impl DiffContents {
                                     }
                                 }
                             };
-                        Self::text(snapshot, bytes, false).await?
+                        Self::text(snapshot, bytes, None).await?
                     }
                 }
             } else {
@@ -609,7 +626,7 @@ impl DiffContents {
                     .file_content_if_exists(&target_revision, &file.path)
                     .await?
                     .unwrap_or_default();
-                Self::text(snapshot, bytes, true).await?
+                Self::text(snapshot, bytes, Some((&target_revision, &file.path, false))).await?
             };
             anyhow::Ok(Self {
                 base,
@@ -1478,7 +1495,7 @@ impl KkDiff {
                 cx,
             );
             editor.rhs_editor().update(cx, |editor, cx| {
-                editor.set_allow_git_diff_scrollbar_markers(showing_full_file, cx);
+                editor.set_allow_diff_scrollbar_markers(showing_full_file, cx);
                 editor.set_show_diff_review_button(true, cx);
             });
             editor
@@ -3759,7 +3776,7 @@ mod tests {
                     store.update_user_settings(cx, |settings| {
                         settings.editor.diff_view_style = Some(style);
                         settings
-                            .git
+                            .diff
                             .get_or_insert_default()
                             .file_diff
                             .get_or_insert_default()
@@ -3964,7 +3981,7 @@ mod tests {
             let mut store = SettingsStore::test(cx);
             store
                 .set_user_settings(
-                    r#"{"diff_view_style":"split","minimum_split_diff_width":20,"git":{"disable_git":true}}"#,
+                    r#"{"diff_view_style":"split","minimum_split_diff_width":20}"#,
                     cx,
                 )
                 .expect("split settings");
@@ -4044,7 +4061,7 @@ mod tests {
                 editor
                     .rhs_editor()
                     .read(cx)
-                    .git_diff_scrollbar_markers_enabled(cx)
+                    .diff_scrollbar_markers_enabled(cx)
             );
         });
         let rust = language::rust_lang();
@@ -4084,7 +4101,7 @@ mod tests {
         editor.update_in(cx, |editor, window, cx| {
             editor.toggle_split(&editor::ToggleSplitDiff, window, cx);
             editor.rhs_editor().update(cx, |right, cx| {
-                assert!(right.git_diff_scrollbar_markers_enabled(cx));
+                assert!(right.diff_scrollbar_markers_enabled(cx));
                 let snapshot = right.snapshot(window, cx);
                 let rows = snapshot
                     .display_snapshot
@@ -4418,7 +4435,7 @@ mod tests {
                     .read(cx)
                     .rhs_editor()
                     .read(cx)
-                    .git_diff_scrollbar_markers_enabled(cx),
+                    .diff_scrollbar_markers_enabled(cx),
                 clone.controls.read(cx).showing_full_file
             );
             assert_ne!(view.editor, clone.editor);

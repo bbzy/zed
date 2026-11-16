@@ -33,15 +33,12 @@ use collections::{HashSet, TypeIdHashMap};
 pub use connection_pool::{ConnectionPool, ZedVersion};
 use core::fmt::{self, Debug, Formatter};
 use futures::TryFutureExt as _;
-use rpc::proto::split_repository_update;
 use tracing::Span;
 use util::paths::PathStyle;
 
 use futures::{
-    FutureExt, SinkExt, StreamExt, TryStreamExt,
-    channel::oneshot,
-    future::BoxFuture,
-    stream::{BoxStream, FuturesUnordered},
+    FutureExt, SinkExt, StreamExt, TryStreamExt, channel::oneshot, future::BoxFuture,
+    stream::FuturesUnordered,
 };
 use prometheus::{IntGauge, register_int_gauge};
 use rpc::{
@@ -129,30 +126,6 @@ impl<R: RequestMessage> Response<R> {
     }
 }
 
-struct StreamResponse<R> {
-    peer: Arc<Peer>,
-    receipt: Receipt<R>,
-    ended: Arc<AtomicBool>,
-}
-
-impl<R: RequestMessage> StreamResponse<R> {
-    fn send(&self, payload: R::Response) -> Result<()> {
-        self.peer.respond(self.receipt, payload)?;
-        Ok(())
-    }
-
-    fn end(self) -> Result<()> {
-        // Always mark `ended` even if sending `EndStream` on the wire fails, so that
-        // `ended` reflects "the handler intended to end the stream". The caller still
-        // gets the underlying error and routes through the Err arm of the handler,
-        // which sends `respond_with_error` to terminate the client-side stream.
-        let result = self.peer.end_stream(self.receipt);
-        self.ended.store(true, SeqCst);
-        result?;
-        Ok(())
-    }
-}
-
 #[derive(Clone, Debug)]
 pub enum Principal {
     User(User),
@@ -203,36 +176,6 @@ impl MessageContext {
             })
             .inspect_err(|_| tracing::error!("error forwarding request"))
             .inspect_ok(|_| tracing::info!("finished forwarding request"))
-    }
-
-    pub fn forward_request_stream<T: RequestMessage>(
-        &self,
-        receiver_id: ConnectionId,
-        request: T,
-    ) -> impl Future<Output = anyhow::Result<BoxStream<'static, anyhow::Result<T::Response>>>> {
-        let request_start_time = Instant::now();
-        let span = self.span.clone();
-        let peer = self.peer.clone();
-        let envelope = request.into_envelope(0, None, Some(self.connection_id.into()));
-        async move {
-            tracing::info!("start forwarding stream request");
-            let stream = peer
-                .request_stream_dynamic(receiver_id, envelope, T::NAME)
-                .await;
-            span.record(
-                HOST_WAITING_MS,
-                request_start_time.elapsed().as_micros() as f64 / 1000.0,
-            );
-            let stream = stream
-                .inspect_err(|_| tracing::error!("error forwarding stream request"))?
-                .map(|response| {
-                    T::Response::from_envelope(response?)
-                        .context("received response of the wrong type")
-                })
-                .boxed();
-            tracing::info!("finished opening forwarded stream request");
-            Ok(stream)
-        }
     }
 }
 
@@ -350,8 +293,6 @@ impl Server {
             .add_message_handler(leave_project)
             .add_request_handler(update_project)
             .add_request_handler(update_worktree)
-            .add_request_handler(update_repository)
-            .add_request_handler(remove_repository)
             .add_message_handler(start_language_server)
             .add_message_handler(update_language_server)
             .add_message_handler(update_diagnostic_summary)
@@ -370,11 +311,6 @@ impl Server {
             .add_request_handler(forward_read_only_project_request::<proto::OpenBufferByPath>)
             .add_request_handler(forward_read_only_project_request::<proto::OpenImageByPath>)
             .add_request_handler(forward_read_only_project_request::<proto::DownloadFileByPath>)
-            .add_request_handler(forward_read_only_project_request::<proto::GitGetBranches>)
-            .add_request_handler(forward_read_only_project_request::<proto::GetDefaultBranch>)
-            .add_request_handler(forward_read_only_project_request::<proto::BlameBufferAtRevision>)
-            .add_request_handler(forward_read_only_project_request::<proto::OpenUnstagedDiff>)
-            .add_request_handler(forward_read_only_project_request::<proto::OpenUncommittedDiff>)
             .add_request_handler(forward_read_only_project_request::<proto::LspExtExpandMacro>)
             .add_request_handler(
                 forward_read_only_project_request::<proto::LspExtExpandAbbreviation>,
@@ -391,7 +327,6 @@ impl Server {
             .add_request_handler(
                 forward_mutating_project_request::<proto::RegisterBufferWithLanguageServers>,
             )
-            .add_request_handler(forward_mutating_project_request::<proto::UpdateGitBranch>)
             .add_request_handler(forward_mutating_project_request::<proto::GetCompletions>)
             .add_request_handler(
                 forward_mutating_project_request::<proto::ApplyCompletionAdditionalEdits>,
@@ -419,7 +354,6 @@ impl Server {
             )
             .add_request_handler(forward_mutating_project_request::<proto::OnTypeFormatting>)
             .add_request_handler(forward_mutating_project_request::<proto::SaveBuffer>)
-            .add_request_handler(forward_mutating_project_request::<proto::BlameBuffer>)
             .add_request_handler(lsp_query)
             .add_message_handler(forward_lsp_query_response)
             .add_request_handler(forward_mutating_project_request::<proto::RestartLanguageServers>)
@@ -447,7 +381,6 @@ impl Server {
             .add_message_handler(broadcast_project_message_from_host::<proto::UpdateBufferFile>)
             .add_message_handler(broadcast_project_message_from_host::<proto::BufferReloaded>)
             .add_message_handler(broadcast_project_message_from_host::<proto::BufferSaved>)
-            .add_message_handler(broadcast_project_message_from_host::<proto::UpdateDiffBases>)
             .add_message_handler(
                 broadcast_project_message_from_host::<proto::PullWorkspaceDiagnostics>,
             )
@@ -487,57 +420,11 @@ impl Server {
             .add_message_handler(update_followers)
             .add_message_handler(acknowledge_channel_message)
             .add_message_handler(acknowledge_buffer_version)
-            .add_request_handler(forward_mutating_project_request::<proto::Stage>)
-            .add_request_handler(forward_mutating_project_request::<proto::Unstage>)
-            .add_request_handler(forward_mutating_project_request::<proto::Stash>)
-            .add_request_handler(forward_mutating_project_request::<proto::StashPop>)
-            .add_request_handler(forward_mutating_project_request::<proto::StashDrop>)
-            .add_request_handler(forward_mutating_project_request::<proto::Commit>)
-            .add_request_handler(forward_mutating_project_request::<proto::RunGitHook>)
-            .add_request_handler(forward_mutating_project_request::<proto::GitInit>)
-            .add_request_handler(forward_read_only_project_request::<proto::GetFilePermalink>)
-            .add_request_handler(forward_read_only_project_request::<proto::GetRemotes>)
-            .add_request_handler(forward_read_only_project_request::<proto::GitShow>)
-            .add_request_handler(forward_read_only_project_request::<proto::LoadCommitDiff>)
-            .add_request_handler(forward_mutating_project_request::<proto::GitReset>)
-            .add_request_handler(forward_mutating_project_request::<proto::GitCheckoutFiles>)
-            .add_request_handler(forward_mutating_project_request::<proto::GitAddPathToGitignore>)
-            .add_request_handler(
-                forward_mutating_project_request::<proto::GitAddPathToGitInfoExclude>,
-            )
-            .add_request_handler(forward_mutating_project_request::<proto::SetIndexText>)
             .add_request_handler(forward_mutating_project_request::<proto::ToggleBreakpoint>)
             .add_message_handler(broadcast_project_message_from_host::<proto::BreakpointsForFile>)
-            .add_request_handler(forward_mutating_project_request::<proto::OpenCommitMessageBuffer>)
-            .add_request_handler(forward_mutating_project_request::<proto::GitDiff>)
-            .add_request_handler(forward_mutating_project_request::<proto::GetTreeDiff>)
-            .add_request_handler(forward_mutating_project_request::<proto::GetBlobContent>)
-            .add_request_handler(forward_mutating_project_request::<proto::GitCreateBranch>)
-            .add_request_handler(forward_mutating_project_request::<proto::GitChangeBranch>)
-            .add_request_handler(forward_mutating_project_request::<proto::GitCreateRemote>)
-            .add_request_handler(forward_mutating_project_request::<proto::GitRemoveRemote>)
-            .add_request_handler(forward_read_only_project_request::<proto::GitGetWorktrees>)
-            .add_request_handler(forward_read_only_project_request::<proto::GitWorktreeCreatedAt>)
-            .add_request_handler(forward_read_only_project_request::<proto::GitGetHeadSha>)
-            .add_request_handler(forward_read_only_project_request::<proto::GetCommitData>)
-            .add_request_stream_handler(
-                forward_read_only_project_stream_request::<proto::GetInitialGraphData>,
-            )
-            .add_request_stream_handler(
-                forward_read_only_project_stream_request::<proto::SearchCommits>,
-            )
-            .add_request_handler(forward_mutating_project_request::<proto::GitCreateWorktree>)
-            .add_request_handler(disallow_guest_request::<proto::GitRemoveWorktree>)
-            .add_request_handler(disallow_guest_request::<proto::GitRenameWorktree>)
-            .add_request_handler(forward_mutating_project_request::<proto::GitEditRef>)
-            .add_request_handler(forward_mutating_project_request::<proto::GitRepairWorktrees>)
-            .add_request_handler(disallow_guest_request::<proto::GitCreateArchiveCheckpoint>)
-            .add_request_handler(disallow_guest_request::<proto::GitRestoreArchiveCheckpoint>)
-            .add_request_handler(forward_mutating_project_request::<proto::CheckForPushedCommits>)
             .add_message_handler(forward_toggle_lsp_logs)
             .add_message_handler(broadcast_project_message_from_host::<proto::LanguageServerLog>)
-            .add_request_handler(forward_project_search_chunk)
-            .add_request_handler(forward_read_only_project_request::<proto::LoadCommitTemplate>);
+            .add_request_handler(forward_project_search_chunk);
 
         Arc::new(server)
     }
@@ -828,50 +715,6 @@ impl Server {
             }
         })
     }
-
-    fn add_request_stream_handler<F, Fut, M>(&mut self, handler: F) -> &mut Self
-    where
-        F: 'static + Send + Sync + Fn(M, StreamResponse<M>, MessageContext) -> Fut,
-        Fut: Send + Future<Output = Result<()>>,
-        M: RequestMessage,
-    {
-        let handler = Arc::new(handler);
-        self.add_handler(move |envelope, session| {
-            let receipt = envelope.receipt();
-            let handler = handler.clone();
-            async move {
-                let peer = session.peer.clone();
-                let ended = Arc::new(AtomicBool::default());
-                let response = StreamResponse {
-                    peer: peer.clone(),
-                    ended: ended.clone(),
-                    receipt,
-                };
-                match (handler)(envelope.payload, response, session).await {
-                    Ok(()) => {
-                        if ended.load(std::sync::atomic::Ordering::SeqCst) {
-                            Ok(())
-                        } else {
-                            let error = anyhow!("handler did not end a response stream");
-                            let proto_err =
-                                ErrorCode::Internal.message(format!("{error}")).to_proto();
-                            peer.respond_with_error(receipt, proto_err)?;
-                            Err(error)?
-                        }
-                    }
-                    Err(error) => {
-                        let proto_err = match &error {
-                            Error::Internal(err) => err.to_proto(),
-                            _ => ErrorCode::Internal.message(format!("{error}")).to_proto(),
-                        };
-                        peer.respond_with_error(receipt, proto_err)?;
-                        Err(error)
-                    }
-                }
-            }
-        })
-    }
-
     pub fn handle_connection(
         self: &Arc<Self>,
         connection: Connection,
@@ -1622,15 +1465,11 @@ fn notify_rejoined_projects(
                 worktree_id: worktree.id,
                 abs_path: worktree.abs_path.clone(),
                 root_name: worktree.root_name,
-                root_repo_common_dir: worktree.root_repo_common_dir,
                 // todo(collab): Get this field from database
-                root_repo_is_linked_worktree: false,
                 updated_entries: worktree.updated_entries,
                 removed_entries: worktree.removed_entries,
                 scan_id: worktree.scan_id,
                 is_last_update: worktree.completed_scan_id == worktree.scan_id,
-                updated_repositories: worktree.updated_repositories,
-                removed_repositories: worktree.removed_repositories,
             };
             for update in proto::split_worktree_update(message) {
                 session.peer.send(session.connection_id, update)?;
@@ -1661,22 +1500,6 @@ fn notify_rejoined_projects(
                     },
                 )?;
             }
-        }
-
-        for repository in mem::take(&mut project.updated_repositories) {
-            for update in split_repository_update(repository) {
-                session.peer.send(session.connection_id, update)?;
-            }
-        }
-
-        for id in mem::take(&mut project.removed_repositories) {
-            session.peer.send(
-                session.connection_id,
-                proto::RemoveRepository {
-                    project_id: project.id.to_proto(),
-                    id,
-                },
-            )?;
         }
     }
 
@@ -2032,9 +1855,7 @@ async fn join_project(
             root_name: worktree.root_name.clone(),
             visible: worktree.visible,
             abs_path: worktree.abs_path.clone(),
-            root_repo_common_dir: None,
             // todo(collab): Get this field from database
-            root_repo_is_linked_worktree: false,
         })
         .collect::<Vec<_>>();
 
@@ -2086,15 +1907,11 @@ async fn join_project(
             worktree_id,
             abs_path: worktree.abs_path.clone(),
             root_name: worktree.root_name,
-            root_repo_common_dir: worktree.root_repo_common_dir,
             // todo(collab): Get this field from database
-            root_repo_is_linked_worktree: false,
             updated_entries: worktree.entries,
             removed_entries: Default::default(),
             scan_id: worktree.scan_id,
             is_last_update: worktree.scan_id == worktree.completed_scan_id,
-            updated_repositories: worktree.legacy_repository_entries.into_values().collect(),
-            removed_repositories: Default::default(),
         };
         for update in proto::split_worktree_update(message) {
             session.peer.send(session.connection_id, update.clone())?;
@@ -2124,12 +1941,6 @@ async fn join_project(
                     outside_worktree: Some(settings_file.outside_worktree),
                 },
             )?;
-        }
-    }
-
-    for repository in mem::take(&mut project.repositories) {
-        for update in split_repository_update(repository) {
-            session.peer.send(session.connection_id, update)?;
         }
     }
 
@@ -2225,55 +2036,6 @@ async fn update_worktree(
     response.send(proto::Ack {})?;
     Ok(())
 }
-
-async fn update_repository(
-    request: proto::UpdateRepository,
-    response: Response<proto::UpdateRepository>,
-    session: MessageContext,
-) -> Result<()> {
-    let guest_connection_ids = session
-        .db()
-        .await
-        .update_repository(&request, session.connection_id)
-        .await?;
-
-    broadcast(
-        Some(session.connection_id),
-        guest_connection_ids.iter().copied(),
-        |connection_id| {
-            session
-                .peer
-                .forward_send(session.connection_id, connection_id, request.clone())
-        },
-    );
-    response.send(proto::Ack {})?;
-    Ok(())
-}
-
-async fn remove_repository(
-    request: proto::RemoveRepository,
-    response: Response<proto::RemoveRepository>,
-    session: MessageContext,
-) -> Result<()> {
-    let guest_connection_ids = session
-        .db()
-        .await
-        .remove_repository(&request, session.connection_id)
-        .await?;
-
-    broadcast(
-        Some(session.connection_id),
-        guest_connection_ids.iter().copied(),
-        |connection_id| {
-            session
-                .peer
-                .forward_send(session.connection_id, connection_id, request)
-        },
-    );
-    response.send(proto::Ack {})?;
-    Ok(())
-}
-
 /// Updates other participants with changes to the diagnostics
 async fn update_diagnostic_summary(
     message: proto::UpdateDiagnosticSummary,
@@ -2395,33 +2157,6 @@ where
     response.send(payload)?;
     Ok(())
 }
-
-/// forward a project stream request to the host. These requests should be read only
-/// as guests are allowed to send them.
-async fn forward_read_only_project_stream_request<T>(
-    request: T,
-    response: StreamResponse<T>,
-    session: MessageContext,
-) -> Result<()>
-where
-    T: EntityMessage + RequestMessage,
-{
-    let project_id = ProjectId::from_proto(request.remote_entity_id());
-    let host_connection_id = session
-        .db()
-        .await
-        .host_for_read_only_project_request(project_id, session.connection_id)
-        .await?;
-    let mut stream = session
-        .forward_request_stream(host_connection_id, request)
-        .await?;
-    while let Some(payload) = stream.next().await {
-        response.send(payload?)?;
-    }
-    response.end()?;
-    Ok(())
-}
-
 /// forward a project request to the host. These requests are disallowed
 /// for guests.
 async fn forward_mutating_project_request<T>(
@@ -2459,25 +2194,6 @@ async fn forward_toggle_lsp_logs(
         .forward_send(session.connection_id, host_connection_id, message)?;
     Ok(())
 }
-
-async fn disallow_guest_request<T>(
-    _request: T,
-    response: Response<T>,
-    _session: MessageContext,
-) -> Result<()>
-where
-    T: RequestMessage,
-{
-    response.peer.respond_with_error(
-        response.receipt,
-        ErrorCode::Forbidden
-            .message("request is not allowed for guests".to_string())
-            .to_proto(),
-    )?;
-    response.responded.store(true, SeqCst);
-    Ok(())
-}
-
 async fn lsp_query(
     request: proto::LspQuery,
     response: Response<proto::LspQuery>,

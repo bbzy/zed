@@ -857,10 +857,6 @@ mod tests {
                 (VariableName::RelativeFile, "tasks.json".to_string()),
                 (VariableName::RelativeDir, ".".to_string()),
                 (
-                    VariableName::MainGitWorktree,
-                    path!("/zed-config").to_string(),
-                ),
-                (
                     VariableName::Custom("PYTHON_TEST_TARGET".into()),
                     "tasks.json".to_string(),
                 ),
@@ -896,7 +892,7 @@ mod tests {
                         "$ZED_WORKTREE_ROOT".to_string(),
                         "$ZED_FILENAME".to_string(),
                         "${ZED_RELATIVE_FILE:no file}".to_string(),
-                        "${ZED_MAIN_GIT_WORKTREE:no repository}".to_string(),
+                        "${ZED_CUSTOM_UNSET:no value}".to_string(),
                         "${ZED_CUSTOM_PYTHON_TEST_TARGET:.}".to_string(),
                     ],
                     ..TaskTemplate::default()
@@ -910,7 +906,7 @@ mod tests {
                 path!("/project").to_string(),
                 "tasks.json".to_string(),
                 "no file".to_string(),
-                "no repository".to_string(),
+                "no value".to_string(),
                 ".".to_string()
             ]
         );
@@ -1220,9 +1216,7 @@ mod tests {
         )
         .await;
         let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
-        let (worktree_store, git_store) = project.read_with(cx, |project, _| {
-            (project.worktree_store(), project.git_store().clone())
-        });
+        let worktree_store = project.read_with(cx, |project, _| project.worktree_store());
         let rust_language = Arc::new(
             Language::new(
                 LanguageConfig {
@@ -1239,7 +1233,6 @@ mod tests {
             .unwrap()
             .with_context_provider(Some(Arc::new(BasicContextProvider::new(
                 worktree_store.clone(),
-                git_store.clone(),
             )))),
         );
 
@@ -1263,7 +1256,6 @@ mod tests {
             .unwrap()
             .with_context_provider(Some(Arc::new(BasicContextProvider::new(
                 worktree_store.clone(),
-                git_store.clone(),
             )))),
         );
 

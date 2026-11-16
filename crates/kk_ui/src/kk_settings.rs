@@ -268,7 +268,7 @@ pub struct BlameSettings {
 impl Settings for KkWorkbenchSettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
         let status_style = content
-            .git_panel
+            .legacy_git_panel
             .as_ref()
             .and_then(|panel| panel.status_style)
             .unwrap_or_default();
@@ -318,10 +318,6 @@ mod tests {
             assert_eq!(
                 KkWorkbenchSettings::from_settings(&restored).dock,
                 position.into()
-            );
-            assert_eq!(
-                content.git_panel.expect("git settings").dock,
-                Some(settings::DockPosition::Left)
             );
         }
     }

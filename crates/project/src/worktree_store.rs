@@ -12,8 +12,8 @@ use collections::HashMap;
 use fs::{Fs, copy_recursive};
 use futures::{FutureExt, future::Shared};
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, Task, TaskExt,
-    WeakEntity,
+    App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, SharedString,
+    Task, TaskExt, WeakEntity,
 };
 use itertools::Either;
 use postage::{prelude::Stream as _, watch};
@@ -28,10 +28,7 @@ use util::{
     paths::{PathStyle, RemotePathBuf, SanitizedPath},
     rel_path::RelPath,
 };
-use worktree::{
-    CreatedEntry, Entry, ProjectEntryId, UpdatedEntriesSet, UpdatedGitRepositoriesSet, Worktree,
-    WorktreeId,
-};
+use worktree::{CreatedEntry, Entry, ProjectEntryId, UpdatedEntriesSet, Worktree, WorktreeId};
 
 use crate::{ProjectPath, trusted_worktrees::TrustedWorktrees};
 
@@ -226,9 +223,7 @@ pub enum WorktreeStoreEvent {
     WorktreeOrderChanged,
     WorktreeUpdateSent(Entity<Worktree>),
     WorktreeUpdatedEntries(WorktreeId, UpdatedEntriesSet),
-    WorktreeUpdatedGitRepositories(WorktreeId, UpdatedGitRepositoriesSet),
     WorktreeDeletedEntry(WorktreeId, ProjectEntryId),
-    WorktreeUpdatedRootRepoCommonDir(WorktreeId),
 }
 
 impl EventEmitter<WorktreeStoreEvent> for WorktreeStore {}
@@ -906,8 +901,6 @@ impl WorktreeStore {
                         root_name,
                         visible,
                         abs_path: response.canonicalized_path,
-                        root_repo_common_dir: response.root_repo_common_dir,
-                        root_repo_is_linked_worktree: response.root_repo_is_linked_worktree,
                     },
                     client,
                     path_style,
@@ -984,23 +977,13 @@ impl WorktreeStore {
                         changes.clone(),
                     ));
                 }
-                worktree::Event::UpdatedGitRepositories(set) => {
-                    cx.emit(WorktreeStoreEvent::WorktreeUpdatedGitRepositories(
-                        worktree_id,
-                        set.clone(),
-                    ));
-                }
+
                 worktree::Event::DeletedEntry(id) => {
                     cx.emit(WorktreeStoreEvent::WorktreeDeletedEntry(worktree_id, *id))
                 }
                 worktree::Event::Deleted => {
                     // The worktree root itself has been deleted (for single-file worktrees)
                     // The worktree will be removed via the observe_release callback
-                }
-                worktree::Event::UpdatedRootRepoCommonDir { .. } => {
-                    cx.emit(WorktreeStoreEvent::WorktreeUpdatedRootRepoCommonDir(
-                        worktree_id,
-                    ));
                 }
             }
         })
@@ -1054,14 +1037,8 @@ impl WorktreeStore {
         path: &Path,
         cx: &App,
     ) -> Option<Entity<Worktree>> {
-        self.visible_worktrees(cx).find(|worktree| {
-            let worktree = worktree.read(cx);
-            if let Some(common_dir) = worktree.root_repo_common_dir() {
-                common_dir.parent() == Some(path)
-            } else {
-                worktree.abs_path().as_ref() == path
-            }
-        })
+        self.visible_worktrees(cx)
+            .find(|worktree| worktree.read(cx).abs_path().as_ref() == path)
     }
 
     fn upstream_client(&self) -> Option<(AnyProtoClient, u64)> {
@@ -1243,10 +1220,6 @@ impl WorktreeStore {
                     root_name: worktree.root_name_str().to_owned(),
                     visible: worktree.is_visible(),
                     abs_path: worktree.abs_path().to_string_lossy().into_owned(),
-                    root_repo_common_dir: worktree
-                        .root_repo_common_dir()
-                        .map(|p| p.to_string_lossy().into_owned()),
-                    root_repo_is_linked_worktree: worktree.root_repo_is_linked_worktree(),
                 }
             })
             .collect()
@@ -1491,30 +1464,11 @@ impl WorktreeStore {
     }
 
     pub fn paths(&self, cx: &App) -> WorktreePaths {
-        let (mains, folders): (Vec<PathBuf>, Vec<PathBuf>) = self
+        let paths = self
             .visible_worktrees(cx)
-            .map(|worktree| {
-                let snapshot = worktree.read(cx).snapshot();
-                let folder_path = snapshot.abs_path().to_path_buf();
-                let main_path = snapshot
-                    .root_repo_common_dir()
-                    .filter(|dir| !crate::git_store::is_submodule_git_dir(dir))
-                    .map(|dir| crate::git_store::repo_identity_path(dir, snapshot.path_style()))
-                    .filter(|repo_path| {
-                        snapshot.root_repo_is_linked_worktree()
-                            || *repo_path == folder_path.as_path()
-                            || !folder_path.starts_with(*repo_path)
-                    })
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| folder_path.clone());
-                (main_path, folder_path)
-            })
-            .unzip();
-
-        WorktreePaths {
-            paths: PathList::new(&folders),
-            main_paths: PathList::new(&mains),
-        }
+            .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+            .collect::<Vec<_>>();
+        WorktreePaths::from_folder_paths(&PathList::new(&paths))
     }
 }
 
@@ -1531,4 +1485,24 @@ impl WorktreeHandle {
             WorktreeHandle::Weak(handle) => handle.upgrade(),
         }
     }
+}
+
+pub fn linked_worktree_short_name(
+    main_worktree_path: &Path,
+    linked_worktree_path: &Path,
+    path_style: PathStyle,
+) -> Option<SharedString> {
+    if main_worktree_path == linked_worktree_path {
+        return None;
+    }
+
+    let project_name = path_style.file_name(main_worktree_path)?.to_str()?;
+    let directory_name = path_style.file_name(linked_worktree_path)?.to_str()?;
+    let name = if directory_name != project_name {
+        directory_name.to_string()
+    } else {
+        let parent = path_style.parent(linked_worktree_path)?;
+        path_style.file_name(parent)?.to_str()?.to_string()
+    };
+    Some(name.into())
 }

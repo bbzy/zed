@@ -43,7 +43,7 @@ pub struct DiagnosticOutput {
     pub text: String,
 }
 
-const PROTOCOL_VERSION: u32 = 8;
+const PROTOCOL_VERSION: u32 = 9;
 
 pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     Ok(bincode::DefaultOptions::new().serialize(&(PROTOCOL_VERSION, value))?)
@@ -167,6 +167,7 @@ pub enum Request {
     },
     LfsContent {
         repository: ResourceId,
+        object: String,
         pointer: LfsPointer,
     },
     ExcludedSparseFiles {
@@ -814,8 +815,13 @@ impl Service {
             ),
             Request::LfsContent {
                 repository,
+                object,
                 pointer,
-            } => data(self.repository(repository)?.lfs_content(&pointer).await?),
+            } => data(
+                self.repository(repository)?
+                    .lfs_content(&object, &pointer)
+                    .await?,
+            ),
             Request::ExcludedSparseFiles { repository, paths } => data(
                 self.repository(repository)?
                     .excluded_sparse_files(&paths)
@@ -1439,17 +1445,18 @@ mod tests {
 
     #[test]
     fn kk_diff_history_protocol_checks_version_before_reading_revision_fields() {
-        let old_header = bincode::DefaultOptions::new()
-            .serialize(&2u32)
-            .expect("old protocol header");
-        let error =
-            decode::<Vec<Revision>>(&old_header).expect_err("old revision layout is incompatible");
-        assert!(
-            error
-                .to_string()
-                .contains("protocol version 2 (expected 8)"),
-            "{error:#}"
-        );
+        for old_version in [2u32, 8] {
+            let old_header = bincode::DefaultOptions::new()
+                .serialize(&old_version)
+                .expect("old protocol header");
+            let expected = format!("protocol version {old_version} (expected {PROTOCOL_VERSION})");
+            let error = decode::<Vec<Revision>>(&old_header)
+                .expect_err("old revision layout is incompatible");
+            assert!(error.to_string().contains(&expected), "{error:#}");
+            let error =
+                decode::<Request>(&old_header).expect_err("old LFS request layout is incompatible");
+            assert!(error.to_string().contains(&expected), "{error:#}");
+        }
         let revision: Revision = serde_json::from_value(serde_json::json!({
             "changeId":"change", "changeIdPrefix":"cha", "fullChangeId":"change", "commitId":"commit", "fullCommitId":"commit",
             "description":"subject", "fullDescription":"subject\nbody", "authorName":"Author", "authorEmail":"author@example.com",

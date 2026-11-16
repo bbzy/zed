@@ -463,7 +463,7 @@ impl Render for FileDiffStyleToolbar {
     }
 }
 
-pub fn file_status_icon(status: git::status::FileStatus, cx: &App) -> Icon {
+pub fn file_status_icon(status: buffer_diff::FileStatus, cx: &App) -> Icon {
     let colors = cx.theme().colors();
     let (icon, color) = if status.is_conflicted() {
         (IconName::Warning, colors.version_control_conflict)

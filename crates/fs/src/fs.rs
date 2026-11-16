@@ -1,10 +1,9 @@
 pub mod fs_watcher;
-mod git_clone_progress;
 
 use parking_lot::Mutex;
 use slotmap::{KeyData, SlotMap};
 use std::ffi::OsString;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Instant;
 use util::maybe;
 
@@ -17,7 +16,8 @@ use gpui::ReadGlobal as _;
 use gpui::SharedString;
 #[cfg(unix)]
 use std::ffi::CString;
-use util::command::{Stdio, new_command};
+#[cfg(windows)]
+use util::command::new_command;
 
 #[cfg(unix)]
 use std::os::fd::{AsFd, AsRawFd};
@@ -32,7 +32,6 @@ use std::mem::MaybeUninit;
 
 use async_tar::Archive;
 use futures::{AsyncRead, Stream, StreamExt, future::BoxFuture};
-use git::repository::{GitRepository, RealGitRepository};
 #[cfg(windows)]
 use is_executable::IsExecutable;
 use rope::Rope;
@@ -51,18 +50,7 @@ use tempfile::TempDir;
 use text::LineEnding;
 
 #[cfg(feature = "test-support")]
-mod fake_git_repo;
-#[cfg(feature = "test-support")]
 use collections::{BTreeMap, btree_map};
-#[cfg(feature = "test-support")]
-pub use fake_git_repo::FakeBlobReadGate;
-#[cfg(feature = "test-support")]
-use fake_git_repo::{FakeCommitDataEntry, FakeGitRepositoryState};
-#[cfg(feature = "test-support")]
-use git::{
-    repository::{CommitData, InitialGraphCommitData, RepoPath, Worktree, repo_path},
-    status::{FileStatus, StatusCode, TrackedStatus, UnmergedStatus},
-};
 #[cfg(feature = "test-support")]
 use util::paths::normalize_path;
 
@@ -181,15 +169,6 @@ pub trait Fs: Send + Sync {
         Arc<dyn Watcher>,
     );
 
-    fn open_repo(
-        &self,
-        abs_dot_git: &Path,
-        system_git_binary_path: Option<&Path>,
-    ) -> Result<Arc<dyn GitRepository>>;
-    async fn git_init(&self, abs_work_directory: &Path, fallback_branch_name: String)
-    -> Result<()>;
-    async fn git_clone(&self, abs_work_directory: &Path, repo_url: &str) -> Result<()>;
-    async fn git_config(&self, abs_work_directory: &Path, args: Vec<String>) -> Result<String>;
     fn is_fake(&self) -> bool;
     async fn is_case_sensitive(&self) -> bool;
     fn subscribe_to_jobs(&self) -> JobEventReceiver;
@@ -359,49 +338,6 @@ pub enum JobEvent {
 pub type JobEventSender = futures::channel::mpsc::UnboundedSender<JobEvent>;
 pub type JobEventReceiver = futures::channel::mpsc::UnboundedReceiver<JobEvent>;
 
-struct JobTracker {
-    id: JobId,
-    subscribers: Arc<Mutex<Vec<JobEventSender>>>,
-}
-
-impl JobTracker {
-    fn new(info: JobInfo, subscribers: Arc<Mutex<Vec<JobEventSender>>>) -> Self {
-        let id = info.id;
-        {
-            let mut subs = subscribers.lock();
-            subs.retain(|sender| {
-                sender
-                    .unbounded_send(JobEvent::Started { info: info.clone() })
-                    .is_ok()
-            });
-        }
-        Self { id, subscribers }
-    }
-
-    fn update(&self, message: SharedString) {
-        let mut subscribers = self.subscribers.lock();
-        subscribers.retain(|sender| {
-            sender
-                .unbounded_send(JobEvent::Updated {
-                    id: self.id,
-                    message: message.clone(),
-                })
-                .is_ok()
-        });
-    }
-}
-
-impl Drop for JobTracker {
-    fn drop(&mut self) {
-        let mut subs = self.subscribers.lock();
-        subs.retain(|sender| {
-            sender
-                .unbounded_send(JobEvent::Completed { id: self.id })
-                .is_ok()
-        });
-    }
-}
-
 impl MTime {
     /// Conversion intended for persistence and testing.
     pub fn from_seconds_and_nanos(secs: u64, nanos: u32) -> Self {
@@ -455,11 +391,9 @@ impl TrashId {
 
 pub struct RealFs {
     this: std::sync::Weak<Self>,
-    bundled_git_binary_path: Option<PathBuf>,
     executor: BackgroundExecutor,
     native_watcher: Arc<fs_watcher::OsWatcher>,
     poll_watcher: Arc<fs_watcher::OsWatcher>,
-    next_job_id: Arc<AtomicUsize>,
     job_event_subscribers: Arc<Mutex<Vec<JobEventSender>>>,
     trash: Arc<Mutex<SlotMap<TrashId, TrashedEntry>>>,
     is_case_sensitive: AtomicU8,
@@ -564,10 +498,9 @@ impl FileHandle for std::fs::File {
 pub struct RealWatcher {}
 
 impl RealFs {
-    pub fn new(git_binary_path: Option<PathBuf>, executor: BackgroundExecutor) -> Arc<Self> {
+    pub fn new(executor: BackgroundExecutor) -> Arc<Self> {
         Arc::new_cyclic(|this| Self {
             this: this.clone(),
-            bundled_git_binary_path: git_binary_path,
             native_watcher: fs_watcher::OsWatcher::new(
                 fs_watcher::OsWatcherKind::Native,
                 executor.clone(),
@@ -577,7 +510,6 @@ impl RealFs {
                 executor.clone(),
             ),
             executor,
-            next_job_id: Arc::new(AtomicUsize::new(0)),
             job_event_subscribers: Arc::new(Mutex::new(Vec::new())),
             trash: Arc::new(Mutex::new(SlotMap::with_key())),
             is_case_sensitive: Default::default(),
@@ -1231,103 +1163,6 @@ impl Fs for RealFs {
         )
         .await
     }
-
-    fn open_repo(
-        &self,
-        dotgit_path: &Path,
-        system_git_binary_path: Option<&Path>,
-    ) -> Result<Arc<dyn GitRepository>> {
-        Ok(Arc::new(RealGitRepository::new(
-            dotgit_path,
-            self.bundled_git_binary_path.clone(),
-            system_git_binary_path.map(|path| path.to_path_buf()),
-            self.executor.clone(),
-        )?))
-    }
-
-    async fn git_init(
-        &self,
-        abs_work_directory_path: &Path,
-        fallback_branch_name: String,
-    ) -> Result<()> {
-        let result = new_command("git")
-            .current_dir(abs_work_directory_path)
-            .args(&["config", "--global", "--get", "init.defaultBranch"])
-            .output()
-            .await;
-
-        // In case the `git config` command fails, which would be the case if
-        // the user doesn't have an `init.defaultBranch` value set, we'll just
-        // default to the provided `fallback_branch_name`.
-        let branch_name = match result {
-            Ok(output) if !output.stdout.is_empty() => String::from_utf8(output.stdout)?,
-            _ => fallback_branch_name,
-        };
-
-        new_command("git")
-            .current_dir(abs_work_directory_path)
-            .args(&["init", "-b"])
-            .arg(branch_name.trim())
-            .output()
-            .await?;
-
-        Ok(())
-    }
-
-    async fn git_clone(&self, abs_work_directory: &Path, repo_url: &str) -> Result<()> {
-        let job_id = self.next_job_id.fetch_add(1, Ordering::SeqCst);
-        let job_info = JobInfo {
-            id: job_id,
-            start: Instant::now(),
-            message: SharedString::from(format!("Cloning {}", repo_url)),
-        };
-
-        let job_tracker = JobTracker::new(job_info, self.job_event_subscribers.clone());
-        let mut child = new_command("git")
-            .current_dir(abs_work_directory)
-            .args(["clone", "--progress", repo_url])
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
-        let stderr = child
-            .stderr
-            .take()
-            .context("failed to read git clone progress")?;
-        let stderr_output = git_clone_progress::read(stderr, |message| {
-            job_tracker.update(message.into());
-        })
-        .await?;
-        let status = child.status().await?;
-
-        if !status.success() {
-            anyhow::bail!(
-                "git clone failed: {}",
-                git_clone_progress::failure_message(&stderr_output)
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Runs `git config` with the given arguments.
-    /// Will return `Ok` if the commands exit status is `0`, with the stdout
-    /// contents. Otherwise returns `Err` with the stderr contents.
-    async fn git_config(&self, abs_work_directory: &Path, args: Vec<String>) -> Result<String> {
-        let output = new_command("git")
-            .current_dir(abs_work_directory)
-            .args([String::from("config")].into_iter().chain(args))
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            let err = String::from_utf8(output.stderr)?;
-            anyhow::bail!(err);
-        }
-
-        String::from_utf8(output.stdout).map_err(Into::into)
-    }
-
     fn is_fake(&self) -> bool {
         false
     }
@@ -1459,7 +1294,6 @@ struct FakeFsState {
     root: FakeFsEntry,
     next_inode: u64,
     next_mtime: SystemTime,
-    git_event_tx: async_channel::Sender<PathBuf>,
     watch_roots: Vec<(PathBuf, std::sync::Weak<dyn Watcher>)>,
     watches: FakeWatches,
     events_paused: bool,
@@ -1495,15 +1329,12 @@ enum FakeFsEntry {
         mtime: MTime,
         len: u64,
         content: Vec<u8>,
-        // The path to the repository state directory, if this is a gitfile.
-        git_dir_path: Option<PathBuf>,
     },
     Dir {
         inode: u64,
         mtime: MTime,
         len: u64,
         entries: BTreeMap<String, FakeFsEntry>,
-        git_repo_state: Option<Arc<Mutex<FakeGitRepositoryState>>>,
     },
     Symlink {
         target: PathBuf,
@@ -1520,21 +1351,15 @@ impl PartialEq for FakeFsEntry {
                     mtime: l_mtime,
                     len: l_len,
                     content: l_content,
-                    git_dir_path: l_git_dir_path,
                 },
                 Self::File {
                     inode: r_inode,
                     mtime: r_mtime,
                     len: r_len,
                     content: r_content,
-                    git_dir_path: r_git_dir_path,
                 },
             ) => {
-                l_inode == r_inode
-                    && l_mtime == r_mtime
-                    && l_len == r_len
-                    && l_content == r_content
-                    && l_git_dir_path == r_git_dir_path
+                l_inode == r_inode && l_mtime == r_mtime && l_len == r_len && l_content == r_content
             }
             (
                 Self::Dir {
@@ -1542,26 +1367,15 @@ impl PartialEq for FakeFsEntry {
                     mtime: l_mtime,
                     len: l_len,
                     entries: l_entries,
-                    git_repo_state: l_git_repo_state,
                 },
                 Self::Dir {
                     inode: r_inode,
                     mtime: r_mtime,
                     len: r_len,
                     entries: r_entries,
-                    git_repo_state: r_git_repo_state,
                 },
             ) => {
-                let same_repo_state = match (l_git_repo_state.as_ref(), r_git_repo_state.as_ref()) {
-                    (Some(l), Some(r)) => Arc::ptr_eq(l, r),
-                    (None, None) => true,
-                    _ => false,
-                };
-                l_inode == r_inode
-                    && l_mtime == r_mtime
-                    && l_len == r_len
-                    && l_entries == r_entries
-                    && same_repo_state
+                l_inode == r_inode && l_mtime == r_mtime && l_len == r_len && l_entries == r_entries
             }
             (Self::Symlink { target: l_target }, Self::Symlink { target: r_target }) => {
                 l_target == r_target
@@ -1811,7 +1625,6 @@ impl fs_watcher::WatchBackend for FakeWatchBackend {
                         mtime,
                         len: 0,
                         content: Vec::new(),
-                        git_dir_path: None,
                     });
                     Ok(())
                 })
@@ -1843,17 +1656,13 @@ impl FakeFs {
     const SYSTEMTIME_INTERVAL: Duration = Duration::from_nanos(100);
 
     pub fn new(executor: gpui::BackgroundExecutor) -> Arc<Self> {
-        let (tx, rx) = async_channel::bounded::<PathBuf>(10);
-
         let state = Arc::new(Mutex::new(FakeFsState {
             root: FakeFsEntry::Dir {
                 inode: 0,
                 mtime: MTime(UNIX_EPOCH),
                 len: 0,
                 entries: Default::default(),
-                git_repo_state: None,
             },
-            git_event_tx: tx,
             next_mtime: UNIX_EPOCH + Self::SYSTEMTIME_INTERVAL,
             next_inode: 1,
             watch_roots: Vec::new(),
@@ -1888,19 +1697,6 @@ impl FakeFs {
             poll_watcher,
         });
 
-        executor.spawn({
-            let this = this.clone();
-            async move {
-                while let Ok(git_event) = rx.recv().await {
-                    if let Some(mut state) = this.state.try_lock() {
-                        state.emit_event([(git_event, Some(PathEventKind::Changed))]);
-                    } else {
-                        panic!("Failed to lock file system state, this execution would have caused a test hang");
-                    }
-                }
-            }
-        }).detach();
-
         this
     }
 
@@ -1933,7 +1729,6 @@ impl FakeFs {
                             mtime: new_mtime,
                             content: Vec::new(),
                             len: 0,
-                            git_dir_path: None,
                         });
                     }
                     btree_map::Entry::Occupied(mut e) => match &mut *e.get_mut() {
@@ -1999,7 +1794,6 @@ impl FakeFs {
                             mtime: new_mtime,
                             len: new_len,
                             content: new_content,
-                            git_dir_path: None,
                         });
                     }
                     btree_map::Entry::Occupied(mut e) => {
@@ -2115,25 +1909,6 @@ impl FakeFs {
         self.state.lock().flush_events(count);
     }
 
-    pub(crate) fn entry(&self, target: &Path) -> Result<FakeFsEntry> {
-        self.state.lock().entry(target).cloned()
-    }
-
-    pub(crate) fn insert_entry(&self, target: &Path, new_entry: FakeFsEntry) -> Result<()> {
-        let mut state = self.state.lock();
-        state.write_path(target, |entry| {
-            match entry {
-                btree_map::Entry::Vacant(vacant_entry) => {
-                    vacant_entry.insert(new_entry);
-                }
-                btree_map::Entry::Occupied(mut occupied_entry) => {
-                    occupied_entry.insert(new_entry);
-                }
-            }
-            Ok(())
-        })
-    }
-
     #[must_use]
     pub fn insert_tree<'a>(
         &'a self,
@@ -2196,491 +1971,6 @@ impl FakeFs {
             }
         }
         .boxed()
-    }
-
-    pub fn with_git_state_and_paths<T, F>(
-        &self,
-        dot_git: &Path,
-        emit_git_event: bool,
-        f: F,
-    ) -> Result<T>
-    where
-        F: FnOnce(&mut FakeGitRepositoryState, &Path, &Path) -> T,
-    {
-        let mut state = self.state.lock();
-        let git_event_tx = state.git_event_tx.clone();
-        let entry = state.entry(dot_git).context("open .git")?;
-
-        if let FakeFsEntry::Dir { git_repo_state, .. } = entry {
-            let repo_state = git_repo_state.get_or_insert_with(|| {
-                log::debug!("insert git state for {dot_git:?}");
-                Arc::new(Mutex::new(FakeGitRepositoryState::new(git_event_tx)))
-            });
-            let mut repo_state = repo_state.lock();
-
-            let result = f(&mut repo_state, dot_git, dot_git);
-
-            drop(repo_state);
-            if emit_git_event {
-                state.emit_event([(
-                    dot_git.join("fake_git_repo_event"),
-                    Some(PathEventKind::Changed),
-                )]);
-            }
-
-            Ok(result)
-        } else if let FakeFsEntry::File {
-            content,
-            git_dir_path,
-            ..
-        } = &mut *entry
-        {
-            let path = match git_dir_path {
-                Some(path) => path,
-                None => {
-                    let path = std::str::from_utf8(content)
-                        .ok()
-                        .and_then(|content| content.strip_prefix("gitdir:"))
-                        .context("not a valid gitfile")?
-                        .trim();
-                    git_dir_path.insert(normalize_path(&dot_git.parent().unwrap().join(path)))
-                }
-            }
-            .clone();
-            let Some((git_dir_entry, canonical_path)) = state.try_entry(&path, true) else {
-                anyhow::bail!("pointed-to git dir {path:?} not found")
-            };
-            let FakeFsEntry::Dir {
-                git_repo_state,
-                entries,
-                ..
-            } = git_dir_entry
-            else {
-                anyhow::bail!("gitfile points to a non-directory")
-            };
-            let common_dir = if let Some(child) = entries.get("commondir") {
-                let raw = std::str::from_utf8(child.file_content("commondir".as_ref())?)
-                    .context("commondir content")?
-                    .trim();
-                let raw_path = Path::new(raw);
-                if raw_path.is_relative() {
-                    normalize_path(&canonical_path.join(raw_path))
-                } else {
-                    raw_path.to_owned()
-                }
-            } else {
-                canonical_path.clone()
-            };
-            let repo_state = git_repo_state.get_or_insert_with(|| {
-                Arc::new(Mutex::new(FakeGitRepositoryState::new(git_event_tx)))
-            });
-            let mut repo_state = repo_state.lock();
-
-            let result = f(&mut repo_state, &canonical_path, &common_dir);
-
-            if emit_git_event {
-                drop(repo_state);
-                state.emit_event([(
-                    canonical_path.join("fake_git_repo_event"),
-                    Some(PathEventKind::Changed),
-                )]);
-            }
-
-            Ok(result)
-        } else {
-            anyhow::bail!("not a valid git repository");
-        }
-    }
-
-    pub fn with_git_state<T, F>(&self, dot_git: &Path, emit_git_event: bool, f: F) -> Result<T>
-    where
-        F: FnOnce(&mut FakeGitRepositoryState) -> T,
-    {
-        self.with_git_state_and_paths(dot_git, emit_git_event, |state, _, _| f(state))
-    }
-
-    pub fn set_branch_name(&self, dot_git: &Path, branch: Option<impl Into<String>>) {
-        self.with_git_state(dot_git, true, |state| {
-            let branch = branch.map(Into::into);
-            state.branches.extend(branch.clone());
-            state.current_branch_name = branch
-        })
-        .unwrap();
-    }
-
-    pub fn set_remote_for_repo(
-        &self,
-        dot_git: &Path,
-        name: impl Into<String>,
-        url: impl Into<String>,
-    ) {
-        self.with_git_state(dot_git, true, |state| {
-            state.remotes.insert(name.into(), url.into());
-        })
-        .unwrap();
-    }
-
-    pub fn insert_branches(&self, dot_git: &Path, branches: &[&str]) {
-        self.with_git_state(dot_git, true, |state| {
-            if let Some(first) = branches.first()
-                && state.current_branch_name.is_none()
-            {
-                state.current_branch_name = Some(first.to_string())
-            }
-            state
-                .branches
-                .extend(branches.iter().map(ToString::to_string));
-        })
-        .unwrap();
-    }
-
-    pub async fn add_linked_worktree_for_repo(
-        &self,
-        dot_git: &Path,
-        emit_git_event: bool,
-        worktree: Worktree,
-    ) {
-        let ref_name = worktree
-            .ref_name
-            .as_ref()
-            .expect("linked worktree must have a ref_name");
-        let branch_name = ref_name
-            .strip_prefix("refs/heads/")
-            .unwrap_or(ref_name.as_ref());
-
-        // Create ref in git state.
-        self.with_git_state(dot_git, false, |state| {
-            state
-                .refs
-                .insert(ref_name.to_string(), worktree.sha.to_string());
-        })
-        .unwrap();
-
-        // Create .git/worktrees/<name>/ directory with HEAD, commondir, and gitdir.
-        let worktrees_entry_dir = dot_git.join("worktrees").join(branch_name);
-        self.create_dir(&worktrees_entry_dir).await.unwrap();
-
-        self.write_file_internal(
-            worktrees_entry_dir.join("HEAD"),
-            format!("ref: {ref_name}").into_bytes(),
-            false,
-        )
-        .unwrap();
-
-        self.write_file_internal(
-            worktrees_entry_dir.join("commondir"),
-            dot_git.to_string_lossy().into_owned().into_bytes(),
-            false,
-        )
-        .unwrap();
-
-        let worktree_dot_git = worktree.path.join(".git");
-        self.write_file_internal(
-            worktrees_entry_dir.join("gitdir"),
-            worktree_dot_git.to_string_lossy().into_owned().into_bytes(),
-            false,
-        )
-        .unwrap();
-
-        // Create the worktree checkout directory with a .git file pointing back.
-        self.create_dir(&worktree.path).await.unwrap();
-
-        self.write_file_internal(
-            &worktree_dot_git,
-            format!("gitdir: {}", worktrees_entry_dir.display()).into_bytes(),
-            false,
-        )
-        .unwrap();
-
-        if emit_git_event {
-            self.with_git_state(dot_git, true, |_| {}).unwrap();
-        }
-    }
-
-    pub async fn remove_worktree_for_repo(
-        &self,
-        dot_git: &Path,
-        emit_git_event: bool,
-        ref_name: &str,
-    ) {
-        let branch_name = ref_name.strip_prefix("refs/heads/").unwrap_or(ref_name);
-        let worktrees_entry_dir = dot_git.join("worktrees").join(branch_name);
-
-        // Read gitdir to find the worktree checkout path.
-        let gitdir_content = self
-            .load_internal(worktrees_entry_dir.join("gitdir"))
-            .await
-            .unwrap();
-        let gitdir_str = String::from_utf8(gitdir_content).unwrap();
-        let worktree_path = PathBuf::from(gitdir_str.trim())
-            .parent()
-            .map(PathBuf::from)
-            .unwrap_or_default();
-
-        // Remove the worktree checkout directory.
-        self.remove_dir(
-            &worktree_path,
-            RemoveOptions {
-                recursive: true,
-                ignore_if_not_exists: true,
-            },
-        )
-        .await
-        .unwrap();
-
-        // Remove the .git/worktrees/<name>/ directory.
-        self.remove_dir(
-            &worktrees_entry_dir,
-            RemoveOptions {
-                recursive: true,
-                ignore_if_not_exists: false,
-            },
-        )
-        .await
-        .unwrap();
-
-        if emit_git_event {
-            self.with_git_state(dot_git, true, |_| {}).unwrap();
-        }
-    }
-
-    pub fn set_unmerged_paths_for_repo(
-        &self,
-        dot_git: &Path,
-        unmerged_state: &[(RepoPath, UnmergedStatus)],
-    ) {
-        self.with_git_state(dot_git, true, |state| {
-            state.unmerged_paths.clear();
-            state.unmerged_paths.extend(
-                unmerged_state
-                    .iter()
-                    .map(|(path, content)| (path.clone(), *content)),
-            );
-        })
-        .unwrap();
-    }
-
-    pub fn set_index_for_repo(&self, dot_git: &Path, index_state: &[(&str, String)]) {
-        self.with_git_state(dot_git, true, |state| {
-            state.index_contents.clear();
-            state.index_contents.extend(
-                index_state
-                    .iter()
-                    .map(|(path, content)| (repo_path(path), content.as_bytes().to_vec())),
-            );
-        })
-        .unwrap();
-    }
-
-    pub fn set_head_for_repo(
-        &self,
-        dot_git: &Path,
-        head_state: &[(&str, String)],
-        sha: impl Into<String>,
-    ) {
-        self.with_git_state(dot_git, true, |state| {
-            state.head_contents.clear();
-            state.head_contents.extend(
-                head_state
-                    .iter()
-                    .map(|(path, content)| (repo_path(path), content.as_bytes().to_vec())),
-            );
-            state.refs.insert("HEAD".into(), sha.into());
-        })
-        .unwrap();
-    }
-
-    pub fn set_head_and_index_for_repo(&self, dot_git: &Path, contents_by_path: &[(&str, String)]) {
-        self.with_git_state(dot_git, true, |state| {
-            state.head_contents.clear();
-            state.head_contents.extend(
-                contents_by_path
-                    .iter()
-                    .map(|(path, contents)| (repo_path(path), contents.as_bytes().to_vec())),
-            );
-            state.index_contents = state.head_contents.clone();
-        })
-        .unwrap();
-    }
-
-    pub fn set_merge_base_content_for_repo(
-        &self,
-        dot_git: &Path,
-        contents_by_path: &[(&str, String)],
-    ) -> Vec<git::Oid> {
-        self.with_git_state(dot_git, true, |state| {
-            use git::Oid;
-
-            state.merge_base_contents.clear();
-            let mut assigned = Vec::with_capacity(contents_by_path.len());
-            for (index, (path, content)) in contents_by_path.iter().enumerate() {
-                let mut bytes = [0u8; 20];
-                bytes[..4].copy_from_slice(&((index as u32) + 1).to_be_bytes());
-                let oid = Oid::from_bytes(&bytes).unwrap();
-                state.merge_base_contents.insert(repo_path(path), oid);
-                state.oids.insert(oid, content.as_bytes().to_vec());
-                assigned.push(oid);
-            }
-            assigned
-        })
-        .unwrap()
-    }
-
-    pub fn install_blob_read_gate_for_repo(&self, dot_git: &Path) -> FakeBlobReadGate {
-        let gate = FakeBlobReadGate::default();
-        self.with_git_state(dot_git, false, |state| {
-            state.blob_read_gate = Some(gate.clone());
-        })
-        .unwrap();
-        gate
-    }
-
-    pub fn set_blame_for_repo(&self, dot_git: &Path, blames: Vec<(RepoPath, git::blame::Blame)>) {
-        self.with_git_state(dot_git, true, |state| {
-            state.blames.clear();
-            state.blames.extend(blames);
-        })
-        .unwrap();
-    }
-
-    pub fn set_graph_commits(&self, dot_git: &Path, commits: Vec<Arc<InitialGraphCommitData>>) {
-        self.with_git_state(dot_git, true, |state| {
-            state.graph_commits = commits;
-        })
-        .unwrap();
-    }
-
-    pub fn set_graph_error(&self, dot_git: &Path, error: Option<String>) {
-        self.with_git_state(dot_git, true, |state| {
-            state.simulated_graph_error = error;
-        })
-        .unwrap();
-    }
-
-    pub fn set_commit_data(
-        &self,
-        dot_git: &Path,
-        commit_data: impl IntoIterator<Item = (CommitData, bool)>,
-    ) {
-        self.with_git_state(dot_git, true, |state| {
-            state.commit_data = commit_data
-                .into_iter()
-                .map(|(data, should_fail)| {
-                    (
-                        data.sha,
-                        if should_fail {
-                            FakeCommitDataEntry::Fail(data)
-                        } else {
-                            FakeCommitDataEntry::Success(data)
-                        },
-                    )
-                })
-                .collect();
-        })
-        .unwrap();
-    }
-
-    /// Put the given git repository into a state with the given status,
-    /// by mutating the head, index, and unmerged state.
-    pub fn set_status_for_repo(&self, dot_git: &Path, statuses: &[(&str, FileStatus)]) {
-        let workdir_path = dot_git.parent().unwrap();
-        let workdir_contents = self.files_with_contents(workdir_path);
-        self.with_git_state(dot_git, true, |state| {
-            state.index_contents.clear();
-            state.head_contents.clear();
-            state.unmerged_paths.clear();
-            for (path, content) in workdir_contents {
-                use util::{paths::PathStyle, rel_path::RelPath};
-
-                let repo_path = RelPath::new(path.strip_prefix(&workdir_path).unwrap(), PathStyle::local()).unwrap();
-                let repo_path = RepoPath::from_rel_path(&repo_path);
-                let status = statuses
-                    .iter()
-                    .find_map(|(p, status)| (*p == repo_path.as_unix_str()).then_some(status));
-                let mut content = String::from_utf8_lossy(&content).to_string();
-
-                let mut index_content = None;
-                let mut head_content = None;
-                match status {
-                    None => {
-                        index_content = Some(content.clone());
-                        head_content = Some(content);
-                    }
-                    Some(FileStatus::Untracked | FileStatus::Ignored) => {}
-                    Some(FileStatus::Unmerged(unmerged_status)) => {
-                        state
-                            .unmerged_paths
-                            .insert(repo_path.clone(), *unmerged_status);
-                        content.push_str(" (unmerged)");
-                        index_content = Some(content.clone());
-                        head_content = Some(content);
-                    }
-                    Some(FileStatus::Tracked(TrackedStatus {
-                        index_status,
-                        worktree_status,
-                    })) => {
-                        match worktree_status {
-                            StatusCode::Modified => {
-                                let mut content = content.clone();
-                                content.push_str(" (modified in working copy)");
-                                index_content = Some(content);
-                            }
-                            StatusCode::TypeChanged | StatusCode::Unmodified => {
-                                index_content = Some(content.clone());
-                            }
-                            StatusCode::Added => {}
-                            StatusCode::Deleted | StatusCode::Renamed | StatusCode::Copied => {
-                                panic!("cannot create these statuses for an existing file");
-                            }
-                        };
-                        match index_status {
-                            StatusCode::Modified => {
-                                let mut content = index_content.clone().expect(
-                                    "file cannot be both modified in index and created in working copy",
-                                );
-                                content.push_str(" (modified in index)");
-                                head_content = Some(content);
-                            }
-                            StatusCode::TypeChanged | StatusCode::Unmodified => {
-                                head_content = Some(index_content.clone().expect("file cannot be both unmodified in index and created in working copy"));
-                            }
-                            StatusCode::Added => {}
-                            StatusCode::Deleted  => {
-                                head_content = Some("".into());
-                            }
-                            StatusCode::Renamed | StatusCode::Copied => {
-                                panic!("cannot create these statuses for an existing file");
-                            }
-                        };
-                    }
-                };
-
-                if let Some(content) = index_content {
-                    state
-                        .index_contents
-                        .insert(repo_path.clone(), content.into_bytes());
-                }
-                if let Some(content) = head_content {
-                    state
-                        .head_contents
-                        .insert(repo_path.clone(), content.into_bytes());
-                }
-            }
-        }).unwrap();
-    }
-
-    pub fn set_error_message_for_index_write(&self, dot_git: &Path, message: Option<String>) {
-        self.with_git_state(dot_git, true, |state| {
-            state.simulated_index_write_error_message = message;
-        })
-        .unwrap();
-    }
-
-    pub fn set_create_worktree_error(&self, dot_git: &Path, message: Option<String>) {
-        self.with_git_state(dot_git, true, |state| {
-            state.simulated_create_worktree_error = message;
-        })
-        .unwrap();
     }
 
     /// Makes subsequent `remove_dir` calls for `path` fail with `message`.
@@ -3021,7 +2311,6 @@ impl Fs for FakeFs {
                         mtime,
                         len: 0,
                         entries: Default::default(),
-                        git_repo_state: None,
                     }
                 });
                 Ok(())
@@ -3042,7 +2331,6 @@ impl Fs for FakeFs {
             mtime,
             len: 0,
             content: Vec::new(),
-            git_dir_path: None,
         };
         let mut kind = Some(PathEventKind::Created);
         state.write_path(path, |entry| {
@@ -3206,7 +2494,6 @@ impl Fs for FakeFs {
             mtime,
             len: content.len() as u64,
             content,
-            git_dir_path: None,
         };
 
         let kind = state.write_path(&target, |e| match e {
@@ -3467,45 +2754,6 @@ impl Fs for FakeFs {
             .push((normalize_path(path), Arc::downgrade(&watcher)));
         (events, watcher)
     }
-
-    fn open_repo(
-        &self,
-        abs_dot_git: &Path,
-        _system_git_binary: Option<&Path>,
-    ) -> Result<Arc<dyn GitRepository>> {
-        self.with_git_state_and_paths(
-            abs_dot_git,
-            false,
-            |_, repository_dir_path, common_dir_path| {
-                Arc::new(fake_git_repo::FakeGitRepository {
-                    fs: self.this.upgrade().unwrap(),
-                    executor: self.executor.clone(),
-                    dot_git_path: abs_dot_git.to_path_buf(),
-                    repository_dir_path: repository_dir_path.to_owned(),
-                    common_dir_path: common_dir_path.to_owned(),
-                    checkpoints: Arc::default(),
-                    is_trusted: Arc::default(),
-                }) as _
-            },
-        )
-    }
-
-    async fn git_init(
-        &self,
-        abs_work_directory_path: &Path,
-        _fallback_branch_name: String,
-    ) -> Result<()> {
-        self.create_dir(&abs_work_directory_path.join(".git")).await
-    }
-
-    async fn git_clone(&self, _abs_work_directory: &Path, _repo_url: &str) -> Result<()> {
-        anyhow::bail!("Git clone is not supported in fake Fs")
-    }
-
-    async fn git_config(&self, _abs_work_directory: &Path, _args: Vec<String>) -> Result<String> {
-        anyhow::bail!("Git config is not supported in fake Fs")
-    }
-
     fn record_watcher_diagnostics(&self) -> Option<fs_watcher::WatchRecording> {
         Some(fs_watcher::WatchRecording::new([
             self.native_watcher.clone(),

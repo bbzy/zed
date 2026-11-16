@@ -439,8 +439,6 @@ actions!(
         ApplyDiffHunk,
         /// Deletes the character before the cursor.
         Backspace,
-        /// Shows git blame information for the current line.
-        BlameHover,
         /// Cancels the current operation.
         Cancel,
         /// Cancels the running flycheck operation.

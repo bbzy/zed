@@ -19,7 +19,6 @@ use collections::{HashMap, HashSet};
 
 use fs::FakeFs;
 use futures::{StreamExt as _, channel::oneshot};
-use git::GitHostingProviderRegistry;
 use gpui::{AppContext as _, BackgroundExecutor, Entity, Task, TestAppContext, VisualTestContext};
 use http_client::{FakeHttpClient, Method};
 use language::LanguageRegistry;
@@ -330,10 +329,6 @@ impl TestServer {
                     }
                 })
             });
-
-        let git_hosting_provider_registry = cx.update(GitHostingProviderRegistry::default_global);
-        git_hosting_provider_registry
-            .register_hosting_provider(Arc::new(git_hosting_providers::Github::public_instance()));
 
         let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
         let workspace_store = cx.new(|cx| WorkspaceStore::new(client.clone(), cx));

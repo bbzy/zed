@@ -64,7 +64,7 @@ async fn run_remote_saved_classification(
         })
         .await?;
     let root = std::fs::canonicalize(directory.path())?;
-    let server_fs = fs::RealFs::new(None, server_cx.executor());
+    let server_fs = fs::RealFs::new(server_cx.executor());
     let (project, headless) =
         crate::remote_editing_tests::init_test_with_fs(server_fs, cx, server_cx).await;
     let service = headless.read_with(server_cx, |headless, _| headless.kk_workbench.clone());

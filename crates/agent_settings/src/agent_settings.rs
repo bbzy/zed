@@ -43,7 +43,6 @@ pub struct PanelLayout {
     pub(crate) project_panel_dock: Option<DockSide>,
     pub(crate) outline_panel_dock: Option<DockSide>,
     pub(crate) collaboration_panel_dock: Option<DockPosition>,
-    pub(crate) git_panel_dock: Option<DockPosition>,
 }
 
 impl PanelLayout {
@@ -52,7 +51,6 @@ impl PanelLayout {
         project_panel_dock: Some(DockSide::Right),
         outline_panel_dock: Some(DockSide::Right),
         collaboration_panel_dock: Some(DockPosition::Right),
-        git_panel_dock: Some(DockPosition::Right),
     };
 
     const EDITOR: Self = Self {
@@ -60,7 +58,6 @@ impl PanelLayout {
         project_panel_dock: Some(DockSide::Left),
         outline_panel_dock: Some(DockSide::Left),
         collaboration_panel_dock: Some(DockPosition::Left),
-        git_panel_dock: Some(DockPosition::Left),
     };
 
     pub fn is_agent_layout(&self) -> bool {
@@ -77,7 +74,6 @@ impl PanelLayout {
             project_panel_dock: content.project_panel.as_ref().and_then(|p| p.dock),
             outline_panel_dock: content.outline_panel.as_ref().and_then(|p| p.dock),
             collaboration_panel_dock: content.collaboration_panel.as_ref().and_then(|p| p.dock),
-            git_panel_dock: content.git_panel.as_ref().and_then(|p| p.dock),
         }
     }
 
@@ -86,7 +82,6 @@ impl PanelLayout {
         settings.project_panel.get_or_insert_default().dock = self.project_panel_dock;
         settings.outline_panel.get_or_insert_default().dock = self.outline_panel_dock;
         settings.collaboration_panel.get_or_insert_default().dock = self.collaboration_panel_dock;
-        settings.git_panel.get_or_insert_default().dock = self.git_panel_dock;
     }
 
     fn write_diff_to(&self, current_merged: &PanelLayout, settings: &mut SettingsContent) {
@@ -103,9 +98,6 @@ impl PanelLayout {
             settings.collaboration_panel.get_or_insert_default().dock =
                 self.collaboration_panel_dock;
         }
-        if self.git_panel_dock != current_merged.git_panel_dock {
-            settings.git_panel.get_or_insert_default().dock = self.git_panel_dock;
-        }
     }
 
     fn backfill_to(&self, user_layout: &PanelLayout, settings: &mut SettingsContent) {
@@ -121,9 +113,6 @@ impl PanelLayout {
         if user_layout.collaboration_panel_dock.is_none() {
             settings.collaboration_panel.get_or_insert_default().dock =
                 self.collaboration_panel_dock;
-        }
-        if user_layout.git_panel_dock.is_none() {
-            settings.git_panel.get_or_insert_default().dock = self.git_panel_dock;
         }
     }
 }
@@ -222,9 +211,6 @@ pub struct AgentSettings {
     pub subagent_model: Option<LanguageModelSelection>,
     pub inline_assistant_model: Option<LanguageModelSelection>,
     pub inline_assistant_use_streaming_tools: bool,
-    pub commit_message_model: Option<LanguageModelSelection>,
-    pub commit_message_include_project_rules: bool,
-    pub commit_message_instructions: Option<String>,
     pub thread_summary_model: Option<LanguageModelSelection>,
     pub compaction_model: Option<LanguageModelSelection>,
     pub inline_alternatives: Vec<LanguageModelSelection>,
@@ -800,11 +786,6 @@ impl Settings for AgentSettings {
             inline_assistant_use_streaming_tools: agent
                 .inline_assistant_use_streaming_tools
                 .unwrap_or(true),
-            commit_message_include_project_rules: agent
-                .commit_message_include_project_rules
-                .unwrap(),
-            commit_message_model: agent.commit_message_model,
-            commit_message_instructions: agent.commit_message_instructions,
             thread_summary_model: agent.thread_summary_model,
             compaction_model: agent.compaction_model,
             inline_alternatives: agent.inline_alternatives.unwrap_or_default(),
@@ -2025,7 +2006,6 @@ mod tests {
         assert_eq!(user_layout.project_panel_dock, None);
         assert_eq!(user_layout.outline_panel_dock, None);
         assert_eq!(user_layout.collaboration_panel_dock, None);
-        assert_eq!(user_layout.git_panel_dock, None);
 
         // User sets a combination that doesn't match either preset:
         // agent on the left but project panel also on the left.
@@ -2246,7 +2226,6 @@ mod tests {
                 user_layout.collaboration_panel_dock,
                 Some(DockPosition::Left)
             );
-            assert_eq!(user_layout.git_panel_dock, Some(DockPosition::Left));
 
             // Even though defaults are now agent, the backfilled user settings
             // keep everything in the editor layout. The user's experience

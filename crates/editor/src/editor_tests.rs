@@ -15,7 +15,7 @@ use crate::{
         select_ranges,
     },
 };
-use buffer_diff::{BufferDiff, DiffHunkSecondaryStatus, DiffHunkStatus, DiffHunkStatusKind};
+use buffer_diff::{BufferDiff, DiffHunkStatusKind};
 use collections::{HashMap, HashSet};
 use fs::Fs as _;
 use futures::{
@@ -5324,7 +5324,7 @@ async fn test_newline_below_with_cursor_on_deleted_hunk(cx: &mut TestAppContext)
     let mut cx = EditorTestContext::new(cx).await;
 
     cx.set_state("aaa\nbbb\ncˇcc");
-    cx.set_head_text("aaa\nXXX\nbbb\nccc");
+    cx.set_diff_base("aaa\nXXX\nbbb\nccc");
     cx.run_until_parked();
     cx.update_editor(|editor, window, cx| {
         editor.expand_all_diff_hunks(&Default::default(), window, cx);
@@ -5456,7 +5456,7 @@ async fn test_expand_excerpts_with_selection_on_deleted_hunk(cx: &mut TestAppCon
             cx,
         );
     });
-    cx.set_head_text("zero\none\ntwo\nthree\ndeleted\nfour\nfive\nsix\nseven");
+    cx.set_diff_base("zero\none\ntwo\nthree\ndeleted\nfour\nfive\nsix\nseven");
     cx.run_until_parked();
     cx.update_editor(|editor, window, cx| {
         editor.expand_all_diff_hunks(&Default::default(), window, cx);
@@ -7501,7 +7501,7 @@ fn test_join_lines_with_multi_selection(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn test_join_lines_with_git_diff_base(executor: BackgroundExecutor, cx: &mut TestAppContext) {
+async fn test_join_lines_with_diff_base(executor: BackgroundExecutor, cx: &mut TestAppContext) {
     init_test(cx, |_| {});
 
     let mut cx = EditorTestContext::new(cx).await;
@@ -7524,7 +7524,7 @@ async fn test_join_lines_with_git_diff_base(executor: BackgroundExecutor, cx: &m
         .unindent(),
     );
 
-    cx.set_head_text(&diff_base);
+    cx.set_diff_base(&diff_base);
     executor.run_until_parked();
 
     // Join lines
@@ -7819,7 +7819,7 @@ async fn test_custom_newlines_cause_no_false_positive_diffs(
     init_test(cx, |_| {});
     let mut cx = EditorTestContext::new(cx).await;
     cx.set_state("Line 0\r\nLine 1\rˇ\nLine 2\r\nLine 3");
-    cx.set_head_text("Line 0\r\nLine 1\r\nLine 2\r\nLine 3");
+    cx.set_diff_base("Line 0\r\nLine 1\r\nLine 2\r\nLine 3");
     executor.run_until_parked();
 
     cx.update_editor(|editor, window, cx| {
@@ -11561,7 +11561,7 @@ async fn test_copy_file_location_with_deleted_hunk(cx: &mut TestAppContext) {
     let mut cx = EditorTestContext::new(cx).await;
 
     cx.set_state("ˇaaa\nbbb\nccc");
-    cx.set_head_text("aaa\nXXX\nbbb\nccc");
+    cx.set_diff_base("aaa\nXXX\nbbb\nccc");
     cx.run_until_parked();
     cx.update_editor(|editor, window, cx| {
         editor.expand_all_diff_hunks(&Default::default(), window, cx);
@@ -16394,7 +16394,7 @@ async fn test_fold_function_bodies(cx: &mut TestAppContext) {
 
     let mut cx = EditorLspTestContext::new_rust(Default::default(), cx).await;
     cx.set_state(&text);
-    cx.set_head_text(&base_text);
+    cx.set_diff_base(&base_text);
     cx.update_editor(|editor, window, cx| {
         editor.expand_all_diff_hunks(&Default::default(), window, cx);
     });
@@ -20052,7 +20052,7 @@ async fn test_range_format_on_save_timeout(cx: &mut TestAppContext) {
 
 #[gpui::test]
 async fn test_modifications_format_on_save(cx: &mut TestAppContext) {
-    let (project, editor, cx, fake_server) = setup_range_format_test_with_git(cx, "", "").await;
+    let (project, editor, cx, fake_server) = setup_range_format_test_with_base(cx, "").await;
 
     update_test_language_settings(cx, &|settings| {
         settings.defaults.format_on_save = Some(FormatOnSave::Modifications);
@@ -20100,7 +20100,7 @@ async fn test_modifications_format_on_save(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn test_modifications_format_skips_without_git_diff(cx: &mut TestAppContext) {
+async fn test_modifications_format_skips_without_diff(cx: &mut TestAppContext) {
     let (project, editor, cx, fake_server) = setup_range_format_test(cx).await;
 
     update_test_language_settings(cx, &|settings| {
@@ -20160,17 +20160,12 @@ async fn test_modifications_format_lsp_no_range_support(cx: &mut TestAppContext)
     fs.insert_tree(
         path!("/project"),
         json!({
-            ".git": {},
             "file.rs": "",
         }),
     )
     .await;
 
     let head_content = "one\ntwo\nthree\n";
-    fs.set_head_and_index_for_repo(
-        std::path::Path::new(path!("/project/.git")),
-        &[("file.rs", head_content.to_string())],
-    );
 
     let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
 
@@ -20194,14 +20189,11 @@ async fn test_modifications_format_lsp_no_range_support(cx: &mut TestAppContext)
         })
         .await
         .unwrap();
-    project
-        .update(cx, |project, cx| {
-            project.open_unstaged_diff(buffer.clone(), cx)
-        })
-        .await
-        .unwrap();
-
-    let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
+    let multi_buffer = cx.new(|cx| MultiBuffer::singleton(buffer.clone(), cx));
+    cx.update(|cx| {
+        crate::test::editor_test_context::attach_diff(&buffer, &multi_buffer, head_content, cx)
+    });
+    let buffer = multi_buffer;
     let (editor, cx) = cx.add_window_view(|window, cx| {
         build_editor_with_project(project.clone(), buffer, window, cx)
     });
@@ -20254,7 +20246,7 @@ async fn test_modifications_format_lsp_no_range_support(cx: &mut TestAppContext)
 
 #[gpui::test]
 async fn test_modifications_format_lsp_returns_empty_edits(cx: &mut TestAppContext) {
-    let (project, editor, cx, fake_server) = setup_range_format_test_with_git(cx, "", "").await;
+    let (project, editor, cx, fake_server) = setup_range_format_test_with_base(cx, "").await;
 
     update_test_language_settings(cx, &|settings| {
         settings.defaults.format_on_save = Some(FormatOnSave::Modifications);
@@ -20302,7 +20294,7 @@ async fn test_modifications_format_lsp_returns_empty_edits(cx: &mut TestAppConte
 async fn test_modifications_format_multiple_hunks(cx: &mut TestAppContext) {
     let head_content = "line0\nline1\nline2\nline3\nline4\nline5\n";
     let (project, editor, cx, fake_server) =
-        setup_range_format_test_with_git(cx, head_content, head_content).await;
+        setup_range_format_test_with_base(cx, head_content).await;
 
     update_test_language_settings(cx, &|settings| {
         settings.defaults.format_on_save = Some(FormatOnSave::Modifications);
@@ -20489,10 +20481,9 @@ async fn test_modifications_format_insert_touching_kept_edit_across_responses(
 
 #[gpui::test]
 async fn test_modifications_format_excludes_staged_changes(cx: &mut TestAppContext) {
-    let head_content = "line0\nline1\nline2\nline3\nline4\n";
     let staged_content = "line0\nLINE1\nline2\nline3\nline4\n";
     let (project, editor, cx, fake_server) =
-        setup_range_format_test_with_git(cx, head_content, staged_content).await;
+        setup_range_format_test_with_base(cx, staged_content).await;
 
     update_test_language_settings(cx, &|settings| {
         settings.defaults.format_on_save = Some(FormatOnSave::Modifications);
@@ -20542,10 +20533,9 @@ async fn test_modifications_format_excludes_staged_changes(cx: &mut TestAppConte
 
 #[gpui::test]
 async fn test_modifications_format_range_excludes_staged_hunk(cx: &mut TestAppContext) {
-    let head_content = "a\nb\nc\n";
     let staged_content = "A\nb\nc\n";
     let (project, editor, cx, fake_server) =
-        setup_range_format_test_with_git(cx, head_content, staged_content).await;
+        setup_range_format_test_with_base(cx, staged_content).await;
 
     update_test_language_settings(cx, &|settings| {
         settings.defaults.format_on_save = Some(FormatOnSave::Modifications);
@@ -20598,7 +20588,7 @@ async fn test_modifications_format_range_excludes_staged_hunk(cx: &mut TestAppCo
 async fn test_modifications_format_pure_unstaged_with_git(cx: &mut TestAppContext) {
     let head_content = "line0\nline1\nline2\nline3\nline4\n";
     let (project, editor, cx, fake_server) =
-        setup_range_format_test_with_git(cx, head_content, head_content).await;
+        setup_range_format_test_with_base(cx, head_content).await;
 
     update_test_language_settings(cx, &|settings| {
         settings.defaults.format_on_save = Some(FormatOnSave::Modifications);
@@ -20646,10 +20636,9 @@ async fn test_modifications_format_pure_unstaged_with_git(cx: &mut TestAppContex
 
 #[gpui::test]
 async fn test_modifications_format_no_unstaged_changes_with_git(cx: &mut TestAppContext) {
-    let head_content = "line0\nline1\nline2\nline3\nline4\n";
     let staged_content = "line0\nLINE1\nline2\nline3\nLINE4\n";
     let (project, editor, cx, fake_server) =
-        setup_range_format_test_with_git(cx, head_content, staged_content).await;
+        setup_range_format_test_with_base(cx, staged_content).await;
 
     update_test_language_settings(cx, &|settings| {
         settings.defaults.format_on_save = Some(FormatOnSave::Modifications);
@@ -20688,7 +20677,7 @@ async fn test_modifications_format_no_unstaged_changes_with_git(cx: &mut TestApp
 async fn test_modifications_format_no_changes_with_git(cx: &mut TestAppContext) {
     let head_content = "line0\nline1\nline2\n";
     let (project, editor, cx, fake_server) =
-        setup_range_format_test_with_git(cx, head_content, head_content).await;
+        setup_range_format_test_with_base(cx, head_content).await;
 
     update_test_language_settings(cx, &|settings| {
         settings.defaults.format_on_save = Some(FormatOnSave::Modifications);
@@ -20731,22 +20720,12 @@ async fn test_modifications_format_crlf_line_endings(cx: &mut TestAppContext) {
     fs.insert_tree(
         path!("/project"),
         json!({
-            ".git": {},
             "file.rs": "line0\r\nline1\r\nline2\r\nline3\r\nline4\r\n",
         }),
     )
     .await;
 
     let head_content = "line0\nline1\nline2\nline3\nline4\n";
-    fs.set_head_for_repo(
-        std::path::Path::new(path!("/project/.git")),
-        &[("file.rs", head_content.to_string())],
-        "deadbeef",
-    );
-    fs.set_index_for_repo(
-        std::path::Path::new(path!("/project/.git")),
-        &[("file.rs", head_content.to_string())],
-    );
 
     let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
 
@@ -20778,14 +20757,11 @@ async fn test_modifications_format_crlf_line_endings(cx: &mut TestAppContext) {
         );
     });
 
-    project
-        .update(cx, |project, cx| {
-            project.open_unstaged_diff(buffer.clone(), cx)
-        })
-        .await
-        .unwrap();
-
-    let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
+    let multi_buffer = cx.new(|cx| MultiBuffer::singleton(buffer.clone(), cx));
+    cx.update(|cx| {
+        crate::test::editor_test_context::attach_diff(&buffer, &multi_buffer, head_content, cx)
+    });
+    let buffer = multi_buffer;
     let (editor, cx) = cx.add_window_view(|window, cx| {
         build_editor_with_project(project.clone(), buffer, window, cx)
     });
@@ -20842,7 +20818,7 @@ async fn test_modifications_format_crlf_line_endings(cx: &mut TestAppContext) {
 async fn test_modifications_format_merge_boundary_one_row_gap(cx: &mut TestAppContext) {
     let head_content = "line0\nline1\nline2\nline3\nline4\n";
     let (project, editor, cx, fake_server) =
-        setup_range_format_test_with_git(cx, head_content, head_content).await;
+        setup_range_format_test_with_base(cx, head_content).await;
 
     update_test_language_settings(cx, &|settings| {
         settings.defaults.format_on_save = Some(FormatOnSave::Modifications);
@@ -20892,7 +20868,7 @@ async fn test_modifications_format_merge_boundary_one_row_gap(cx: &mut TestAppCo
 async fn test_modifications_if_available_empty_diff_skips_formatting(cx: &mut TestAppContext) {
     let head_content = "line0\nline1\nline2\n";
     let (project, editor, cx, fake_server) =
-        setup_range_format_test_with_git(cx, head_content, head_content).await;
+        setup_range_format_test_with_base(cx, head_content).await;
 
     update_test_language_settings(cx, &|settings| {
         settings.defaults.format_on_save = Some(FormatOnSave::ModificationsIfAvailable);
@@ -21004,22 +20980,12 @@ async fn test_modifications_if_available_lsp_no_range_support_falls_back_to_full
     fs.insert_tree(
         path!("/project"),
         json!({
-            ".git": {},
             "file.rs": "",
         }),
     )
     .await;
 
     let head_content = "line0\nline1\nline2\n";
-    fs.set_head_for_repo(
-        std::path::Path::new(path!("/project/.git")),
-        &[("file.rs", head_content.to_string())],
-        "deadbeef",
-    );
-    fs.set_index_for_repo(
-        std::path::Path::new(path!("/project/.git")),
-        &[("file.rs", head_content.to_string())],
-    );
 
     let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
 
@@ -21043,14 +21009,11 @@ async fn test_modifications_if_available_lsp_no_range_support_falls_back_to_full
         })
         .await
         .unwrap();
-    project
-        .update(cx, |project, cx| {
-            project.open_unstaged_diff(buffer.clone(), cx)
-        })
-        .await
-        .unwrap();
-
-    let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
+    let multi_buffer = cx.new(|cx| MultiBuffer::singleton(buffer.clone(), cx));
+    cx.update(|cx| {
+        crate::test::editor_test_context::attach_diff(&buffer, &multi_buffer, head_content, cx)
+    });
+    let buffer = multi_buffer;
     let (editor, cx) = cx.add_window_view(|window, cx| {
         build_editor_with_project(project.clone(), buffer, window, cx)
     });
@@ -27992,7 +27955,7 @@ async fn test_go_to_hunk(executor: BackgroundExecutor, cx: &mut TestAppContext) 
         .unindent(),
     );
 
-    cx.set_head_text(&diff_base);
+    cx.set_diff_base(&diff_base);
     executor.run_until_parked();
 
     cx.update_editor(|editor, window, cx| {
@@ -31174,7 +31137,7 @@ async fn test_deleting_over_diff_hunk(cx: &mut TestAppContext) {
         three
         "#};
 
-    cx.set_head_text(base_text);
+    cx.set_diff_base(base_text);
     cx.set_state("\nˇ\n");
     cx.executor().run_until_parked();
     cx.update_editor(|editor, _window, cx| {
@@ -31732,89 +31695,6 @@ async fn test_multibuffer_in_navigation_history(cx: &mut TestAppContext) {
         assert_eq!(active_item.buffer_kind(cx), ItemBufferKind::Multibuffer);
     });
 }
-
-#[gpui::test]
-async fn test_merge_base_diff_hunks_are_read_only(cx: &mut TestAppContext) {
-    init_test(cx, |_| {});
-
-    let fs = FakeFs::new(cx.executor());
-    fs.insert_tree(
-        path!("/project"),
-        json!({
-            ".git": {},
-            "file.rs": "worktree\n",
-        }),
-    )
-    .await;
-    fs.set_head_and_index_for_repo(
-        std::path::Path::new(path!("/project/.git")),
-        &[("file.rs", "head\n".to_string())],
-    );
-    fs.set_merge_base_content_for_repo(
-        std::path::Path::new(path!("/project/.git")),
-        &[("file.rs", "base\n".to_string())],
-    );
-
-    let project = Project::test(fs.clone(), [path!("/project").as_ref()], cx).await;
-    project
-        .update(cx, |project, cx| project.git_scans_complete(cx))
-        .await;
-    let buffer = project
-        .update(cx, |project, cx| {
-            project.open_local_buffer(path!("/project/file.rs"), cx)
-        })
-        .await
-        .unwrap();
-    let buffer_id = buffer.read_with(cx, |buffer, _| buffer.remote_id());
-    let multi_buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
-    let (editor, cx) = cx.add_window_view(|window, cx| {
-        build_editor_with_project(project.clone(), multi_buffer, window, cx)
-    });
-
-    cx.update(|_window, cx| {
-        SettingsStore::update_global(cx, |settings, cx| {
-            settings.update_user_settings(cx, |settings| {
-                settings.git.get_or_insert_default().diff_base =
-                    Some(settings::GitDiffBaseSetting::DefaultBranch);
-            });
-        });
-    });
-    cx.run_until_parked();
-
-    editor.read_with(cx, |editor, cx| {
-        let diff = editor
-            .buffer()
-            .read(cx)
-            .diff_for(buffer_id)
-            .expect("buffer should have a display diff");
-        assert!(diff.read(cx).operations().is_none());
-    });
-    editor.update_in(cx, |editor, window, cx| {
-        editor.select_all(&SelectAll, window, cx);
-        editor.restore_diff(&Default::default(), window, cx);
-        editor.toggle_staged_selected_diff_hunks(&Default::default(), window, cx);
-    });
-    cx.run_until_parked();
-
-    assert_eq!(
-        editor.read_with(cx, |editor, cx| editor.text(cx)),
-        "worktree\n"
-    );
-    let index_contents = fs
-        .with_git_state(
-            std::path::Path::new(path!("/project/.git")),
-            false,
-            |state| state.index_contents.clone(),
-        )
-        .unwrap();
-    assert_eq!(
-        index_contents,
-        [(::git::repository::repo_path("file.rs"), b"head\n".to_vec(),)]
-            .into_iter()
-            .collect::<HashMap<_, _>>()
-    );
-}
-
 #[gpui::test]
 async fn test_toggle_selected_diff_hunks(executor: BackgroundExecutor, cx: &mut TestAppContext) {
     init_test(cx, |_| {});
@@ -31849,7 +31729,7 @@ async fn test_toggle_selected_diff_hunks(executor: BackgroundExecutor, cx: &mut 
         .unindent(),
     );
 
-    cx.set_head_text(&diff_base);
+    cx.set_diff_base(&diff_base);
     executor.run_until_parked();
 
     cx.update_editor(|editor, window, cx| {
@@ -31983,7 +31863,7 @@ async fn test_diff_base_change_with_expanded_diff_hunks(
         .unindent(),
     );
 
-    cx.set_head_text(&diff_base);
+    cx.set_diff_base(&diff_base);
     executor.run_until_parked();
 
     cx.update_editor(|editor, window, cx| {
@@ -32011,7 +31891,7 @@ async fn test_diff_base_change_with_expanded_diff_hunks(
         .unindent(),
     );
 
-    cx.set_head_text("new diff base!");
+    cx.set_diff_base("new diff base!");
     executor.run_until_parked();
     cx.assert_state_with_diff(
         r#"
@@ -32055,9 +31935,7 @@ async fn test_row_highlights_for_empty_conflict_side_after_edit(
     );
     executor.run_until_parked();
 
-    // Mirrors what `git_ui::conflict_view::update_conflict_highlighting` does
-    // with the ranges produced by the conflict parser, and additionally
-    // stores the inside-out range that empty sides used to produce.
+    // Include the inside-out range that empty conflict sides used to produce.
     cx.update_editor(|editor, _, cx| {
         let buffer = editor.buffer().read(cx).as_singleton().unwrap();
         let conflicts = project::ConflictSet::parse(&buffer.read(cx).text_snapshot());
@@ -32343,7 +32221,7 @@ async fn test_go_to_singleton_buffer_point_with_expanded_deleted_hunks(
         .unindent(),
     );
 
-    cx.set_head_text(&diff_base);
+    cx.set_diff_base(&diff_base);
     executor.run_until_parked();
 
     cx.update_editor(|editor, window, cx| {
@@ -32606,7 +32484,7 @@ async fn test_edits_around_expanded_insertion_hunks(
         .unindent(),
     );
 
-    cx.set_head_text(&diff_base);
+    cx.set_diff_base(&diff_base);
     executor.run_until_parked();
 
     cx.update_editor(|editor, window, cx| {
@@ -32754,7 +32632,7 @@ async fn test_toggling_adjacent_diff_hunks(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
 
     let mut cx = EditorTestContext::new(cx).await;
-    cx.set_head_text(indoc! { "
+    cx.set_diff_base(indoc! { "
         one
         two
         three
@@ -32888,7 +32766,7 @@ async fn test_toggling_adjacent_diff_hunks_2(
         "#
         .unindent(),
     );
-    cx.set_head_text(&diff_base);
+    cx.set_diff_base(&diff_base);
     executor.run_until_parked();
 
     cx.update_editor(|editor, window, cx| {
@@ -32967,7 +32845,7 @@ async fn test_edits_around_expanded_deletion_hunks(
         .unindent(),
     );
 
-    cx.set_head_text(&diff_base);
+    cx.set_diff_base(&diff_base);
     executor.run_until_parked();
 
     cx.update_editor(|editor, window, cx| {
@@ -33090,7 +32968,7 @@ async fn test_backspace_after_deletion_hunk(executor: BackgroundExecutor, cx: &m
         .unindent(),
     );
 
-    cx.set_head_text(&base_text);
+    cx.set_diff_base(&base_text);
     executor.run_until_parked();
 
     cx.update_editor(|editor, window, cx| {
@@ -33172,7 +33050,7 @@ async fn test_edit_after_expanded_modification_hunk(
         .unindent(),
     );
 
-    cx.set_head_text(&diff_base);
+    cx.set_diff_base(&diff_base);
     executor.run_until_parked();
     cx.update_editor(|editor, window, cx| {
         editor.expand_all_diff_hunks(&ExpandAllDiffHunks, window, cx);
@@ -33226,60 +33104,6 @@ async fn test_edit_after_expanded_modification_hunk(
         .unindent(),
     );
 }
-
-#[gpui::test]
-async fn test_stage_and_unstage_added_file_hunk(
-    executor: BackgroundExecutor,
-    cx: &mut TestAppContext,
-) {
-    init_test(cx, |_| {});
-
-    let mut cx = EditorTestContext::new(cx).await;
-    cx.update_editor(|editor, _, cx| {
-        editor.set_expand_all_diff_hunks(cx);
-    });
-
-    let working_copy = r#"
-            ˇfn main() {
-                println!("hello, world!");
-            }
-        "#
-    .unindent();
-
-    cx.set_state(&working_copy);
-    executor.run_until_parked();
-
-    cx.assert_state_with_diff(
-        r#"
-            + ˇfn main() {
-            +     println!("hello, world!");
-            + }
-        "#
-        .unindent(),
-    );
-    cx.assert_index_text(None);
-
-    cx.update_editor(|editor, window, cx| {
-        editor.toggle_staged_selected_diff_hunks(&Default::default(), window, cx);
-    });
-    executor.run_until_parked();
-    cx.assert_index_text(Some(&working_copy.replace("ˇ", "")));
-    cx.assert_state_with_diff(
-        r#"
-            + ˇfn main() {
-            +     println!("hello, world!");
-            + }
-        "#
-        .unindent(),
-    );
-
-    cx.update_editor(|editor, window, cx| {
-        editor.toggle_staged_selected_diff_hunks(&Default::default(), window, cx);
-    });
-    executor.run_until_parked();
-    cx.assert_index_text(None);
-}
-
 async fn setup_indent_guides_editor(
     text: &str,
     cx: &mut TestAppContext,
@@ -34040,7 +33864,7 @@ async fn test_adjacent_diff_hunks(executor: BackgroundExecutor, cx: &mut TestApp
         "#
         .unindent(),
     );
-    cx.set_head_text(&diff_base);
+    cx.set_diff_base(&diff_base);
     cx.update_editor(|editor, window, cx| {
         editor.expand_all_diff_hunks(&ExpandAllDiffHunks, window, cx);
     });
@@ -34211,7 +34035,7 @@ async fn test_toggle_deletion_hunk_at_start_of_file(
         "#
         .unindent(),
     );
-    cx.set_head_text(&diff_base);
+    cx.set_diff_base(&diff_base);
     cx.update_editor(|editor, window, cx| {
         editor.expand_all_diff_hunks(&ExpandAllDiffHunks, window, cx);
     });
@@ -34300,7 +34124,7 @@ async fn test_select_smaller_syntax_node_after_diff_hunk_collapse(
         }
         "#
     .unindent();
-    cx.set_head_text(&diff_base);
+    cx.set_diff_base(&diff_base);
     executor.run_until_parked();
 
     cx.update_editor(|editor, window, cx| {
@@ -34331,7 +34155,7 @@ async fn test_expand_first_line_diff_hunk_keeps_deleted_lines_visible(
     let mut cx = EditorTestContext::new(cx).await;
 
     cx.set_state("ˇnew\nsecond\nthird\n");
-    cx.set_head_text("old\nsecond\nthird\n");
+    cx.set_diff_base("old\nsecond\nthird\n");
     cx.update_editor(|editor, window, cx| {
         editor.scroll(gpui::Point { x: 0., y: 0. }, window, cx);
     });
@@ -34377,16 +34201,6 @@ async fn test_display_diff_hunks(cx: &mut TestAppContext) {
     )
     .await;
 
-    fs.set_head_for_repo(
-        path!("/test/.git").as_ref(),
-        &[
-            ("file-1", "one\n".into()),
-            ("file-2", "two\n".into()),
-            ("file-3", "three\n".into()),
-        ],
-        "deadbeef",
-    );
-
     let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
     let mut buffers = vec![];
     for i in 1..=3 {
@@ -34416,6 +34230,12 @@ async fn test_display_diff_hunks(cx: &mut TestAppContext) {
         multibuffer
     });
 
+    for (buffer, base) in buffers.iter().zip(["one\n", "two\n", "three\n"]) {
+        cx.update(|cx| {
+            crate::test::editor_test_context::attach_diff(buffer, &multibuffer, base, cx);
+        });
+    }
+
     let editor = cx.add_window(|window, cx| {
         Editor::new(EditorMode::full(), multibuffer, Some(project), window, cx)
     });
@@ -34442,81 +34262,6 @@ async fn test_display_diff_hunks(cx: &mut TestAppContext) {
         ]
     );
 }
-
-#[gpui::test]
-async fn test_partially_staged_hunk(cx: &mut TestAppContext) {
-    init_test(cx, |_| {});
-
-    let mut cx = EditorTestContext::new(cx).await;
-    cx.set_head_text(indoc! { "
-        one
-        two
-        three
-        four
-        five
-        "
-    });
-    cx.set_index_text(indoc! { "
-        one
-        two
-        three
-        four
-        five
-        "
-    });
-    cx.set_state(indoc! {"
-        one
-        TWO
-        ˇTHREE
-        FOUR
-        five
-    "});
-    cx.run_until_parked();
-    cx.update_editor(|editor, window, cx| {
-        editor.toggle_staged_selected_diff_hunks(&Default::default(), window, cx);
-    });
-    cx.run_until_parked();
-    cx.assert_index_text(Some(indoc! {"
-        one
-        TWO
-        THREE
-        FOUR
-        five
-    "}));
-    cx.set_state(indoc! { "
-        one
-        TWO
-        ˇTHREE-HUNDRED
-        FOUR
-        five
-    "});
-    cx.run_until_parked();
-    cx.update_editor(|editor, window, cx| {
-        let snapshot = editor.snapshot(window, cx);
-        let hunks = editor
-            .diff_hunks_in_ranges(&[Anchor::Min..Anchor::Max], &snapshot.buffer_snapshot())
-            .collect::<Vec<_>>();
-        assert_eq!(hunks.len(), 1);
-        assert_eq!(
-            hunks[0].status(),
-            DiffHunkStatus {
-                kind: DiffHunkStatusKind::Modified,
-                secondary: DiffHunkSecondaryStatus::OverlapsWithSecondaryHunk
-            }
-        );
-
-        editor.toggle_staged_selected_diff_hunks(&Default::default(), window, cx);
-    });
-    cx.run_until_parked();
-    cx.assert_index_text(Some(indoc! {"
-        one
-        TWO
-        THREE-HUNDRED
-        FOUR
-        five
-    "}));
-}
-
 #[gpui::test]
 fn test_crease_insertion_and_rendering(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
@@ -40709,85 +40454,6 @@ async fn test_hide_mouse_context_menu_on_modal_opened(cx: &mut TestAppContext) {
         assert!(editor.read(cx).mouse_context_menu.is_none());
     });
 }
-
-#[gpui::test]
-async fn test_hide_pending_blame_popover_when_modal_opens(cx: &mut TestAppContext) {
-    init_test(cx, |_| {});
-
-    let fs = FakeFs::new(cx.executor());
-    let project = Project::test(fs, [], cx).await;
-    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-    let workspace = window
-        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
-        .unwrap();
-    let multi_buffer = cx.update(|cx| MultiBuffer::build_simple("Buffer Contents!", cx));
-    let buffer_id = multi_buffer.read_with(cx, |multi_buffer, cx| {
-        multi_buffer
-            .all_buffers_iter()
-            .next()
-            .expect("Should have at least one buffer")
-            .read(cx)
-            .remote_id()
-    });
-    let cx = &mut VisualTestContext::from_window(*window, cx);
-    let editor = cx.new_window_entity(|window, cx| {
-        Editor::new(
-            EditorMode::full(),
-            multi_buffer,
-            Some(project.clone()),
-            window,
-            cx,
-        )
-    });
-
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace.add_item_to_active_pane(Box::new(editor.clone()), None, true, window, cx);
-    });
-
-    editor.update_in(cx, |editor, _, cx| {
-        editor.blame = Some(
-            cx.new(|cx| GitBlame::new(editor.buffer.clone(), project.clone(), false, true, cx)),
-        );
-        editor.show_blame_popover(
-            buffer_id,
-            &::git::blame::BlameEntry {
-                sha: "1b1b1b".parse().unwrap(),
-                range: 0..1,
-                original_line_number: 0,
-                author: None,
-                author_mail: None,
-                author_time: None,
-                author_tz: None,
-                committer_name: None,
-                committer_email: None,
-                committer_time: None,
-                committer_tz: None,
-                summary: None,
-                previous: None,
-                filename: String::new(),
-                boundary: false,
-            },
-            gpui::point(gpui::px(0.), gpui::px(0.)),
-            false,
-            cx,
-        );
-
-        assert!(editor.inline_blame_popover_show_task.is_some());
-        assert!(editor.inline_blame_popover.is_none());
-    });
-
-    workspace.update_in(cx, |workspace, window, cx| {
-        workspace.toggle_modal(window, cx, |_, cx| EmptyModalView::new(cx));
-    });
-
-    // Toggling a modal while the blame popover task is still pending should
-    // clear both the task and any rendered popover.
-    editor.update_in(cx, |editor, _, _| {
-        assert!(editor.inline_blame_popover.is_none());
-        assert!(editor.inline_blame_popover_show_task.is_none());
-    });
-}
-
 fn set_linked_edit_ranges(
     opening: (Point, Point),
     closing: (Point, Point),
@@ -42672,7 +42338,7 @@ fn assert_hunk_revert(
     cx: &mut EditorLspTestContext,
 ) {
     cx.set_state(not_reverted_text_with_selections);
-    cx.set_head_text(base_text);
+    cx.set_diff_base(base_text);
     cx.executor().run_until_parked();
 
     let actual_hunk_statuses_before = cx.update_editor(|editor, window, cx| {
@@ -45128,7 +44794,7 @@ async fn test_sticky_scroll_with_expanded_deleted_diff_hunks(
             })
     });
 
-    cx.set_head_text(diff_base);
+    cx.set_diff_base(diff_base);
     executor.run_until_parked();
 
     cx.update_editor(|editor, window, cx| {
@@ -49086,70 +48752,6 @@ comment */ˇ»;"#},
         assert_text_with_selections(editor, indoc! {r#"let arr = [«1, 2, 3]ˇ»;"#}, cx);
     });
 }
-
-#[gpui::test]
-async fn test_restore_and_next(cx: &mut TestAppContext) {
-    init_test(cx, |_| {});
-    let mut cx = EditorTestContext::new(cx).await;
-
-    let diff_base = r#"
-        one
-        two
-        three
-        four
-        five
-        "#
-    .unindent();
-
-    cx.set_state(
-        &r#"
-        ONE
-        two
-        ˇTHREE
-        four
-        FIVE
-        "#
-        .unindent(),
-    );
-    cx.set_head_text(&diff_base);
-
-    cx.update_editor(|editor, window, cx| {
-        editor.set_expand_all_diff_hunks(cx);
-        editor.restore_and_next(&Default::default(), window, cx);
-    });
-    cx.run_until_parked();
-
-    cx.assert_state_with_diff(
-        r#"
-        - one
-        + ONE
-          two
-          three
-          four
-        - ˇfive
-        + FIVE
-        "#
-        .unindent(),
-    );
-
-    cx.update_editor(|editor, window, cx| {
-        editor.restore_and_next(&Default::default(), window, cx);
-    });
-    cx.run_until_parked();
-
-    cx.assert_state_with_diff(
-        r#"
-        - one
-        + ONE
-          two
-          three
-          four
-          ˇfive
-        "#
-        .unindent(),
-    );
-}
-
 #[gpui::test]
 async fn test_align_selections(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
@@ -50179,15 +49781,9 @@ async fn setup_range_format_test(
     .await
 }
 
-/// Like `setup_range_format_test`, but backs the buffer with a FakeFs git
-/// repository so that `GitStore::get_unstaged_diff` returns a real diff.
-/// `head_content` sets the HEAD base, `index_content` sets the staged base.
-/// The buffer starts empty; the caller must `editor.set_text(...)` to set the
-/// working-tree content (the diff recomputes from buffer changes).
-async fn setup_range_format_test_with_git<'a>(
+async fn setup_range_format_test_with_base<'a>(
     cx: &'a mut TestAppContext,
-    head_content: &str,
-    index_content: &str,
+    base_content: &str,
 ) -> (
     Entity<Project>,
     Entity<Editor>,
@@ -50200,21 +49796,10 @@ async fn setup_range_format_test_with_git<'a>(
     fs.insert_tree(
         path!("/project"),
         json!({
-            ".git": {},
             "file.rs": "",
         }),
     )
     .await;
-
-    fs.set_head_for_repo(
-        std::path::Path::new(path!("/project/.git")),
-        &[("file.rs", head_content.to_string())],
-        "deadbeef",
-    );
-    fs.set_index_for_repo(
-        std::path::Path::new(path!("/project/.git")),
-        &[("file.rs", index_content.to_string())],
-    );
 
     let project = Project::test(fs, [path!("/project").as_ref()], cx).await;
 
@@ -50239,17 +49824,11 @@ async fn setup_range_format_test_with_git<'a>(
         .await
         .unwrap();
 
-    // Open the unstaged diff so GitStore tracks this buffer. Without this,
-    // `get_unstaged_diff` returns None and compute_format_target cannot
-    // produce range-based FormatTarget.
-    project
-        .update(cx, |project, cx| {
-            project.open_unstaged_diff(buffer.clone(), cx)
-        })
-        .await
-        .unwrap();
-
-    let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
+    let multi_buffer = cx.new(|cx| MultiBuffer::singleton(buffer.clone(), cx));
+    cx.update(|cx| {
+        crate::test::editor_test_context::attach_diff(&buffer, &multi_buffer, base_content, cx)
+    });
+    let buffer = multi_buffer;
     let (editor, cx) = cx.add_window_view(|window, cx| {
         build_editor_with_project(project.clone(), buffer, window, cx)
     });
@@ -50289,7 +49868,7 @@ async fn assert_range_format_merge(
 ) {
     let expected_requests = responses.len();
     let (project, editor, cx, fake_server) =
-        setup_range_format_test_with_git(cx, head_content, head_content).await;
+        setup_range_format_test_with_base(cx, head_content).await;
 
     update_test_language_settings(cx, &|settings| {
         settings.defaults.format_on_save = Some(FormatOnSave::Modifications);

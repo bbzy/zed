@@ -9,7 +9,7 @@ fn main() {
     };
 
     let _ = headless().run(|cx| {
-        let fs = fs::RealFs::new(None, cx.background_executor().clone());
+        let fs = fs::RealFs::new(cx.background_executor().clone());
         cx.background_spawn(async move {
             let timer = std::time::Instant::now();
             let result = fs.load_bytes(path_to_read.as_ref()).await;

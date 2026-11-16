@@ -24,7 +24,7 @@ impl VimTestContext {
             command_palette::init(cx);
             project_panel::init(cx);
             outline_panel::init(cx);
-            git_ui::init(cx);
+            diff_ui::init(cx);
             crate::init(cx);
             search::init(cx);
             theme_settings::init(theme::LoadThemes::JustBase, cx);

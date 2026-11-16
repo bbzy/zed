@@ -764,7 +764,7 @@ impl DapLogView {
             editor.set_show_code_actions(false, cx);
             editor.set_show_bookmarks(false, cx);
             editor.set_show_breakpoints(false, cx);
-            editor.set_show_git_diff_gutter(false, cx);
+            editor.set_show_diff_gutter(false, cx);
             editor.set_show_runnables(false, cx);
             editor.set_input_enabled(false);
             editor.set_use_autoclose(false);

@@ -274,14 +274,12 @@ impl ExtensionBuilder {
         grammar_metadata: &GrammarManifestEntry,
         clang_path: &Path,
     ) -> Result<()> {
-        let mut grammar_repo_dir = extension_dir.to_path_buf();
-        grammar_repo_dir.extend(["grammars", grammar_name]);
-
-        let mut grammar_wasm_path = grammar_repo_dir.clone();
-        grammar_wasm_path.set_extension("wasm");
+        let grammar_directory = extension_dir.join("grammars");
+        let grammar_repo_dir = grammar_directory.join(".kk-sources").join(grammar_name);
+        let grammar_wasm_path = grammar_directory.join(format!("{grammar_name}.wasm"));
 
         log::info!("checking out {grammar_name} parser");
-        self.checkout_repo(
+        Self::checkout_repo(
             &grammar_repo_dir,
             &grammar_metadata.repository,
             &grammar_metadata.rev,
@@ -332,77 +330,100 @@ impl ExtensionBuilder {
         Ok(())
     }
 
-    async fn checkout_repo(&self, directory: &Path, url: &str, rev: &str) -> Result<()> {
-        let git_dir = directory.join(".git");
-
-        if directory.exists() {
-            let remotes_output = util::command::new_command("git")
-                .arg("--git-dir")
-                .arg(&git_dir)
-                .args(["remote", "get-url", "origin"])
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .output()
-                .await?;
-            let has_remote = remotes_output.status.success()
-                && String::from_utf8_lossy(&remotes_output.stdout).trim() == url;
-            anyhow::ensure!(
-                has_remote,
-                "grammar directory {directory:?} already exists, but is not a git clone of '{url}'"
-            );
-        } else {
+    async fn checkout_repo(directory: &Path, url: &str, rev: &str) -> Result<()> {
+        if !directory.exists() {
             fs::create_dir_all(directory)
                 .with_context(|| format!("creating grammar directory {directory:?}"))?;
-            let init_output = util::command::new_command("git")
-                .arg("init")
-                .current_dir(directory)
-                .output()
+        }
+        if !directory.join(".kk").exists() {
+            Self::run_kk(directory, &["init", "."]).await?;
+        }
+        let remotes = Self::run_kk(directory, &["remote", "list"]).await?;
+        let remotes = std::str::from_utf8(&remotes).context("Invalid KK remote list")?;
+        if let Some(remote) = remotes
+            .lines()
+            .find_map(|line| line.strip_prefix("origin "))
+        {
+            let fetch_url = remote.split(" (push: ").next().unwrap_or(remote);
+            anyhow::ensure!(
+                fetch_url == url,
+                "grammar directory {directory:?} already uses a different remote: {fetch_url}"
+            );
+        } else {
+            Self::run_kk(directory, &["remote", "add", "origin", url]).await?;
+        }
+
+        let commit =
+            if matches!(rev.len(), 40 | 64) && rev.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                Self::run_kk(
+                    directory,
+                    &[
+                        "fetch", "--remote", "origin", "--commit", rev, "--depth", "1",
+                    ],
+                )
                 .await?;
-            anyhow::ensure!(
-                init_output.status.success(),
-                "failed to run `git init` in directory {directory:?}"
-            );
-
-            let remote_add_output = util::command::new_command("git")
-                .arg("--git-dir")
-                .arg(&git_dir)
-                .args(["remote", "add", "origin", url])
-                .output()
-                .await
-                .context("executing `git remote add`")?;
-            anyhow::ensure!(
-                remote_add_output.status.success(),
-                "failed to add remote {url} for git repository {git_dir:?}"
-            );
-        }
-
-        let fetch_output = util::command::new_command("git")
-            .arg("--git-dir")
-            .arg(&git_dir)
-            .args(["fetch", "--depth", "1", "origin", rev])
-            .output()
-            .await
-            .context("executing `git fetch`")?;
-
-        let checkout_output = util::command::new_command("git")
-            .arg("--git-dir")
-            .arg(&git_dir)
-            .args(["checkout", rev])
-            .current_dir(directory)
-            .output()
-            .await
-            .context("executing `git checkout`")?;
-        if !checkout_output.status.success() {
-            anyhow::ensure!(
-                fetch_output.status.success(),
-                "failed to fetch revision {rev} in directory {directory:?}"
-            );
-            anyhow::bail!(
-                "failed to checkout revision {rev} in directory {directory:?}: {}",
-                String::from_utf8_lossy(&checkout_output.stderr)
-            );
-        }
-
+                rev.to_owned()
+            } else {
+                let pattern = format!("exact:{rev}");
+                Self::run_kk(
+                    directory,
+                    &[
+                        "fetch", "--remote", "origin", "--branch", &pattern, "--tag", &pattern,
+                        "--depth", "1",
+                    ],
+                )
+                .await?;
+                let revision = serde_json::to_string(rev)?;
+                let remote_revision = format!("present({revision}@origin)");
+                let resolved = Self::run_kk(
+                    directory,
+                    &[
+                        "log",
+                        "-r",
+                        &remote_revision,
+                        "--no-graph",
+                        "-T",
+                        "commit_id",
+                    ],
+                )
+                .await?;
+                if resolved.is_empty() {
+                    let tag_revision = format!("tags({revision})");
+                    String::from_utf8(
+                        Self::run_kk(
+                            directory,
+                            &["log", "-r", &tag_revision, "--no-graph", "-T", "commit_id"],
+                        )
+                        .await?,
+                    )?
+                } else {
+                    String::from_utf8(resolved)?
+                }
+            };
+        anyhow::ensure!(
+            matches!(commit.len(), 40 | 64) && commit.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "Unable to resolve grammar revision {rev} from {url}"
+        );
+        Self::run_kk(directory, &["new", &commit]).await?;
         Ok(())
+    }
+
+    async fn run_kk(directory: &Path, arguments: &[&str]) -> Result<Vec<u8>> {
+        let output = util::command::new_command("kk")
+            .args(["--color", "never", "--no-pager"])
+            .args(arguments)
+            .current_dir(directory)
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output()
+            .await
+            .with_context(|| format!("running KK in {directory:?}"))?;
+        anyhow::ensure!(
+            output.status.success(),
+            "KK failed in {directory:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(output.stdout)
     }
 
     async fn install_rust_wasm_target_if_needed(&self) -> Result<()> {
@@ -682,6 +703,7 @@ mod tests {
         time::Duration,
     };
 
+    use anyhow::Context as _;
     use gpui::TestAppContext;
     use indoc::indoc;
 
@@ -689,6 +711,57 @@ mod tests {
         ExtensionManifest, ExtensionSnippets,
         extension_builder::{file_newer_than_deps, installed_wasi_sdk_version},
     };
+
+    #[test]
+    fn grammar_checkout_uses_exact_kk_revision() -> anyhow::Result<()> {
+        futures::executor::block_on(async {
+            use super::ExtensionBuilder;
+
+            let directory = tempfile::tempdir()?;
+            let origin = directory.path().join("origin");
+            std::fs::create_dir(&origin)?;
+            ExtensionBuilder::run_kk(&origin, &["init", "."]).await?;
+            std::fs::write(origin.join("parser.c"), b"first parser")?;
+            let first = String::from_utf8(
+                ExtensionBuilder::run_kk(
+                    &origin,
+                    &["log", "-r", "@", "--no-graph", "-T", "commit_id"],
+                )
+                .await?,
+            )?;
+            ExtensionBuilder::run_kk(&origin, &["new"]).await?;
+            std::fs::write(origin.join("parser.c"), b"second parser")?;
+            let second = String::from_utf8(
+                ExtensionBuilder::run_kk(
+                    &origin,
+                    &["log", "-r", "@", "--no-graph", "-T", "commit_id"],
+                )
+                .await?,
+            )?;
+            let remote = origin.join(".kk/repo/store/git");
+            let remote = remote.to_str().context("Non-UTF-8 fixture path")?;
+            let checkout = directory.path().join("grammar");
+            ExtensionBuilder::checkout_repo(&checkout, remote, &first).await?;
+            assert_eq!(std::fs::read(checkout.join("parser.c"))?, b"first parser");
+            assert!(checkout.join(".kk").is_dir());
+            assert!(!checkout.join(".git").exists());
+            ExtensionBuilder::checkout_repo(&checkout, remote, &second).await?;
+            assert_eq!(std::fs::read(checkout.join("parser.c"))?, b"second parser");
+            ExtensionBuilder::checkout_repo(&checkout, remote, &first).await?;
+            assert_eq!(std::fs::read(checkout.join("parser.c"))?, b"first parser");
+            assert!(
+                ExtensionBuilder::checkout_repo(&checkout, "different-remote", &first)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                ExtensionBuilder::checkout_repo(&checkout, remote, "missing-revision")
+                    .await
+                    .is_err()
+            );
+            Ok(())
+        })
+    }
 
     #[test]
     fn test_file_newer_than_deps() {

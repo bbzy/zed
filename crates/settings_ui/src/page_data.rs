@@ -74,7 +74,6 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
         panels_page(),
         debugger_page(),
         terminal_page(),
-        version_control_page(),
         collaboration_page(),
         ai_page(cx),
         network_page(),
@@ -2497,18 +2496,18 @@ fn editor_page() -> SettingsPage {
             }),
             SettingsPageItem::DynamicItem(DynamicItem {
                 discriminant: SettingItem {
-                    title: "Git Gutter Width",
-                    description: "Width of the git diff indicators in the gutter. Default scales with the buffer font size.",
+                    title: "Diff Gutter Width",
+                    description: "Width of the diff indicators in the gutter. Default scales with the buffer font size.",
                     field: Box::new(SettingField {
                         organization_override: None,
-                        json_path: Some("gutter.git_gutter_width$"),
+                        json_path: Some("gutter.diff_gutter_width$"),
                         pick: |settings_content| {
                             Some(
-                                &dynamic_variants::<settings::GitGutterWidth>()[settings_content
+                                &dynamic_variants::<settings::DiffGutterWidth>()[settings_content
                                     .editor
                                     .gutter
                                     .as_ref()?
-                                    .git_gutter_width
+                                    .diff_gutter_width
                                     .as_ref()?
                                     .discriminant()
                                     as usize],
@@ -2516,18 +2515,18 @@ fn editor_page() -> SettingsPage {
                         },
                         write: |settings_content, value, _| {
                             let gutter = settings_content.editor.gutter.get_or_insert_default();
-                            gutter.git_gutter_width = value.map(|value| match value {
-                                settings::GitGutterWidthDiscriminants::Default => {
-                                    settings::GitGutterWidth::Default
+                            gutter.diff_gutter_width = value.map(|value| match value {
+                                settings::DiffGutterWidthDiscriminants::Default => {
+                                    settings::DiffGutterWidth::Default
                                 }
-                                settings::GitGutterWidthDiscriminants::Custom => {
-                                    let width = match gutter.git_gutter_width {
-                                        Some(settings::GitGutterWidth::Custom(width)) => {
+                                settings::DiffGutterWidthDiscriminants::Custom => {
+                                    let width = match gutter.diff_gutter_width {
+                                        Some(settings::DiffGutterWidth::Custom(width)) => {
                                             settings::PixelSetting(*width)
                                         }
                                         _ => settings::PixelSetting(3.0),
                                     };
-                                    settings::GitGutterWidth::Custom(width)
+                                    settings::DiffGutterWidth::Custom(width)
                                 }
                             });
                         },
@@ -2541,41 +2540,41 @@ fn editor_page() -> SettingsPage {
                             .editor
                             .gutter
                             .as_ref()?
-                            .git_gutter_width
+                            .diff_gutter_width
                             .as_ref()?
                             .discriminant() as usize,
                     )
                 },
-                fields: dynamic_variants::<settings::GitGutterWidth>()
+                fields: dynamic_variants::<settings::DiffGutterWidth>()
                     .into_iter()
                     .map(|variant| match variant {
-                        settings::GitGutterWidthDiscriminants::Default => vec![],
-                        settings::GitGutterWidthDiscriminants::Custom => vec![SettingItem {
+                        settings::DiffGutterWidthDiscriminants::Default => vec![],
+                        settings::DiffGutterWidthDiscriminants::Custom => vec![SettingItem {
                             files: USER,
                             title: "Custom Width",
-                            description: "Width in pixels of the git diff indicators.",
+                            description: "Width in pixels of the diff indicators.",
                             field: Box::new(SettingField {
                                 organization_override: None,
-                                json_path: Some("gutter.git_gutter_width"),
+                                json_path: Some("gutter.diff_gutter_width"),
                                 pick: |settings_content| match settings_content
                                     .editor
                                     .gutter
                                     .as_ref()
-                                    .and_then(|gutter| gutter.git_gutter_width.as_ref())
+                                    .and_then(|gutter| gutter.diff_gutter_width.as_ref())
                                 {
-                                    Some(settings::GitGutterWidth::Custom(value)) => Some(value),
+                                    Some(settings::DiffGutterWidth::Custom(value)) => Some(value),
                                     _ => None,
                                 },
                                 write: |settings_content, value, _| {
                                     let Some(value) = value else {
                                         return;
                                     };
-                                    if let Some(settings::GitGutterWidth::Custom(width)) =
+                                    if let Some(settings::DiffGutterWidth::Custom(width)) =
                                         settings_content
                                             .editor
                                             .gutter
                                             .as_mut()
-                                            .and_then(|gutter| gutter.git_gutter_width.as_mut())
+                                            .and_then(|gutter| gutter.diff_gutter_width.as_mut())
                                     {
                                         *width = value;
                                     }
@@ -2647,25 +2646,20 @@ fn editor_page() -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
-                title: "Git Diff",
-                description: "Show Git diff indicators in the scrollbar.",
+                title: "Diff",
+                description: "Show diff indicators in the scrollbar.",
                 field: Box::new(SettingField {
                     organization_override: None,
-                    json_path: Some("scrollbar.git_diff"),
+                    json_path: Some("scrollbar.diff"),
                     pick: |settings_content| {
-                        settings_content
-                            .editor
-                            .scrollbar
-                            .as_ref()?
-                            .git_diff
-                            .as_ref()
+                        settings_content.editor.scrollbar.as_ref()?.diff.as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content
                             .editor
                             .scrollbar
                             .get_or_insert_default()
-                            .git_diff = value;
+                            .diff = value;
                     },
                 }),
                 metadata: None,
@@ -4094,7 +4088,7 @@ fn search_and_files_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "File Scan Depth",
-                description: "Maximum directory depth to eagerly index outside of git repositories; contents of directories at this depth or deeper are indexed on demand. Repositories rooted shallower than this depth are always indexed fully. In projects that are not rooted at a git repository, repositories directly inside a root folder activate their git features immediately; deeper ones activate on first use. 0 means no limit and activates all git repositories immediately",
+                description: "Maximum directory depth to eagerly index outside of git repositories; contents of directories at this depth or deeper are indexed on demand. Repositories rooted shallower than this depth are always indexed fully. 0 means no depth limit.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("file_scan_depth"),
@@ -4423,78 +4417,9 @@ fn window_and_layout_page() -> SettingsPage {
         ]
     }
 
-    fn title_bar_section() -> [SettingsPageItem; 12] {
+    fn title_bar_section() -> [SettingsPageItem; 9] {
         [
             SettingsPageItem::SectionHeader("Title Bar"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Show Branch Status Icon",
-                description: "Show git status indicators on the branch icon in the titlebar.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("title_bar.show_branch_status_icon"),
-                    pick: |settings_content| {
-                        settings_content
-                            .title_bar
-                            .as_ref()?
-                            .show_branch_status_icon
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .title_bar
-                            .get_or_insert_default()
-                            .show_branch_status_icon = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Show Branch Name",
-                description: "Show the branch name button in the titlebar.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("title_bar.show_branch_name"),
-                    pick: |settings_content| {
-                        settings_content
-                            .title_bar
-                            .as_ref()?
-                            .show_branch_name
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .title_bar
-                            .get_or_insert_default()
-                            .show_branch_name = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Show Worktree Name",
-                description: "Show the worktree name button in the titlebar.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("title_bar.show_worktree_name"),
-                    pick: |settings_content| {
-                        settings_content
-                            .title_bar
-                            .as_ref()?
-                            .show_worktree_name
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .title_bar
-                            .get_or_insert_default()
-                            .show_worktree_name = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Show Project Items",
                 description: "Show the project host and name in the titlebar.",
@@ -4761,7 +4686,7 @@ fn window_and_layout_page() -> SettingsPage {
         ]
     }
 
-    fn tab_bar_section() -> [SettingsPageItem; 9] {
+    fn tab_bar_section() -> [SettingsPageItem; 8] {
         [
             SettingsPageItem::SectionHeader("Tab Bar"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -4773,20 +4698,6 @@ fn window_and_layout_page() -> SettingsPage {
                     pick: |settings_content| settings_content.tab_bar.as_ref()?.show.as_ref(),
                     write: |settings_content, value, _| {
                         settings_content.tab_bar.get_or_insert_default().show = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Show Git Status In Tabs",
-                description: "Show the Git file status on a tab item.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("tabs.git_status"),
-                    pick: |settings_content| settings_content.tabs.as_ref()?.git_status.as_ref(),
-                    write: |settings_content, value, _| {
-                        settings_content.tabs.get_or_insert_default().git_status = value;
                     },
                 }),
                 metadata: None,
@@ -5494,7 +5405,7 @@ fn window_and_layout_page() -> SettingsPage {
 }
 
 fn panels_page() -> SettingsPage {
-    fn project_panel_section() -> [SettingsPageItem; 30] {
+    fn project_panel_section() -> [SettingsPageItem; 28] {
         [
             SettingsPageItem::SectionHeader("Project Panel"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -5722,25 +5633,6 @@ fn panels_page() -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
-                title: "Git Status",
-                description: "Show the Git status in the project panel.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("project_panel.git_status"),
-                    pick: |settings_content| {
-                        settings_content.project_panel.as_ref()?.git_status.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .project_panel
-                            .get_or_insert_default()
-                            .git_status = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
                 title: "Indent Size",
                 description: "Amount of indentation for nested items.",
                 field: Box::new(SettingField {
@@ -5952,29 +5844,6 @@ fn panels_page() -> SettingsPage {
                             .project_panel
                             .get_or_insert_default()
                             .diagnostic_badges = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Git Status Indicator",
-                description: "Show a git status indicator next to file names in the project panel.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("project_panel.git_status_indicator"),
-                    pick: |settings_content| {
-                        settings_content
-                            .project_panel
-                            .as_ref()?
-                            .git_status_indicator
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .project_panel
-                            .get_or_insert_default()
-                            .git_status_indicator = value;
                     },
                 }),
                 metadata: None,
@@ -6312,7 +6181,7 @@ fn panels_page() -> SettingsPage {
         ]
     }
 
-    fn outline_panel_section() -> [SettingsPageItem; 12] {
+    fn outline_panel_section() -> [SettingsPageItem; 11] {
         [
             SettingsPageItem::SectionHeader("Outline Panel"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -6408,25 +6277,6 @@ fn panels_page() -> SettingsPage {
                             .outline_panel
                             .get_or_insert_default()
                             .folder_indicator = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Git Status",
-                description: "Show the Git status in the outline panel.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("outline_panel.git_status"),
-                    pick: |settings_content| {
-                        settings_content.outline_panel.as_ref()?.git_status.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .outline_panel
-                            .get_or_insert_default()
-                            .git_status = value;
                     },
                 }),
                 metadata: None,
@@ -6546,365 +6396,6 @@ fn panels_page() -> SettingsPage {
                             .outline_panel
                             .get_or_insert_default()
                             .multi_buffer_hide_symbols = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-        ]
-    }
-
-    fn git_panel_section() -> [SettingsPageItem; 19] {
-        [
-            SettingsPageItem::SectionHeader("Git Panel"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Git Panel Button",
-                description: "Show the Git panel button in the status bar.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git_panel.button"),
-                    pick: |settings_content| settings_content.git_panel.as_ref()?.button.as_ref(),
-                    write: |settings_content, value, _| {
-                        settings_content.git_panel.get_or_insert_default().button = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Git Panel Dock",
-                description: "Where to dock the Git panel.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git_panel.dock"),
-                    pick: |settings_content| settings_content.git_panel.as_ref()?.dock.as_ref(),
-                    write: |settings_content, value, _| {
-                        settings_content.git_panel.get_or_insert_default().dock = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Starts Open",
-                description: "Whether the git panel should open on startup.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git_panel.starts_open"),
-                    pick: |settings_content| {
-                        settings_content.git_panel.as_ref()?.starts_open.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git_panel
-                            .get_or_insert_default()
-                            .starts_open = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Git Panel Default Width",
-                description: "Default width of the Git panel in pixels.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git_panel.default_width"),
-                    pick: |settings_content| {
-                        settings_content.git_panel.as_ref()?.default_width.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git_panel
-                            .get_or_insert_default()
-                            .default_width = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Git Panel Status Style",
-                description: "How entry statuses are displayed.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git_panel.status_style"),
-                    pick: |settings_content| {
-                        settings_content.git_panel.as_ref()?.status_style.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git_panel
-                            .get_or_insert_default()
-                            .status_style = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Fallback Branch Name",
-                description: "Default branch name will be when init.defaultbranch is not set in Git.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git_panel.fallback_branch_name"),
-                    pick: |settings_content| {
-                        settings_content
-                            .git_panel
-                            .as_ref()?
-                            .fallback_branch_name
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git_panel
-                            .get_or_insert_default()
-                            .fallback_branch_name = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Sort By",
-                description: "How to sort entries in the git panel.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git_panel.sort_by"),
-                    pick: |settings_content| settings_content.git_panel.as_ref()?.sort_by.as_ref(),
-                    write: |settings_content, value, _| {
-                        settings_content.git_panel.get_or_insert_default().sort_by = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Group By",
-                description: "How to group entries in the git panel.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git_panel.group_by"),
-                    pick: |settings_content| settings_content.git_panel.as_ref()?.group_by.as_ref(),
-                    write: |settings_content, value, _| {
-                        settings_content.git_panel.get_or_insert_default().group_by = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Collapse Untracked Diff",
-                description: "Whether to collapse untracked files in the diff panel.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git_panel.collapse_untracked_diff"),
-                    pick: |settings_content| {
-                        settings_content
-                            .git_panel
-                            .as_ref()?
-                            .collapse_untracked_diff
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git_panel
-                            .get_or_insert_default()
-                            .collapse_untracked_diff = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Tree View",
-                description: "Enable to show entries in tree view list, disable to show in flat view list.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git_panel.tree_view"),
-                    pick: |settings_content| {
-                        settings_content.git_panel.as_ref()?.tree_view.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content.git_panel.get_or_insert_default().tree_view = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "File Icons",
-                description: "Show file icons next to the Git status icon.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git_panel.file_icons"),
-                    pick: |settings_content| {
-                        settings_content.git_panel.as_ref()?.file_icons.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git_panel
-                            .get_or_insert_default()
-                            .file_icons = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Folder Indicator",
-                description: "What to show for directories in the git panel.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git_panel.folder_indicator"),
-                    pick: |settings_content| {
-                        settings_content
-                            .git_panel
-                            .as_ref()?
-                            .folder_indicator
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git_panel
-                            .get_or_insert_default()
-                            .folder_indicator = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Diff Stats",
-                description: "Whether to show the addition/deletion change count next to each file in the Git panel.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git_panel.diff_stats"),
-                    pick: |settings_content| {
-                        settings_content.git_panel.as_ref()?.diff_stats.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git_panel
-                            .get_or_insert_default()
-                            .diff_stats = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Primary Click Behavior",
-                description: "Default action when clicking a changed file in the Git panel.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git_panel.entry_primary_click_action"),
-                    pick: |settings_content| {
-                        settings_content
-                            .git_panel
-                            .as_ref()?
-                            .entry_primary_click_action
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git_panel
-                            .get_or_insert_default()
-                            .entry_primary_click_action = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Commit Editor",
-                description: "Whether the commit message editor is shown in the Git panel by default.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git_panel.commit_editor"),
-                    pick: |settings_content| {
-                        settings_content.git_panel.as_ref()?.commit_editor.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git_panel
-                            .get_or_insert_default()
-                            .commit_editor = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Show Count Badge",
-                description: "Whether to show a badge on the git panel icon with the count of uncommitted changes.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git_panel.show_count_badge"),
-                    pick: |settings_content| {
-                        settings_content
-                            .git_panel
-                            .as_ref()?
-                            .show_count_badge
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git_panel
-                            .get_or_insert_default()
-                            .show_count_badge = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Commit Title Max Length",
-                description: "Maximum length of the commit message title before a warning is shown. Set to 0 to disable.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git_panel.commit_title_max_length"),
-                    pick: |settings_content| {
-                        settings_content
-                            .git_panel
-                            .as_ref()?
-                            .commit_title_max_length
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git_panel
-                            .get_or_insert_default()
-                            .commit_title_max_length = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Scroll Bar",
-                description: "How and when the scrollbar should be displayed.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git_panel.scrollbar.show"),
-                    pick: |settings_content| {
-                        show_scrollbar_or_editor(settings_content, |settings_content| {
-                            settings_content
-                                .git_panel
-                                .as_ref()?
-                                .scrollbar
-                                .as_ref()?
-                                .show
-                                .as_ref()
-                        })
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git_panel
-                            .get_or_insert_default()
-                            .scrollbar
-                            .get_or_insert_default()
-                            .show = value;
                     },
                 }),
                 metadata: None,
@@ -7186,7 +6677,6 @@ fn panels_page() -> SettingsPage {
             project_panel_section(),
             terminal_panel_section(),
             outline_panel_section(),
-            git_panel_section(),
             debugger_panel_section(),
             collaboration_panel_section(),
             agent_panel_section(),
@@ -8188,586 +7678,6 @@ fn terminal_page() -> SettingsPage {
             advanced_settings_section(),
             toolbar_section(),
             scrollbar_section(),
-        ],
-    }
-}
-
-fn version_control_page() -> SettingsPage {
-    fn git_integration_section() -> [SettingsPageItem; 3] {
-        [
-            SettingsPageItem::SectionHeader("Git Integration"),
-            SettingsPageItem::DynamicItem(DynamicItem {
-                discriminant: SettingItem {
-                    files: USER,
-                    title: "Disable Git Integration",
-                    description: "Disable all Git integration features in Zed.",
-                    field: Box::new(SettingField::<bool> {
-                        organization_override: None,
-                        json_path: Some("git.disable_git"),
-                        pick: |settings_content| {
-                            settings_content
-                                .git
-                                .as_ref()?
-                                .enabled
-                                .as_ref()?
-                                .disable_git
-                                .as_ref()
-                        },
-                        write: |settings_content, value, _| {
-                            settings_content
-                                .git
-                                .get_or_insert_default()
-                                .enabled
-                                .get_or_insert_default()
-                                .disable_git = value;
-                        },
-                    }),
-                    metadata: None,
-                },
-                pick_discriminant: |settings_content| {
-                    let disabled = settings_content
-                        .git
-                        .as_ref()?
-                        .enabled
-                        .as_ref()?
-                        .disable_git
-                        .unwrap_or(false);
-                    Some(if disabled { 0 } else { 1 })
-                },
-                fields: vec![
-                    vec![],
-                    vec![
-                        SettingItem {
-                            files: USER,
-                            title: "Enable Git Status",
-                            description: "Show Git status information in the editor.",
-                            field: Box::new(SettingField::<bool> {
-                                organization_override: None,
-                                json_path: Some("git.enable_status"),
-                                pick: |settings_content| {
-                                    settings_content
-                                        .git
-                                        .as_ref()?
-                                        .enabled
-                                        .as_ref()?
-                                        .enable_status
-                                        .as_ref()
-                                },
-                                write: |settings_content, value, _| {
-                                    settings_content
-                                        .git
-                                        .get_or_insert_default()
-                                        .enabled
-                                        .get_or_insert_default()
-                                        .enable_status = value;
-                                },
-                            }),
-                            metadata: None,
-                        },
-                        SettingItem {
-                            files: USER,
-                            title: "Enable Git Diff",
-                            description: "Show Git diff information in the editor.",
-                            field: Box::new(SettingField::<bool> {
-                                organization_override: None,
-                                json_path: Some("git.enable_diff"),
-                                pick: |settings_content| {
-                                    settings_content
-                                        .git
-                                        .as_ref()?
-                                        .enabled
-                                        .as_ref()?
-                                        .enable_diff
-                                        .as_ref()
-                                },
-                                write: |settings_content, value, _| {
-                                    settings_content
-                                        .git
-                                        .get_or_insert_default()
-                                        .enabled
-                                        .get_or_insert_default()
-                                        .enable_diff = value;
-                                },
-                            }),
-                            metadata: None,
-                        },
-                    ],
-                ],
-            }),
-            SettingsPageItem::DynamicItem(DynamicItem {
-                discriminant: SettingItem {
-                    files: USER,
-                    title: "Auto Fetch",
-                    description: "Automatically fetch the default branch's remote and the current branch's upstream remote.",
-                    field: Box::new(SettingField::<bool> {
-                        organization_override: None,
-                        json_path: Some("git.auto_fetch.enabled"),
-                        pick: |settings_content| {
-                            settings_content
-                                .git
-                                .as_ref()?
-                                .auto_fetch
-                                .as_ref()?
-                                .enabled
-                                .as_ref()
-                        },
-                        write: |settings_content, value, _| {
-                            settings_content
-                                .git
-                                .get_or_insert_default()
-                                .auto_fetch
-                                .get_or_insert_default()
-                                .enabled = value;
-                        },
-                    }),
-                    metadata: None,
-                },
-                pick_discriminant: |settings_content| {
-                    Some(
-                        *settings_content
-                            .git
-                            .as_ref()?
-                            .auto_fetch
-                            .as_ref()?
-                            .enabled
-                            .as_ref()? as usize,
-                    )
-                },
-                fields: vec![
-                    vec![],
-                    vec![SettingItem {
-                        files: USER,
-                        title: "Auto Fetch Interval",
-                        description: "How long to wait between automatic fetches, in seconds. (min: 15)",
-                        field: Box::new(SettingField::<u64> {
-                            organization_override: None,
-                            json_path: Some("git.auto_fetch.interval_secs"),
-                            pick: |settings_content| {
-                                settings_content
-                                    .git
-                                    .as_ref()?
-                                    .auto_fetch
-                                    .as_ref()?
-                                    .interval_secs
-                                    .as_ref()
-                            },
-                            write: |settings_content, value, _| {
-                                settings_content
-                                    .git
-                                    .get_or_insert_default()
-                                    .auto_fetch
-                                    .get_or_insert_default()
-                                    .interval_secs = value;
-                            },
-                        }),
-                        metadata: None,
-                    }],
-                ],
-            }),
-        ]
-    }
-
-    fn git_gutter_section() -> [SettingsPageItem; 3] {
-        [
-            SettingsPageItem::SectionHeader("Git Gutter"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Visibility",
-                description: "Control whether Git status is shown in the editor's gutter.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git.git_gutter"),
-                    pick: |settings_content| settings_content.git.as_ref()?.git_gutter.as_ref(),
-                    write: |settings_content, value, _| {
-                        settings_content.git.get_or_insert_default().git_gutter = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            // todo(settings_ui): Figure out the right default for this value in default.json
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Debounce",
-                description: "Debounce threshold in milliseconds after which changes are reflected in the Git gutter.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git.gutter_debounce"),
-                    pick: |settings_content| {
-                        settings_content.git.as_ref()?.gutter_debounce.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content.git.get_or_insert_default().gutter_debounce = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-        ]
-    }
-
-    fn inline_git_blame_section() -> [SettingsPageItem; 6] {
-        [
-            SettingsPageItem::SectionHeader("Inline Git Blame"),
-            SettingsPageItem::DynamicItem(DynamicItem {
-                discriminant: SettingItem {
-                    title: "Enabled",
-                    description: "Whether or not to show Git blame data for the currently focused line.",
-                    field: Box::new(SettingField {
-                        organization_override: None,
-                        json_path: Some("git.inline_blame.enabled"),
-                        pick: |settings_content| {
-                            settings_content
-                                .git
-                                .as_ref()?
-                                .inline_blame
-                                .as_ref()?
-                                .enabled
-                                .as_ref()
-                        },
-                        write: |settings_content, value, _| {
-                            settings_content
-                                .git
-                                .get_or_insert_default()
-                                .inline_blame
-                                .get_or_insert_default()
-                                .enabled = value;
-                        },
-                    }),
-                    metadata: None,
-                    files: USER,
-                },
-                pick_discriminant: |settings_content| {
-                    Some(
-                        *settings_content
-                            .git
-                            .as_ref()?
-                            .inline_blame
-                            .as_ref()?
-                            .enabled
-                            .as_ref()? as usize,
-                    )
-                },
-                fields: vec![
-                    vec![],
-                    vec![SettingItem {
-                        title: "Location",
-                        description: "Where to render Git blame when it is enabled.",
-                        field: Box::new(SettingField {
-                            organization_override: None,
-                            json_path: Some("git.inline_blame.location"),
-                            pick: |settings_content| {
-                                settings_content
-                                    .git
-                                    .as_ref()?
-                                    .inline_blame
-                                    .as_ref()?
-                                    .location
-                                    .as_ref()
-                            },
-                            write: |settings_content, value, _| {
-                                settings_content
-                                    .git
-                                    .get_or_insert_default()
-                                    .inline_blame
-                                    .get_or_insert_default()
-                                    .location = value;
-                            },
-                        }),
-                        metadata: None,
-                        files: USER,
-                    }],
-                ],
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Delay",
-                description: "The delay after which the inline blame information is shown.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git.inline_blame.delay_ms"),
-                    pick: |settings_content| {
-                        settings_content
-                            .git
-                            .as_ref()?
-                            .inline_blame
-                            .as_ref()?
-                            .delay_ms
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git
-                            .get_or_insert_default()
-                            .inline_blame
-                            .get_or_insert_default()
-                            .delay_ms = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Padding",
-                description: "Padding between the end of the source line and the start of the inline blame in columns.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git.inline_blame.padding"),
-                    pick: |settings_content| {
-                        settings_content
-                            .git
-                            .as_ref()?
-                            .inline_blame
-                            .as_ref()?
-                            .padding
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git
-                            .get_or_insert_default()
-                            .inline_blame
-                            .get_or_insert_default()
-                            .padding = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Minimum Column",
-                description: "The minimum column number at which to show the inline blame information.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git.inline_blame.min_column"),
-                    pick: |settings_content| {
-                        settings_content
-                            .git
-                            .as_ref()?
-                            .inline_blame
-                            .as_ref()?
-                            .min_column
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git
-                            .get_or_insert_default()
-                            .inline_blame
-                            .get_or_insert_default()
-                            .min_column = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Show Commit Summary",
-                description: "Show commit summary as part of the inline blame.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git.inline_blame.show_commit_summary"),
-                    pick: |settings_content| {
-                        settings_content
-                            .git
-                            .as_ref()?
-                            .inline_blame
-                            .as_ref()?
-                            .show_commit_summary
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git
-                            .get_or_insert_default()
-                            .inline_blame
-                            .get_or_insert_default()
-                            .show_commit_summary = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-        ]
-    }
-
-    fn git_blame_view_section() -> [SettingsPageItem; 2] {
-        [
-            SettingsPageItem::SectionHeader("Git Blame View"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Show Avatar",
-                description: "Show the avatar of the author of the commit.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git.blame.show_avatar"),
-                    pick: |settings_content| {
-                        settings_content
-                            .git
-                            .as_ref()?
-                            .blame
-                            .as_ref()?
-                            .show_avatar
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git
-                            .get_or_insert_default()
-                            .blame
-                            .get_or_insert_default()
-                            .show_avatar = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-        ]
-    }
-
-    fn branch_picker_section() -> [SettingsPageItem; 2] {
-        [
-            SettingsPageItem::SectionHeader("Branch Picker"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Show Author Name",
-                description: "Show author name as part of the commit information in branch picker.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git.branch_picker.show_author_name"),
-                    pick: |settings_content| {
-                        settings_content
-                            .git
-                            .as_ref()?
-                            .branch_picker
-                            .as_ref()?
-                            .show_author_name
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git
-                            .get_or_insert_default()
-                            .branch_picker
-                            .get_or_insert_default()
-                            .show_author_name = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-        ]
-    }
-
-    fn git_hunks_section() -> [SettingsPageItem; 5] {
-        [
-            SettingsPageItem::SectionHeader("Git Hunks"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Hunk Style",
-                description: "How Git hunks are displayed visually in the editor.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git.hunk_style"),
-                    pick: |settings_content| settings_content.git.as_ref()?.hunk_style.as_ref(),
-                    write: |settings_content, value, _| {
-                        settings_content.git.get_or_insert_default().hunk_style = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Diff Base",
-                description: "Whether git features show changes relative to HEAD (uncommitted changes) or to the default branch (all changes on the current branch).",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git.diff_base"),
-                    pick: |settings_content| settings_content.git.as_ref()?.diff_base.as_ref(),
-                    write: |settings_content, value, _| {
-                        settings_content.git.get_or_insert_default().diff_base = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Path Style",
-                description: "Should the name or path be displayed first in the git view.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git.path_style"),
-                    pick: |settings_content| settings_content.git.as_ref()?.path_style.as_ref(),
-                    write: |settings_content, value, _| {
-                        settings_content.git.get_or_insert_default().path_style = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Show Stage/Restore Buttons",
-                description: "Whether to show the stage and restore buttons on diff hunks.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git.show_stage_restore_buttons"),
-                    pick: |settings_content| {
-                        settings_content
-                            .git
-                            .as_ref()?
-                            .show_stage_restore_buttons
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git
-                            .get_or_insert_default()
-                            .show_stage_restore_buttons = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-        ]
-    }
-
-    fn file_diff_section() -> [SettingsPageItem; 2] {
-        [
-            SettingsPageItem::SectionHeader("File Diff"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Show Full File by Default",
-                description: "Whether newly opened file diffs show the full file instead of changes only.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("git.file_diff.show_full_file"),
-                    pick: |settings_content| {
-                        settings_content
-                            .git
-                            .as_ref()?
-                            .file_diff
-                            .as_ref()?
-                            .show_full_file
-                            .as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content
-                            .git
-                            .get_or_insert_default()
-                            .file_diff
-                            .get_or_insert_default()
-                            .show_full_file = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-        ]
-    }
-
-    SettingsPage {
-        title: "Version Control",
-        items: concat_sections![
-            git_integration_section(),
-            git_gutter_section(),
-            inline_git_blame_section(),
-            git_blame_view_section(),
-            branch_picker_section(),
-            file_diff_section(),
-            git_hunks_section(),
         ],
     }
 }
@@ -9969,7 +8879,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             SettingsPageItem::SectionHeader("Formatting"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Format On Save",
-                description: "On: format the whole buffer.\nOff: do not format.\nModifications: format only lines with unstaged changes; skips formatting when a git diff or LSP range formatting is unavailable.\nModifications If Available: same, but falls back to formatting the whole buffer.",
+                description: "On: format the whole buffer.\nOff: do not format.\nModifications: format only lines with changes in the active comparison; skips formatting when an active comparison or LSP range formatting is unavailable.\nModifications If Available: same, but falls back to formatting the whole buffer.",
                 field: Box::new(
                     // TODO(settings_ui): this setting should just be a bool
                     SettingField {

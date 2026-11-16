@@ -578,7 +578,7 @@ impl HistoricalFileContent {
             snapshot.file_content(revision, path).await?
         };
         if let Some(pointer) = kk_workbench::LfsPointer::parse(&bytes) {
-            bytes = snapshot.repository().lfs_content(&pointer).await?;
+            bytes = snapshot.lfs_content(revision, path, &pointer).await?;
         }
 
         let image = !empty
@@ -1749,7 +1749,7 @@ mod tests {
                     window,
                     cx,
                 )
-                .git_blame_entries_width
+                .annotation_width
                 .expect("native gutter allocates annotation width")
         });
         assert!(width > gpui::px(100.));

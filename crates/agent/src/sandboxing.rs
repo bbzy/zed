@@ -47,9 +47,8 @@ pub fn sandbox_worktree_writable_paths(project: &Project, cx: &App) -> Vec<PathB
 }
 
 /// The candidate `.git` paths the sandbox protects for a project. Locating these
-/// requires Git knowledge the sandbox layer can't derive itself: a worktree's
-/// `.git`, a linked worktree's common dir (which lives outside the worktree),
-/// and every discovered repository's git/common dirs.
+/// includes `.git` files and their referenced directories, which may live
+/// outside the opened folder.
 pub fn sandbox_git_dirs(project: &Project, cx: &App) -> Vec<PathBuf> {
     let mut git_dirs = Vec::new();
 
@@ -67,16 +66,13 @@ pub fn sandbox_git_dirs(project: &Project, cx: &App) -> Vec<PathBuf> {
         // reports `NotADirectory`, and `SandboxWrap::to_policy` skips a
         // protected path that can't exist — so it never reaches enforcement.
         git_dirs.push(worktree_abs_path.join(".git"));
-        if let Some(root_repo_common_dir) = worktree.root_repo_common_dir() {
-            git_dirs.push(root_repo_common_dir.to_path_buf());
+        if let Some(local) = worktree.as_local() {
+            git_dirs.extend(
+                local
+                    .protected_metadata_paths()
+                    .map(|path| path.to_path_buf()),
+            );
         }
-    }
-
-    for repository in project.git_store().read(cx).repositories().values() {
-        let repository = repository.read(cx);
-        git_dirs.push(repository.dot_git_abs_path.to_path_buf());
-        git_dirs.push(repository.repository_dir_abs_path.to_path_buf());
-        git_dirs.push(repository.common_dir_abs_path.to_path_buf());
     }
 
     git_dirs.sort();

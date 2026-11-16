@@ -181,10 +181,6 @@ pub struct WorkspaceSettingsContent {
 #[with_fallible_options]
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct ItemSettingsContent {
-    /// Whether to show the Git file status on a tab item.
-    ///
-    /// Default: false
-    pub git_status: Option<bool>,
     /// Position of the close button in a tab.
     ///
     /// Default: right
@@ -849,10 +845,6 @@ pub struct ProjectPanelSettingsContent {
     ///
     /// Default: icon
     pub folder_indicator: Option<FolderIndicator>,
-    /// Whether to show the git status in the project panel.
-    ///
-    /// Default: true
-    pub git_status: Option<bool>,
     /// Amount of indentation (in pixels) for nested items.
     ///
     /// Default: 20
@@ -916,13 +908,9 @@ pub struct ProjectPanelSettingsContent {
     ///
     /// Default: false
     pub diagnostic_badges: Option<bool>,
-    /// Whether to show a git status indicator next to file names in the project panel.
-    ///
-    /// Default: false
-    pub git_status_indicator: Option<bool>,
 }
 
-/// Controls the width of the git diff hunk indicators in the gutter.
+/// Controls the width of the diff hunk indicators in the gutter.
 #[derive(
     Clone,
     Copy,

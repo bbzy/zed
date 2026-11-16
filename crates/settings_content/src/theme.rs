@@ -213,7 +213,6 @@ pub struct ThemeSettingsContent {
     pub agent_buffer_font_family: Option<FontFamilyName>,
     /// The font size for user messages in the agent panel.
     pub agent_buffer_font_size: Option<FontSize>,
-    pub git_commit_buffer_font_size: Option<FontSize>,
     /// The name of a font to use for rendering Mermaid diagrams in the agent
     /// panel and markdown preview. Falls back to the UI font if unset.
     pub mermaid_font_family: Option<FontFamilyName>,

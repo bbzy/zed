@@ -124,24 +124,6 @@ instead of move. You can also drag files from your operating system's file
 manager into the project panel to copy them into the project. Drag and drop can
 be disabled with the `project_panel.drag_and_drop` setting.
 
-## Git Integration
-
-When `project_panel.git_status` is enabled (the default), file and directory names are tinted
-to reflect their git status—modified, added, deleted, untracked, or conflicting.
-In projects that are not rooted at a git repository, status is shown only for
-[active repositories](./git.md#repository-activation).
-
-Setting `project_panel.git_status_indicator` to `true` (disabled by default) adds a letter badge next
-to each name: **M** (modified), **A** (added), **D** (deleted), **U**
-(untracked) or **!** (conflict).
-
-![Project Panel: Git Integration](https://images.zed.dev/docs/project-panel/git-status.png)
-
-Use {#action project_panel::SelectNextGitEntry} and {#action
-project_panel::SelectPrevGitEntry} to jump between tracked files with
-uncommitted changes. The right-click menu also offers **Restore File** to
-discard changes and **View File History** to browse a file's commit log.
-
 ## Diagnostics
 
 The `project_panel.show_diagnostics` setting controls whether error and warning

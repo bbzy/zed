@@ -26,7 +26,7 @@
   - [Tasks](./tasks.md)
   - [Debugger](./debugger.md)
   - [REPL](./repl.md)
-- [Git](./git.md)
+- [KK Workbench](./kk-workbench.md)
 - [Modelines](./modelines.md)
 
 # Collaboration

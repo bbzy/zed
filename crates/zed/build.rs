@@ -38,35 +38,43 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-weak_framework,ScreenCaptureKit");
     }
 
-    // Populate git sha environment variable if git is available
-    println!("cargo:rerun-if-changed=../../.git/logs/HEAD");
+    // Read the source revision without snapshotting the working copy.
+    println!("cargo:rerun-if-env-changed=ZED_COMMIT_SHA");
     println!(
         "cargo:rustc-env=TARGET={}",
         std::env::var("TARGET").unwrap()
     );
 
-    let git_sha = match std::env::var("ZED_COMMIT_SHA").ok() {
-        Some(git_sha) => {
+    let commit_sha = match std::env::var("ZED_COMMIT_SHA").ok() {
+        Some(commit_sha) => {
             // In deterministic build environments such as Nix, we inject the commit sha into the build script.
-            Some(git_sha)
+            Some(commit_sha)
         }
         None => {
-            if let Some(output) = Command::new("git")
-                .args(["rev-parse", "HEAD"])
+            if let Some(output) = Command::new("kk")
+                .args([
+                    "--ignore-working-copy",
+                    "log",
+                    "--no-graph",
+                    "-r",
+                    "@",
+                    "-T",
+                    "commit_id",
+                ])
                 .output()
                 .ok()
                 && output.status.success()
             {
-                let git_sha = String::from_utf8_lossy(&output.stdout);
-                Some(git_sha.trim().to_string())
+                let commit_sha = String::from_utf8_lossy(&output.stdout);
+                Some(commit_sha.trim().to_string())
             } else {
                 None
             }
         }
     };
 
-    if let Some(git_sha) = git_sha {
-        println!("cargo:rustc-env=ZED_COMMIT_SHA={git_sha}");
+    if let Some(commit_sha) = commit_sha {
+        println!("cargo:rustc-env=ZED_COMMIT_SHA={commit_sha}");
 
         if let Some(build_identifier) = option_env!("GITHUB_RUN_NUMBER") {
             println!("cargo:rustc-env=ZED_BUILD_ID={build_identifier}");
@@ -77,7 +85,7 @@ fn main() {
         {
             // This is currently the best way to make `cargo build ...`'s build script
             // to print something to stdout without extra verbosity.
-            println!("cargo::warning=Info: using '{git_sha}' hash for ZED_COMMIT_SHA env var");
+            println!("cargo::warning=Info: using '{commit_sha}' hash for ZED_COMMIT_SHA env var");
         }
     }
 

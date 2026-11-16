@@ -17,18 +17,26 @@ fn main() {
         std::env::var("TARGET").unwrap()
     );
 
-    // Populate git sha environment variable if git is available
-    println!("cargo:rerun-if-changed=../../.git/logs/HEAD");
-    if let Some(output) = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-    {
-        let git_sha = String::from_utf8_lossy(&output.stdout);
-        let git_sha = git_sha.trim();
-
-        println!("cargo:rustc-env=ZED_COMMIT_SHA={git_sha}");
+    // Read the source revision without snapshotting the working copy.
+    println!("cargo:rerun-if-env-changed=ZED_COMMIT_SHA");
+    let commit_sha = std::env::var("ZED_COMMIT_SHA").ok().or_else(|| {
+        Command::new("kk")
+            .args([
+                "--ignore-working-copy",
+                "log",
+                "--no-graph",
+                "-r",
+                "@",
+                "-T",
+                "commit_id",
+            ])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    });
+    if let Some(commit_sha) = commit_sha {
+        println!("cargo:rustc-env=ZED_COMMIT_SHA={commit_sha}");
     }
     if let Some(build_identifier) = option_env!("GITHUB_RUN_NUMBER") {
         println!("cargo:rustc-env=ZED_BUILD_ID={build_identifier}");

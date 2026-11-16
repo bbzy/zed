@@ -60,7 +60,7 @@ impl RemoteFixture {
             HeadlessProject::init(cx);
         });
         let (options, session, _) = RemoteClient::fake_server(cx, server_cx);
-        let server_fs = fs::RealFs::new(None, server_cx.executor());
+        let server_fs = fs::RealFs::new(server_cx.executor());
         let headless = server_cx.new(|cx| {
             HeadlessProject::new(
                 HeadlessAppState {

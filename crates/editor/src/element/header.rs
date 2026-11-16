@@ -2,9 +2,9 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::rc::Rc;
 
+use buffer_diff::FileStatus;
 use collections::HashMap;
 use file_icons::FileIcons;
-use git::status::FileStatus;
 use gpui::{
     Action, AnyElement, App, AvailableSpace, Bounds, ClickEvent, ClipboardItem, ContentMask,
     CursorStyle, DefiniteLength, Entity, Focusable as _, Hitbox, HitboxBehavior, Hsla, IntoElement,

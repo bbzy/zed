@@ -2071,10 +2071,7 @@ impl WorkspaceDb {
             }
 
             if Self::all_paths_exist_with_a_directory(paths.paths(), fs).await {
-                let identity_paths = resolve_local_workspace_identity(fs, &paths)
-                    .await
-                    .or(identity_paths_hint)
-                    .unwrap_or_else(|| paths.clone());
+                let identity_paths = identity_paths_hint.unwrap_or_else(|| paths.clone());
                 result.push(RecentWorkspace {
                     workspace_id: id,
                     location: SerializedWorkspaceLocation::Local,
@@ -2089,7 +2086,7 @@ impl WorkspaceDb {
     }
 
     // Returns the recent project workspaces suitable for recent-project UIs.
-    // Entries are deduplicated by git worktree identity, but preserve the original
+    // Entries are deduplicated by saved project identity, but preserve the original
     // serialized paths for reopening.
     pub async fn recent_project_workspaces(&self, fs: &dyn Fs) -> Result<Vec<RecentWorkspace>> {
         Ok(dedupe_recent_workspaces(
@@ -2704,34 +2701,6 @@ impl RecentWorkspace {
         ProjectGroupKey::new(host, self.identity_paths.clone())
     }
 }
-
-async fn resolve_local_workspace_identity(fs: &dyn Fs, paths: &PathList) -> Option<PathList> {
-    let raw_paths = paths.paths();
-    let resolved_paths = futures::future::join_all(
-        raw_paths
-            .iter()
-            .map(|path| project::git_store::resolve_git_worktree_to_main_repo(fs, path)),
-    )
-    .await;
-
-    if resolved_paths.iter().all(|resolved| resolved.is_none()) {
-        return None;
-    }
-
-    let resolved_paths: Vec<PathBuf> = raw_paths
-        .iter()
-        .zip(resolved_paths.iter())
-        .map(|(original, resolved)| {
-            resolved
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(|| original.clone())
-        })
-        .collect();
-    let resolved_path_refs: Vec<&Path> = resolved_paths.iter().map(PathBuf::as_path).collect();
-    Some(PathList::new(&resolved_path_refs))
-}
-
 fn dedupe_recent_workspaces(
     workspaces: impl IntoIterator<Item = RecentWorkspace>,
 ) -> Vec<RecentWorkspace> {
@@ -3948,11 +3917,9 @@ mod tests {
         workspace_id: WorkspaceId,
         paths: PathList,
         timestamp: DateTime<Utc>,
-        fs: &dyn Fs,
+        _fs: &dyn Fs,
     ) -> RecentWorkspace {
-        let identity_paths = resolve_local_workspace_identity(fs, &paths)
-            .await
-            .unwrap_or_else(|| paths.clone());
+        let identity_paths = paths.clone();
         RecentWorkspace {
             workspace_id,
             location: SerializedWorkspaceLocation::Local,
@@ -5637,32 +5604,23 @@ mod tests {
                 fs.as_ref(),
             )
             .await,
+            local_recent_workspace(WorkspaceId(5), PathList::new(&["/repo"]), t3, fs.as_ref())
+                .await,
         ];
 
         let result = dedupe_recent_workspaces(workspaces);
 
-        // Should have 3 entries: #1 and #2 deduped into one, plus #3 and #4.
-        assert_eq!(result.len(), 3);
-
-        // First entry: /repo — deduplicated from #1 and #2.
-        // Keeps the position of #1 (first seen), but with #2's later timestamp.
-        assert_eq!(result[0].identity_paths.paths(), &[PathBuf::from("/repo")]);
-        assert_eq!(result[0].timestamp, t1);
-
-        // Second entry: mixed-path workspace with worktree resolved.
-        // /worktree → /repo, so paths become [/other-repo, /repo] (sorted).
-        assert_eq!(
-            result[1].identity_paths.paths(),
-            &[PathBuf::from("/other-repo"), PathBuf::from("/repo")]
-        );
-        assert_eq!(result[1].workspace_id, WorkspaceId(3));
-
-        // Third entry: non-git project, unchanged.
-        assert_eq!(
-            result[2].identity_paths.paths(),
-            &[PathBuf::from("/plain-project")]
-        );
-        assert_eq!(result[2].workspace_id, WorkspaceId(4));
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0].workspace_id, WorkspaceId(5));
+        for (workspace, expected, timestamp) in [
+            (&result[0], vec!["/repo"], t3),
+            (&result[1], vec!["/worktree"], t1),
+            (&result[2], vec!["/other-repo", "/worktree"], t2),
+            (&result[3], vec!["/plain-project"], t3),
+        ] {
+            assert_eq!(workspace.identity_paths, PathList::new(&expected));
+            assert_eq!(workspace.timestamp, timestamp);
+        }
     }
 
     #[gpui::test]
@@ -5703,9 +5661,10 @@ mod tests {
         )
         .await;
 
-        // Bare-backed worktrees should resolve to the repo identity path, which
-        // is the parent directory users think of as the project root.
-        assert_eq!(result.identity_paths.paths(), &[PathBuf::from("/foo")]);
+        assert_eq!(
+            result.identity_paths.paths(),
+            &[PathBuf::from("/foo/my-feature")]
+        );
     }
 
     #[gpui::test]
@@ -5750,7 +5709,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_recent_workspace_identity_deduplicates_main_and_linked_worktree(
+    async fn test_recent_workspace_identity_keeps_metadata_related_directories_separate(
         cx: &mut gpui::TestAppContext,
     ) {
         let fs = fs::FakeFs::new(cx.executor());
@@ -5802,13 +5761,19 @@ mod tests {
 
         let result = dedupe_recent_workspaces(workspaces);
 
-        assert_eq!(result.len(), 1);
+        assert_eq!(result.len(), 2);
         assert_eq!(
             result[0].identity_paths.paths(),
             &[PathBuf::from("/the-project")]
         );
-        assert_eq!(result[0].workspace_id, WorkspaceId(2));
-        assert_eq!(result[0].timestamp, t1);
+        assert_eq!(result[0].workspace_id, WorkspaceId(1));
+        assert_eq!(result[0].timestamp, t0);
+        assert_eq!(
+            result[1].identity_paths.paths(),
+            &[PathBuf::from("/the-project/feature-a")]
+        );
+        assert_eq!(result[1].workspace_id, WorkspaceId(2));
+        assert_eq!(result[1].timestamp, t1);
     }
 
     #[gpui::test]
@@ -5866,7 +5831,7 @@ mod tests {
 
         let recents = db.recent_project_workspaces(fs.as_ref()).await.unwrap();
 
-        assert_eq!(recents.len(), 1);
+        assert_eq!(recents.len(), 2);
         assert_eq!(recents[0].workspace_id, WorkspaceId(2));
         assert_eq!(
             recents[0].paths.paths(),
@@ -5874,7 +5839,7 @@ mod tests {
         );
         assert_eq!(
             recents[0].identity_paths.paths(),
-            &[PathBuf::from("/the-project")]
+            &[PathBuf::from("/the-project/feature-a")]
         );
     }
 
@@ -6089,7 +6054,6 @@ mod tests {
         let project_1_linked_worktree =
             Project::test(fs.clone(), ["/worktree-feature".as_ref()], cx).await;
 
-        // Wait for git discovery to finish.
         cx.run_until_parked();
 
         // Create a second, unrelated project so we have two distinct project groups.
@@ -6164,7 +6128,7 @@ mod tests {
             serialized.active_workspace.workspace_id,
             active_db_id.unwrap(),
         );
-        assert_eq!(serialized.state.project_groups.len(), 2,);
+        assert_eq!(serialized.state.project_groups.len(), 3);
 
         // Verify the serialized project group keys round-trip back to the
         // originals.
@@ -6176,6 +6140,7 @@ mod tests {
             .map(Into::into)
             .collect();
         let expected_keys = vec![
+            ProjectGroupKey::new(None, PathList::new(&["/worktree-feature"])),
             ProjectGroupKey::new(None, PathList::new(&["/repo"])),
             ProjectGroupKey::new(None, PathList::new(&["/other-project"])),
         ];

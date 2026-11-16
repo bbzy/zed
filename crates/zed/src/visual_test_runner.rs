@@ -208,7 +208,7 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
             cx,
         );
         language_models::init(app_state.user_store.clone(), app_state.client.clone(), cx);
-        git_ui_core::init(cx);
+        diff_ui::init(cx);
         kk_ui::init(cx);
         project::AgentRegistryStore::init_global(
             cx,
@@ -958,7 +958,7 @@ fn init_app_state(cx: &mut App) -> Arc<AppState> {
     }
 
     // Use the real filesystem instead of FakeFs so we can access actual files on disk
-    let fs: Arc<dyn Fs> = fs::RealFs::new(None, cx.background_executor().clone());
+    let fs: Arc<dyn Fs> = fs::RealFs::new(cx.background_executor().clone());
     <dyn Fs>::set_global(fs.clone(), cx);
 
     let languages = Arc::new(language::LanguageRegistry::test(

@@ -12,9 +12,9 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures::channel::{mpsc, oneshot};
 use futures::future;
 
+use diff_ui::file_diff_view::FileDiffView;
+use diff_ui::multi_diff_view::MultiDiffView;
 use futures::{FutureExt, StreamExt};
-use git_ui_core::file_diff_view::FileDiffView;
-use git_ui_core::multi_diff_view::MultiDiffView;
 use gpui::{App, AsyncApp, Global, TaskExt, WindowHandle};
 use onboarding::FIRST_OPEN;
 use onboarding::show_onboarding_view;

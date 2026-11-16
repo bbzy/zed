@@ -96,7 +96,6 @@ These variables allow you to pull information from the current editor and use it
 - `ZED_SELECTED_TEXT`: currently selected text
 - `ZED_LANGUAGE`: language of the currently opened buffer (e.g. `Rust`, `Python`, `Shell Script`)
 - `ZED_WORKTREE_ROOT`: absolute path to the root of the current worktree. (e.g. `/Users/my-user/path/to/project`)
-- `ZED_MAIN_GIT_WORKTREE`: absolute path to the main git worktree's working directory. For normal checkouts this equals `ZED_WORKTREE_ROOT`; for linked git worktrees this is the original repository's working directory.
 - `ZED_CUSTOM_RUST_PACKAGE`: (Rust-specific) name of the parent package of $ZED_FILE source file.
 
 To use a variable in a task, prefix it with a dollar sign (`$`):
@@ -228,67 +227,6 @@ This could be useful for launching a terminal application that you want to use i
     ]
   }
 }
-```
-
-## Hooks
-
-In addition to being spawned manually, tasks can be configured to run automatically in response to certain Zed events by adding a hook to the `hooks` field on a task template. A task with a matching hook will be resolved and spawned when that event fires.
-
-The following hooks are currently supported:
-
-- `create_worktree` — runs after Zed creates a new linked Git worktree, either directly through the CLI or from the [worktree picker](./git.md#git-worktrees). The task is spawned with `ZED_WORKTREE_ROOT` pointing at the newly created worktree and `ZED_MAIN_GIT_WORKTREE` pointing at the original repository's working directory, which makes these hooks well-suited to copying untracked files (such as `.env` files) or running per-worktree setup commands.
-
-Hook tasks are resolved from the same global and worktree-local `tasks.json` files as manually spawned tasks, and multiple tasks may register for the same hook; they all run when the hook fires. A hook task still benefits from the usual task configuration fields — `cwd`, `env`, `reveal`, `hide`, and so on — so you can control how much of the terminal UI is shown while it runs.
-
-```json [tasks]
-[
-  {
-    "label": "copy .env into new worktree",
-    "command": "cp",
-    "args": ["$ZED_MAIN_GIT_WORKTREE/.env", "$ZED_WORKTREE_ROOT/.env"],
-    "hooks": ["create_worktree"],
-    "reveal": "no_focus",
-    "hide": "on_success"
-  }
-]
-```
-
-Tasks that define `hooks` are still available from the task modal like any other task, so the same template can be reused for manual runs.
-
-## Custom Git Commands
-
-The Git Graph supports running custom Git command tasks from the commit context menu.
-To add a command, define a task in your global `tasks.json` file with the `git-command` tag (worktree-local tasks are not supported yet).
-When shown from a commit's context menu, the task is resolved against the selected commit and repository, and runs from the selected repository root by default.
-Right-clicking a ref label (a branch, remote ref, or tag) opens a ref-specific context menu, where the task is additionally resolved against the clicked ref via `ZED_GIT_REF`.
-
-Git Graph command tasks support the Git-specific task variables below.
-These variables are provided only when resolving Git Graph command tasks.
-Other task variables, such as `ZED_FILE`, `ZED_SELECTED_TEXT`, `ZED_WORKTREE_ROOT`, and `ZED_MAIN_GIT_WORKTREE`, are not provided to Git Graph command tasks unless they use default values.
-
-- `ZED_GIT_SHA`: full SHA of the selected commit.
-- `ZED_GIT_SHA_SHORT`: short SHA of the selected commit.
-- `ZED_GIT_REPOSITORY_NAME`: name of the selected Git repository.
-- `ZED_GIT_REPOSITORY_PATH`: absolute path to the selected Git repository's working directory.
-- `ZED_GIT_REF`: name of the clicked ref (a branch, remote ref, or tag). Only provided when the menu is opened from a ref label.
-
-For example:
-
-```json [tasks]
-[
-  {
-    "label": "Branches containing commit: $ZED_GIT_SHA_SHORT",
-    "command": "git",
-    "args": ["branch", "-a", "--contains", "$ZED_GIT_SHA"],
-    "tags": ["git-command"]
-  },
-  {
-    "label": "Check out $ZED_GIT_REF",
-    "command": "git",
-    "args": ["checkout", "$ZED_GIT_REF"],
-    "tags": ["git-command"]
-  }
-]
 ```
 
 ## VS Code Task Format

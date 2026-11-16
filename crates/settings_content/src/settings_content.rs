@@ -198,7 +198,9 @@ pub struct SettingsContent {
 
     pub call_hierarchy: Option<CallHierarchySettingsContent>,
 
-    pub git_panel: Option<GitPanelSettingsContent>,
+    #[serde(rename = "git_panel", skip_serializing)]
+    #[schemars(skip)]
+    pub legacy_git_panel: Option<LegacyPanelSettingsContent>,
     pub kk_workbench: Option<KkWorkbenchSettingsContent>,
 
     pub tabs: Option<ItemSettingsContent>,
@@ -234,8 +236,9 @@ pub struct SettingsContent {
     /// Configuration for Diagnostics-related features.
     pub diagnostics: Option<DiagnosticsSettingsContent>,
 
-    /// Configuration for Git-related features
-    pub git: Option<GitSettings>,
+    /// Settings for file comparisons.
+    #[serde(alias = "git")]
+    pub diff: Option<DiffSettingsContent>,
 
     /// Common language server settings.
     pub global_lsp_settings: Option<GlobalLspSettingsContent>,
@@ -406,9 +409,9 @@ impl SettingsContent {
 fallible_options::flattened_deserialize!(SettingsContent {
     sections: { project, theme, extension, workspace, editor, remote },
     options: {
-        call_hierarchy, command_palette, file_finder, git_panel, kk_workbench, tabs, tab_bar, tab_switcher, status_bar, preview_tabs, agent,
+        call_hierarchy, command_palette, file_finder, legacy_git_panel, kk_workbench, tabs, tab_bar, tab_switcher, status_bar, preview_tabs, agent,
         agent_servers, audio, auto_update, base_keymap, collaboration_panel, debugger, diagnostics,
-        git,
+        diff,
         global_lsp_settings, image_viewer, markdown_preview, repl, helix_mode, hide_mouse,
         journal, log, line_indicator_format, language_models, copilot, outline_panel, project_panel,
         node, proxy, reduce_motion, server_url, credentials_url, session, telemetry, terminal,
@@ -416,6 +419,7 @@ fallible_options::flattened_deserialize!(SettingsContent {
         instrumentation,
     },
     defaults: {},
+    aliases: { "git" => "diff", "git_panel" => "legacy_git_panel" },
 });
 
 fallible_options::flattened_deserialize!(UserSettingsContent {
@@ -762,186 +766,8 @@ pub struct KkBlameSettingsContent {
 
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
-pub struct GitPanelSettingsContent {
-    /// Whether to show the panel button in the status bar.
-    ///
-    /// Default: true
-    pub button: Option<bool>,
-    /// Where to dock the panel.
-    ///
-    /// Default: right (Agentic layout), left (Classic layout)
-    pub dock: Option<DockPosition>,
-    /// Default width of the panel in pixels.
-    ///
-    /// Default: 360
-    pub default_width: Option<PixelSetting>,
-    /// How entry statuses are displayed.
-    ///
-    /// Default: icon
+pub struct LegacyPanelSettingsContent {
     pub status_style: Option<StatusStyle>,
-
-    /// Whether to show file icons in the git panel.
-    ///
-    /// Default: false
-    pub file_icons: Option<bool>,
-
-    /// What to show for directories in the git panel.
-    ///
-    /// Default: icon
-    pub folder_indicator: Option<FolderIndicator>,
-
-    /// How and when the scrollbar should be displayed.
-    ///
-    /// Default: inherits editor scrollbar settings
-    pub scrollbar: Option<ScrollbarSettings>,
-
-    /// What the default branch name should be when
-    /// `init.defaultBranch` is not set in git
-    ///
-    /// Default: main
-    pub fallback_branch_name: Option<String>,
-
-    /// How to sort entries in the git panel.
-    ///
-    /// Default: path
-    pub sort_by: Option<GitPanelSortBy>,
-
-    /// How to group entries in the git panel.
-    ///
-    /// Default: status
-    pub group_by: Option<GitPanelGroupBy>,
-
-    /// Whether to collapse untracked files in the diff panel.
-    ///
-    /// Default: false
-    pub collapse_untracked_diff: Option<bool>,
-
-    /// Whether to show entries with tree or flat view in the panel
-    ///
-    /// Default: false
-    pub tree_view: Option<bool>,
-
-    /// Whether to show the addition/deletion change count next to each file in the Git panel.
-    ///
-    /// Default: true
-    pub diff_stats: Option<bool>,
-
-    /// Whether to show a badge on the git panel icon with the count of uncommitted changes.
-    ///
-    /// Default: false
-    pub show_count_badge: Option<bool>,
-
-    /// Whether the git panel should open on startup.
-    ///
-    /// Default: false
-    pub starts_open: Option<bool>,
-
-    /// Maximum length of the commit message title before a warning is shown.
-    /// Set to 0 to disable.
-    ///
-    /// Default: 0
-    pub commit_title_max_length: Option<usize>,
-
-    /// Default action when clicking a changed file in the Git panel.
-    ///
-    /// Default: project_diff
-    pub entry_primary_click_action: Option<GitPanelClickBehavior>,
-
-    /// Whether the commit message editor is shown in the Git panel by default.
-    ///
-    /// Default: expanded
-    pub commit_editor: Option<GitPanelCommitEditor>,
-}
-
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-    MergeFrom,
-    PartialEq,
-    Eq,
-    strum::VariantArray,
-    strum::VariantNames,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum GitPanelCommitEditor {
-    /// Show the commit message editor.
-    #[default]
-    Expanded,
-    /// Hide the commit message editor, leaving only the commit button row.
-    Collapsed,
-}
-
-#[derive(
-    Default,
-    Copy,
-    Clone,
-    Debug,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-    MergeFrom,
-    PartialEq,
-    Eq,
-    strum::VariantArray,
-    strum::VariantNames,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum GitPanelClickBehavior {
-    /// Open the project diff, showing all changed files.
-    #[default]
-    ProjectDiff,
-    /// Open a single-file diff view.
-    FileDiff,
-    /// Open the file in the editor without a diff view.
-    ViewFile,
-}
-
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-    MergeFrom,
-    PartialEq,
-    Eq,
-    strum::VariantArray,
-    strum::VariantNames,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum GitPanelSortBy {
-    #[default]
-    Path,
-    Name,
-}
-
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-    MergeFrom,
-    PartialEq,
-    Eq,
-    strum::VariantArray,
-    strum::VariantNames,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum GitPanelGroupBy {
-    None,
-    #[default]
-    Status,
-    Staging,
 }
 
 #[derive(
@@ -1260,10 +1086,6 @@ pub struct OutlinePanelSettingsContent {
     ///
     /// Default: icon
     pub folder_indicator: Option<FolderIndicator>,
-    /// Whether to show the git status in the outline panel.
-    ///
-    /// Default: true
-    pub git_status: Option<bool>,
     /// Amount of indentation (in pixels) for nested items.
     ///
     /// Default: 20

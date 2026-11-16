@@ -11,7 +11,7 @@ Zed's AI docs are organized around three areas:
 | ------------ | ----------------------------------- | ------------------------------------------------------------------------------------------ |
 | Agents       | How agentic work runs in Zed        | Zed Agent, External Agents, Terminal Threads                                               |
 | Model access | How Zed connects to language models | Zed-hosted models, API access, subscriptions, [gateways](./use-a-gateway.md), local models |
-| Features     | Which AI workflow you want to use   | Agentic editing, inline edits, edit prediction, Git assistance                             |
+| Features     | Which AI workflow you want to use   | Agentic editing, inline edits, edit prediction                             |
 
 Start with [AI Quick Start](./quick-start.md) if you know what you want to do. Use [AI by Company](./by-company.md) if you know the company, subscription, model provider, agent, or CLI you want to use.
 
@@ -41,7 +41,6 @@ Zed has several AI-powered workflows:
 - [Parallel Agents](./parallel-agents.md): run multiple threads across projects and worktrees.
 - [Inline Assistant](./inline-assistant.md): transform a selection in place.
 - [Edit Prediction](./edit-prediction.md): accept AI completions while you type.
-- [Git commit generation](../git.md#ai-support-in-git): generate commit messages from the Git panel.
 
 ## Configure AI {#configure-ai}
 

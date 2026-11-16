@@ -1,8 +1,8 @@
 use crate::{
-    Copy, CopyAndTrim, CopyPermalinkToLine, Cut, DisplayPoint, DisplaySnapshot, Editor,
-    EvaluateSelectedText, FindAllReferences, GoToDeclaration, GoToDefinition, GoToImplementation,
-    GoToTypeDefinition, Paste, Rename, RevealInFileManager, RunToCursor, SelectMode,
-    SelectionEffects, SelectionExt, ToDisplayPoint, ToggleCodeActions,
+    Copy, CopyAndTrim, Cut, DisplayPoint, DisplaySnapshot, Editor, EvaluateSelectedText,
+    FindAllReferences, GoToDeclaration, GoToDefinition, GoToImplementation, GoToTypeDefinition,
+    Paste, Rename, RevealInFileManager, RunToCursor, SelectMode, SelectionEffects, SelectionExt,
+    ToDisplayPoint, ToggleCodeActions,
     actions::{Format, FormatSelections},
     selections_collection::SelectionsCollection,
 };
@@ -182,9 +182,9 @@ pub fn deploy_context_menu(
         }
 
         // Don't show the context menu if there isn't a project associated with this editor
-        let Some(project) = editor.project.clone() else {
+        if editor.project.is_none() {
             return;
-        };
+        }
 
         let snapshot = editor.snapshot(window, cx);
         let display_map = editor.display_snapshot(cx);
@@ -205,18 +205,6 @@ pub fn deploy_context_menu(
             .all::<PointUtf16>(&display_map)
             .into_iter()
             .any(|s| !s.is_empty());
-        let has_git_repo =
-            buffer
-                .anchor_to_buffer_anchor(anchor)
-                .is_some_and(|(buffer_anchor, _)| {
-                    project
-                        .read(cx)
-                        .git_store()
-                        .read(cx)
-                        .repository_and_path_for_buffer_id(buffer_anchor.buffer_id, cx)
-                        .is_some()
-                });
-
         let evaluate_selection = window.is_action_available(&EvaluateSelectedText, cx);
         let run_to_cursor = window.is_action_available(&RunToCursor, cx);
         let format_selections = window.is_action_available(&FormatSelections, cx);
@@ -315,16 +303,6 @@ pub fn deploy_context_menu(
                     !has_reveal_target,
                     "Open in Terminal",
                     Box::new(OpenInTerminal),
-                )
-                .action_disabled_when(
-                    !has_git_repo,
-                    "Copy Permalink to Line",
-                    Box::new(CopyPermalinkToLine),
-                )
-                .action_disabled_when(
-                    !has_git_repo,
-                    "View File History",
-                    Box::new(git::FileHistory),
                 );
             let builder = editor.addons.values().fold(builder, |menu, addon| {
                 addon.extend_context_menu(menu, window, cx)

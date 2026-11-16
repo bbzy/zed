@@ -579,11 +579,6 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::TerminalDockPosition>(render_dropdown)
         .add_basic_renderer::<settings::DockPosition>(render_dropdown)
         .add_basic_renderer::<settings::SidebarDockPosition>(render_dropdown)
-        .add_basic_renderer::<settings::GitGutterSetting>(render_dropdown)
-        .add_basic_renderer::<settings::GitHunkStyleSetting>(render_dropdown)
-        .add_basic_renderer::<settings::GitDiffBaseSetting>(render_dropdown)
-        .add_basic_renderer::<settings::GitPathStyle>(render_dropdown)
-        .add_basic_renderer::<settings::InlineBlameLocation>(render_dropdown)
         .add_basic_renderer::<settings::DiagnosticSeverityContent>(render_dropdown)
         .add_basic_renderer::<settings::SeedQuerySetting>(render_dropdown)
         .add_basic_renderer::<settings::DoubleClickInMultibuffer>(render_dropdown)
@@ -642,10 +637,6 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::ThinkingBlockDisplay>(render_dropdown)
         .add_basic_renderer::<settings::ImageFileSizeUnit>(render_dropdown)
         .add_basic_renderer::<settings::StatusStyle>(render_dropdown)
-        .add_basic_renderer::<settings::GitPanelClickBehavior>(render_dropdown)
-        .add_basic_renderer::<settings::GitPanelSortBy>(render_dropdown)
-        .add_basic_renderer::<settings::GitPanelGroupBy>(render_dropdown)
-        .add_basic_renderer::<settings::GitPanelCommitEditor>(render_dropdown)
         .add_basic_renderer::<settings::EncodingDisplayOptions>(render_dropdown)
         .add_basic_renderer::<settings::PaneSplitDirectionHorizontal>(render_dropdown)
         .add_basic_renderer::<settings::PaneSplitDirectionVertical>(render_dropdown)
@@ -658,7 +649,7 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::IconThemeSelectionDiscriminants>(render_dropdown)
         .add_basic_renderer::<settings::IconThemeName>(render_icon_theme_picker)
         .add_basic_renderer::<settings::BufferLineHeightDiscriminants>(render_dropdown)
-        .add_basic_renderer::<settings::GitGutterWidthDiscriminants>(render_dropdown)
+        .add_basic_renderer::<settings::DiffGutterWidthDiscriminants>(render_dropdown)
         .add_basic_renderer::<settings::ProjectPanelTitleTooltipDelayDiscriminants>(render_dropdown)
         .add_basic_renderer::<settings::AutosaveSettingDiscriminants>(render_dropdown)
         .add_basic_renderer::<settings::WorkingDirectoryDiscriminants>(render_dropdown)
@@ -5876,16 +5867,65 @@ pub mod test {
                             .into_any_element()
                     }
                 });
-            let git_integration = page_data::settings_data(cx)
-                .into_iter()
-                .flat_map(|page| Vec::from(page.items))
-                .find(|item| match item {
-                    SettingsPageItem::DynamicItem(item) => {
-                        item.discriminant.title == "Disable Git Integration"
-                    }
-                    _ => false,
-                })
-                .unwrap();
+            let nested_settings = SettingsPageItem::DynamicItem(DynamicItem {
+                discriminant: SettingItem {
+                    files: USER,
+                    title: "Signature Help",
+                    description: "Configure signature help and hover popovers.",
+                    field: Box::new(SettingField::<bool> {
+                        organization_override: None,
+                        json_path: Some("auto_signature_help"),
+                        pick: |settings_content| {
+                            settings_content.editor.auto_signature_help.as_ref()
+                        },
+                        write: |settings_content, value, _| {
+                            settings_content.editor.auto_signature_help = value;
+                        },
+                    }),
+                    metadata: None,
+                },
+                pick_discriminant: |_| Some(1),
+                fields: vec![
+                    vec![],
+                    vec![
+                        SettingItem {
+                            files: USER,
+                            title: "Help After Edits",
+                            description: "Show signature help after editing the text.",
+                            field: Box::new(SettingField::<bool> {
+                                organization_override: None,
+                                json_path: Some("show_signature_help_after_edits"),
+                                pick: |settings_content| {
+                                    settings_content
+                                        .editor
+                                        .show_signature_help_after_edits
+                                        .as_ref()
+                                },
+                                write: |settings_content, value, _| {
+                                    settings_content.editor.show_signature_help_after_edits = value;
+                                },
+                            }),
+                            metadata: None,
+                        },
+                        SettingItem {
+                            files: USER,
+                            title: "Hover Popovers",
+                            description: "Show hover popover information in the editor.",
+                            field: Box::new(SettingField::<bool> {
+                                organization_override: None,
+                                json_path: Some("hover_popover_enabled"),
+                                pick: |settings_content| {
+                                    settings_content.editor.hover_popover_enabled.as_ref()
+                                },
+                                write: |settings_content, value, _| {
+                                    settings_content.editor.hover_popover_enabled = value;
+                                },
+                            }),
+                            metadata: None,
+                        },
+                    ],
+                ],
+            });
             let mut settings_window = settings_window_with_items(
                 vec![
                     SettingsPageItem::SectionHeader("First"),
@@ -5894,7 +5934,7 @@ pub mod test {
                         Some("A setting with a long description. ".repeat(100)),
                     ),
                     SettingsPageItem::SectionHeader("Last"),
-                    git_integration,
+                    nested_settings,
                     SettingsPageItem::SectionHeader("Hidden"),
                 ],
                 window,
@@ -5921,29 +5961,29 @@ pub mod test {
             cx.run_until_parked();
             let viewport = list_state.viewport_bounds();
             if clipped {
-                let status_bounds = cx.debug_bounds("Enable Git Status").unwrap();
+                let status_bounds = cx.debug_bounds("Help After Edits").unwrap();
                 settings_window.update(cx, |_, cx| {
                     list_state.scroll_by(status_bounds.bottom() - viewport.bottom() + px(1.));
                     cx.notify();
                 });
                 cx.run_until_parked();
             }
-            let status_handle = control_handles.borrow()["Enable Git Status"].clone();
-            let diff_handle = control_handles.borrow()["Enable Git Diff"].clone();
+            let status_handle = control_handles.borrow()["Help After Edits"].clone();
+            let diff_handle = control_handles.borrow()["Hover Popovers"].clone();
             cx.update(|window, cx| {
                 status_handle.focus(window, cx);
                 window.focus_next(cx);
             });
             cx.run_until_parked();
             cx.update(|window, cx| assert!(status_handle.contains_focused(window, cx)));
-            let status_bounds = cx.debug_bounds("Enable Git Status").unwrap();
+            let status_bounds = cx.debug_bounds("Help After Edits").unwrap();
             let initial_row_bounds = list_state.bounds_for_item(4).unwrap();
             let initial_offset = list_state.scroll_px_offset_for_scrollbar();
             assert!(status_bounds.top() >= viewport.top());
             assert!(status_bounds.bottom() <= viewport.bottom());
             if clipped {
                 assert_eq!(status_bounds.bottom(), viewport.bottom() - px(1.));
-                assert!(cx.debug_bounds("Enable Git Diff").unwrap().top() > viewport.bottom());
+                assert!(cx.debug_bounds("Hover Popovers").unwrap().top() > viewport.bottom());
             } else {
                 assert!(initial_row_bounds.top() >= viewport.top());
                 assert_eq!(initial_row_bounds.bottom(), viewport.bottom());
@@ -5963,7 +6003,7 @@ pub mod test {
                 cx.run_until_parked();
             }
             cx.update(|window, cx| assert!(diff_handle.contains_focused(window, cx)));
-            let diff_bounds = cx.debug_bounds("Enable Git Diff").unwrap();
+            let diff_bounds = cx.debug_bounds("Hover Popovers").unwrap();
             assert_eq!(
                 list_state.bounds_for_item(4).unwrap().bottom(),
                 viewport.bottom()
@@ -5995,7 +6035,7 @@ pub mod test {
                 .into_iter()
                 .flat_map(|page| Vec::from(page.items))
                 .find(|item| match item {
-                    SettingsPageItem::SettingItem(item) => item.title == "Fallback Branch Name",
+                    SettingsPageItem::SettingItem(item) => item.title == "Title Separator",
                     _ => false,
                 })
                 .unwrap();
@@ -6018,7 +6058,7 @@ pub mod test {
 
         editor.update_in(cx, |editor, window, cx| {
             editor.focus_handle(cx).focus(window, cx);
-            editor.set_text("unsaved-branch-name", window, cx);
+            editor.set_text("unsaved-separator", window, cx);
         });
         for (width, height) in [(600., 300.), (900., 600.), (600., 500.)] {
             cx.simulate_resize(gpui::size(px(width), px(height)));
@@ -6030,7 +6070,7 @@ pub mod test {
             assert_eq!(editors.borrow().len(), 2);
             editor.update_in(cx, |editor, window, cx| {
                 assert!(editor.is_focused(window));
-                assert_eq!(editor.text(cx), "unsaved-branch-name");
+                assert_eq!(editor.text(cx), "unsaved-separator");
             });
         }
     }

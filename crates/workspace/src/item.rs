@@ -55,7 +55,6 @@ impl Default for SaveOptions {
 
 #[derive(RegisterSetting)]
 pub struct ItemSettings {
-    pub git_status: bool,
     pub close_position: ClosePosition,
     pub activate_on_close: ActivateOnClose,
     pub file_icons: bool,
@@ -78,14 +77,6 @@ impl Settings for ItemSettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
         let tabs = content.tabs.as_ref().unwrap();
         Self {
-            git_status: tabs.git_status.unwrap()
-                && content
-                    .git
-                    .as_ref()
-                    .unwrap()
-                    .enabled
-                    .unwrap()
-                    .is_git_status_enabled(),
             close_position: tabs.close_position.unwrap(),
             activate_on_close: tabs.activate_on_close.unwrap(),
             file_icons: tabs.file_icons.unwrap(),
@@ -954,7 +945,7 @@ impl<T: Item> ItemHandle for Entity<T> {
                                     active_item.item_id() == item.item_id()
                                 })
                             {
-                                workspace.active_item_path_changed(false, window, cx);
+                                workspace.active_item_path_changed(window, cx);
                             }
                         }
 

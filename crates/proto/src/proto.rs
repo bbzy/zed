@@ -9,7 +9,7 @@ pub use prost::{DecodeError, Message};
 use std::{
     cmp,
     fmt::Debug,
-    iter, mem,
+    iter,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 pub use typed_envelope::*;
@@ -55,8 +55,6 @@ messages!(
     (ApplyCodeActionResponse, Background),
     (ApplyCompletionAdditionalEdits, Background),
     (ApplyCompletionAdditionalEditsResponse, Background),
-    (BlameBuffer, Foreground),
-    (BlameBufferResponse, Foreground),
     (BufferReloaded, Foreground),
     (BufferSaved, Foreground),
     (Call, Foreground),
@@ -66,8 +64,6 @@ messages!(
     (ChannelMessageSent, Foreground),
     (ChannelMessageUpdate, Foreground),
     (CloseBuffer, Foreground),
-    (Commit, Background),
-    (RunGitHook, Background),
     (CopyProjectEntry, Foreground),
     (CreateBufferForPeer, Foreground),
     (CreateImageForPeer, Foreground),
@@ -129,16 +125,12 @@ messages!(
     (GetNotificationsResponse, Foreground),
     (GetCrashFiles, Background),
     (GetCrashFilesResponse, Background),
-    (GetFilePermalink, Foreground),
-    (GetFilePermalinkResponse, Foreground),
     (GetPathMetadata, Background),
     (GetPathMetadataResponse, Background),
     (KkWorkbenchRequest, Background),
     (KkWorkbenchResponse, Background),
-    (GetPermalinkToLine, Foreground),
     (GetProcesses, Background),
     (GetProcessesResponse, Background),
-    (GetPermalinkToLineResponse, Foreground),
     (GetProjectSymbols, Background),
     (GetProjectSymbolsResponse, Background),
     (GetReferences, Background),
@@ -155,13 +147,7 @@ messages!(
     (GetIncomingCallsResponse, Background),
     (GetOutgoingCalls, Background),
     (GetOutgoingCallsResponse, Background),
-    (OpenUnstagedDiff, Foreground),
-    (OpenUnstagedDiffResponse, Foreground),
-    (OpenUncommittedDiff, Foreground),
-    (OpenUncommittedDiffResponse, Foreground),
     (GetUsers, Foreground),
-    (GitGetBranches, Background),
-    (GitBranchesResponse, Background),
     (Hello, Foreground),
     (HideToast, Background),
     (IncomingCall, Foreground),
@@ -194,8 +180,6 @@ messages!(
     (ListRemoteDirectoryResponse, Background),
     (ListToolchains, Foreground),
     (ListToolchainsResponse, Foreground),
-    (LoadCommitDiff, Foreground),
-    (LoadCommitDiffResponse, Foreground),
     (LspExtExpandMacro, Background),
     (LspExtExpandMacroResponse, Background),
     (LspExtExpandAbbreviation, Background),
@@ -227,7 +211,6 @@ messages!(
     (OpenBufferForSymbolResponse, Background),
     (OpenBufferResponse, Background),
     (OpenImageResponse, Background),
-    (OpenCommitMessageBuffer, Background),
     (OpenNewBuffer, Foreground),
     (OpenServerSettings, Foreground),
     (PerformRename, Background),
@@ -297,7 +280,6 @@ messages!(
     (ShareProjectResponse, Foreground),
     (ShowContacts, Foreground),
     (ShutdownRemoteServer, Foreground),
-    (Stage, Background),
     (StartLanguageServer, Foreground),
     (SubscribeToChannels, Foreground),
     (SyncExtensions, Background),
@@ -313,11 +295,6 @@ messages!(
     (Toast, Background),
     (Unfollow, Foreground),
     (UnshareProject, Foreground),
-    (Unstage, Background),
-    (Stash, Background),
-    (StashPop, Background),
-    (StashApply, Background),
-    (StashDrop, Background),
     (UpdateBuffer, Foreground),
     (UpdateBufferFile, Foreground),
     (UpdateChannelBuffer, Foreground),
@@ -326,9 +303,7 @@ messages!(
     (UpdateChannels, Foreground),
     (UpdateContacts, Foreground),
     (UpdateDiagnosticSummary, Foreground),
-    (UpdateDiffBases, Foreground),
     (UpdateFollowers, Foreground),
-    (UpdateGitBranch, Background),
     (UpdateLanguageServer, Foreground),
     (UpdateNotification, Foreground),
     (UpdateParticipantLocation, Foreground),
@@ -338,40 +313,11 @@ messages!(
     (UpdateWorktree, Foreground),
     (UpdateWorktreeSettings, Foreground),
     (UpdateUserSettings, Background),
-    (UpdateRepository, Foreground),
-    (RemoveRepository, Foreground),
     (UsersResponse, Foreground),
-    (GitReset, Background),
-    (GitDeleteBranch, Background),
-    (GitCheckoutFiles, Background),
-    (GitAddPathToGitignore, Background),
-    (GitAddPathToGitInfoExclude, Background),
-    (GitShow, Background),
-    (GitCommitDetails, Background),
-    (GitCreateArchiveCheckpoint, Background),
-    (GitCreateArchiveCheckpointResponse, Background),
-    (GitRestoreArchiveCheckpoint, Background),
-    (SetIndexText, Background),
-    (Push, Background),
-    (Fetch, Background),
-    (GetRemotes, Background),
-    (GetRemotesResponse, Background),
-    (Pull, Background),
-    (RemoteMessageResponse, Background),
     (AskPassRequest, Background),
     (AskPassResponse, Background),
-    (GitCreateRemote, Background),
-    (GitRemoveRemote, Background),
-    (GitCreateBranch, Background),
-    (GitChangeBranch, Background),
-    (GitRenameBranch, Background),
     (TrustWorktrees, Background),
     (RestrictWorktrees, Background),
-    (CheckForPushedCommits, Background),
-    (CheckForPushedCommitsResponse, Background),
-    (GitDiff, Background),
-    (GitDiffResponse, Background),
-    (GitInit, Background),
     (GetDebugAdapterBinary, Background),
     (DebugAdapterBinary, Background),
     (RunDebugLocators, Background),
@@ -380,18 +326,6 @@ messages!(
     (GetDocumentDiagnostics, Background),
     (GetDocumentDiagnosticsResponse, Background),
     (PullWorkspaceDiagnostics, Background),
-    (GetDefaultBranch, Background),
-    (GetDefaultBranchResponse, Background),
-    (GetTreeDiff, Background),
-    (GetTreeDiffResponse, Background),
-    (GetBlobContent, Background),
-    (GetBlobContentResponse, Background),
-    (BlameBufferAtRevision, Background),
-    (BlameBufferAtRevisionResponse, Background),
-    (LoadCommitTemplate, Background),
-    (LoadCommitTemplateResponse, Background),
-    (GitClone, Background),
-    (GitCloneResponse, Background),
     // Reconnect reconciliation must stay ordered with subsequent user toggles.
     (ToggleLspLogs, Foreground),
     (GetDirectoryEnvironment, Background),
@@ -405,23 +339,6 @@ messages!(
     (ExternalAgentLoadingStatusUpdated, Background),
     (NewExternalAgentVersionAvailable, Background),
     (RemoteStarted, Background),
-    (GitGetWorktrees, Background),
-    (GitGetHeadSha, Background),
-    (GitGetHeadShaResponse, Background),
-    (GitEditRef, Background),
-    (GitRepairWorktrees, Background),
-    (GetCommitData, Background),
-    (GetCommitDataResponse, Background),
-    (GetInitialGraphData, Background),
-    (GetInitialGraphDataResponse, Background),
-    (SearchCommits, Background),
-    (SearchCommitsResponse, Background),
-    (GitWorktreesResponse, Background),
-    (GitCreateWorktree, Background),
-    (GitRemoveWorktree, Background),
-    (GitRenameWorktree, Background),
-    (GitWorktreeCreatedAt, Background),
-    (GitWorktreeCreatedAtResponse, Background),
     (FindSearchCandidatesChunk, Background),
     (FindSearchCandidatesCancelled, Background),
     (SpawnKernel, Background),
@@ -440,8 +357,6 @@ request_messages!(
     ),
     (Call, Ack),
     (CancelCall, Ack),
-    (Commit, Ack),
-    (RunGitHook, Ack),
     (CopyProjectEntry, ProjectEntryResponse),
     (CreateChannel, CreateChannelResponse),
     (CreateProjectEntry, ProjectEntryResponse),
@@ -481,8 +396,6 @@ request_messages!(
     (GetProjectSymbols, GetProjectSymbolsResponse),
     (GetReferences, GetReferencesResponse),
     (GetSignatureHelp, GetSignatureHelpResponse),
-    (OpenUnstagedDiff, OpenUnstagedDiffResponse),
-    (OpenUncommittedDiff, OpenUncommittedDiffResponse),
     (GetTypeDefinition, GetTypeDefinitionResponse),
     (LinkedEditingRange, LinkedEditingRangeResponse),
     (ListRemoteDirectory, ListRemoteDirectoryResponse),
@@ -499,7 +412,6 @@ request_messages!(
     (JoinRoom, JoinRoomResponse),
     (LeaveChannelBuffer, Ack),
     (LeaveRoom, Ack),
-    (LoadCommitDiff, LoadCommitDiffResponse),
     (MarkNotificationRead, Ack),
     (MoveChannel, Ack),
     (OnTypeFormatting, OnTypeFormattingResponse),
@@ -507,7 +419,6 @@ request_messages!(
     (OpenBufferByPath, OpenBufferResponse),
     (OpenImageByPath, OpenImageResponse),
     (OpenBufferForSymbol, OpenBufferForSymbolResponse),
-    (OpenCommitMessageBuffer, OpenBufferResponse),
     (OpenNewBuffer, OpenBufferResponse),
     (PerformRename, PerformRenameResponse),
     (Ping, Ack),
@@ -548,7 +459,6 @@ request_messages!(
     (RespondToChannelInvite, Ack),
     (RespondToContactRequest, Ack),
     (SaveBuffer, BufferSaved),
-    (Stage, Ack),
     (FindSearchCandidates, Ack),
     (SendChannelMessage, SendChannelMessageResponse),
     (SetChannelMemberRole, Ack),
@@ -557,23 +467,15 @@ request_messages!(
     (SynchronizeBuffers, SynchronizeBuffersResponse),
     (TaskContextForLocation, TaskContext),
     (Test, Test),
-    (Unstage, Ack),
-    (Stash, Ack),
-    (StashPop, Ack),
-    (StashApply, Ack),
-    (StashDrop, Ack),
     (UpdateBuffer, Ack),
     (UpdateParticipantLocation, Ack),
     (UpdateProject, Ack),
     (UpdateWorktree, Ack),
-    (UpdateRepository, Ack),
-    (RemoveRepository, Ack),
     (LspExtExpandMacro, LspExtExpandMacroResponse),
     (LspExtExpandAbbreviation, LspExtExpandAbbreviationResponse),
     (LspExtOpenDocs, LspExtOpenDocsResponse),
     (LspExtRunnables, LspExtRunnablesResponse),
     (SetRoomParticipantRole, Ack),
-    (BlameBuffer, BlameBufferResponse),
     (RejoinRemoteProjects, RejoinRemoteProjectsResponse),
     (LspQuery, Ack),
     (LspQueryResponse, Ack),
@@ -589,13 +491,9 @@ request_messages!(
     (ShutdownRemoteServer, Ack),
     (RemoveWorktree, Ack),
     (OpenServerSettings, OpenBufferResponse),
-    (GetFilePermalink, GetFilePermalinkResponse),
-    (GetPermalinkToLine, GetPermalinkToLineResponse),
     (FlushBufferedMessages, Ack),
     (LanguageServerPromptRequest, LanguageServerPromptResponse),
     (LanguageServerShowDocumentRequest, Ack),
-    (GitGetBranches, GitBranchesResponse),
-    (UpdateGitBranch, Ack),
     (ListToolchains, ListToolchainsResponse),
     (ActivateToolchain, Ack),
     (ActiveToolchain, ActiveToolchainResponse),
@@ -607,59 +505,18 @@ request_messages!(
     (SyncExtensions, SyncExtensionsResponse),
     (InstallExtension, Ack),
     (RegisterBufferWithLanguageServers, Ack),
-    (GitShow, GitCommitDetails),
-    (
-        GitCreateArchiveCheckpoint,
-        GitCreateArchiveCheckpointResponse
-    ),
-    (GitRestoreArchiveCheckpoint, Ack),
-    (GitReset, Ack),
-    (GitDeleteBranch, Ack),
-    (GitCheckoutFiles, Ack),
-    (GitAddPathToGitignore, Ack),
-    (GitAddPathToGitInfoExclude, Ack),
-    (SetIndexText, Ack),
-    (Push, RemoteMessageResponse),
-    (Fetch, RemoteMessageResponse),
-    (GetRemotes, GetRemotesResponse),
-    (Pull, RemoteMessageResponse),
     (AskPassRequest, AskPassResponse),
-    (GitCreateRemote, Ack),
-    (GitRemoveRemote, Ack),
-    (GitCreateBranch, Ack),
-    (GitChangeBranch, Ack),
-    (GitRenameBranch, Ack),
-    (CheckForPushedCommits, CheckForPushedCommitsResponse),
-    (GitDiff, GitDiffResponse),
-    (GitInit, Ack),
     (ToggleBreakpoint, Ack),
     (GetDebugAdapterBinary, DebugAdapterBinary),
     (RunDebugLocators, DebugRequest),
     (GetDocumentDiagnostics, GetDocumentDiagnosticsResponse),
     (PullWorkspaceDiagnostics, Ack),
-    (GetDefaultBranch, GetDefaultBranchResponse),
-    (GetBlobContent, GetBlobContentResponse),
-    (BlameBufferAtRevision, BlameBufferAtRevisionResponse),
-    (LoadCommitTemplate, LoadCommitTemplateResponse),
-    (GetTreeDiff, GetTreeDiffResponse),
-    (GitClone, GitCloneResponse),
     (GetDirectoryEnvironment, DirectoryEnvironment),
     (GetTerminalShell, GetTerminalShellResponse),
     (GetProcesses, GetProcessesResponse),
     (GetAgentServerCommand, AgentServerCommand),
     (GetContextServerCommand, ContextServerCommand),
     (RemoteStarted, Ack),
-    (GitGetWorktrees, GitWorktreesResponse),
-    (GitGetHeadSha, GitGetHeadShaResponse),
-    (GitEditRef, Ack),
-    (GitRepairWorktrees, Ack),
-    (GetCommitData, GetCommitDataResponse),
-    (GetInitialGraphData, GetInitialGraphDataResponse),
-    (SearchCommits, SearchCommitsResponse),
-    (GitCreateWorktree, Ack),
-    (GitRemoveWorktree, Ack),
-    (GitRenameWorktree, Ack),
-    (GitWorktreeCreatedAt, GitWorktreeCreatedAtResponse),
     (TrustWorktrees, Ack),
     (RestrictWorktrees, Ack),
     (FindSearchCandidatesChunk, Ack),
@@ -707,12 +564,9 @@ entity_messages!(
     AllocateWorktreeId,
     ApplyCodeAction,
     ApplyCompletionAdditionalEdits,
-    BlameBuffer,
     BufferReloaded,
     BufferSaved,
     CloseBuffer,
-    Commit,
-    RunGitHook,
     GetColorPresentation,
     CopyProjectEntry,
     CreateBufferForPeer,
@@ -745,8 +599,6 @@ entity_messages!(
     GetProjectSymbols,
     GetReferences,
     GetSignatureHelp,
-    OpenUnstagedDiff,
-    OpenUncommittedDiff,
     GetTypeDefinition,
     InlayHints,
     SemanticTokens,
@@ -755,7 +607,6 @@ entity_messages!(
     SpawnKernel,
     KillKernel,
     LinkedEditingRange,
-    LoadCommitDiff,
     LspQuery,
     LspQueryResponse,
     RestartLanguageServers,
@@ -766,7 +617,6 @@ entity_messages!(
     OpenBufferByPath,
     OpenImageByPath,
     OpenBufferForSymbol,
-    OpenCommitMessageBuffer,
     PerformRename,
     PrepareRename,
     RefreshInlayHints,
@@ -784,26 +634,17 @@ entity_messages!(
     ResolveInlayHint,
     ResolveCodeAction,
     SaveBuffer,
-    Stage,
     StartLanguageServer,
     SynchronizeBuffers,
     TaskContextForLocation,
     UnshareProject,
-    Unstage,
-    Stash,
-    StashPop,
-    StashApply,
-    StashDrop,
     UpdateBuffer,
     UpdateBufferFile,
     UpdateDiagnosticSummary,
-    UpdateDiffBases,
     UpdateLanguageServer,
     UpdateProject,
     UpdateProjectCollaborator,
     UpdateWorktree,
-    UpdateRepository,
-    RemoveRepository,
     UpdateWorktreeSettings,
     UpdateUserSettings,
     LspExtExpandMacro,
@@ -821,12 +662,8 @@ entity_messages!(
     Toast,
     HideToast,
     OpenServerSettings,
-    GetFilePermalink,
-    GetPermalinkToLine,
     LanguageServerPromptRequest,
     LanguageServerShowDocumentRequest,
-    GitGetBranches,
-    UpdateGitBranch,
     ListToolchains,
     ActivateToolchain,
     ActiveToolchain,
@@ -835,30 +672,11 @@ entity_messages!(
     GetProcesses,
     CancelLanguageServerWork,
     RegisterBufferWithLanguageServers,
-    GitShow,
-    GitReset,
-    GitDeleteBranch,
-    GitCheckoutFiles,
-    GitAddPathToGitignore,
-    GitAddPathToGitInfoExclude,
-    SetIndexText,
     ToggleLspLogs,
     GetDirectoryEnvironment,
     GetTerminalShell,
 
-    Push,
-    Fetch,
-    GetRemotes,
-    Pull,
     AskPassRequest,
-    GitChangeBranch,
-    GitRenameBranch,
-    GitCreateBranch,
-    GitCreateRemote,
-    GitRemoveRemote,
-    CheckForPushedCommits,
-    GitDiff,
-    GitInit,
     BreakpointsForFile,
     ToggleBreakpoint,
     RunDebugLocators,
@@ -866,31 +684,12 @@ entity_messages!(
     LogToDebugConsole,
     GetDocumentDiagnostics,
     PullWorkspaceDiagnostics,
-    GetDefaultBranch,
-    GetTreeDiff,
-    GetBlobContent,
-    BlameBufferAtRevision,
-    LoadCommitTemplate,
-    GitClone,
     GetAgentServerCommand,
     GetContextServerCommand,
     ExternalAgentsUpdated,
     ExternalExtensionAgentsUpdated,
     ExternalAgentLoadingStatusUpdated,
     NewExternalAgentVersionAvailable,
-    GitGetWorktrees,
-    GitGetHeadSha,
-    GitEditRef,
-    GitRepairWorktrees,
-    GetCommitData,
-    GetInitialGraphData,
-    SearchCommits,
-    GitCreateArchiveCheckpoint,
-    GitRestoreArchiveCheckpoint,
-    GitCreateWorktree,
-    GitRemoveWorktree,
-    GitRenameWorktree,
-    GitWorktreeCreatedAt,
     TrustWorktrees,
     RestrictWorktrees,
     FindSearchCandidatesChunk,
@@ -977,102 +776,20 @@ pub fn split_worktree_update(mut message: UpdateWorktree) -> impl Iterator<Item 
             .drain(..removed_entries_chunk_size)
             .collect();
 
-        let mut updated_repositories = Vec::new();
-        let mut limit = MAX_WORKTREE_UPDATE_MAX_CHUNK_SIZE;
-        while let Some(repo) = message.updated_repositories.first_mut() {
-            let updated_statuses_limit = cmp::min(repo.updated_statuses.len(), limit);
-            let removed_statuses_limit = cmp::min(repo.removed_statuses.len(), limit);
-
-            updated_repositories.push(RepositoryEntry {
-                repository_id: repo.repository_id,
-                branch_summary: repo.branch_summary.clone(),
-                updated_statuses: repo
-                    .updated_statuses
-                    .drain(..updated_statuses_limit)
-                    .collect(),
-                removed_statuses: repo
-                    .removed_statuses
-                    .drain(..removed_statuses_limit)
-                    .collect(),
-                current_merge_conflicts: repo.current_merge_conflicts.clone(),
-            });
-            if repo.removed_statuses.is_empty() && repo.updated_statuses.is_empty() {
-                message.updated_repositories.remove(0);
-            }
-            limit = limit.saturating_sub(removed_statuses_limit + updated_statuses_limit);
-            if limit == 0 {
-                break;
-            }
-        }
-
-        done = message.updated_entries.is_empty()
-            && message.removed_entries.is_empty()
-            && message.updated_repositories.is_empty();
-
-        let removed_repositories = if done {
-            mem::take(&mut message.removed_repositories)
-        } else {
-            Default::default()
-        };
+        done = message.updated_entries.is_empty() && message.removed_entries.is_empty();
 
         Some(UpdateWorktree {
             project_id: message.project_id,
             worktree_id: message.worktree_id,
             root_name: message.root_name.clone(),
             abs_path: message.abs_path.clone(),
-            root_repo_common_dir: message.root_repo_common_dir.clone(),
-            root_repo_is_linked_worktree: message.root_repo_is_linked_worktree,
             updated_entries,
             removed_entries,
             scan_id: message.scan_id,
             is_last_update: done && message.is_last_update,
-            updated_repositories,
-            removed_repositories,
         })
     })
 }
-
-pub fn split_repository_update(
-    mut update: UpdateRepository,
-) -> impl Iterator<Item = UpdateRepository> {
-    let mut updated_statuses_iter = mem::take(&mut update.updated_statuses).into_iter().fuse();
-    let mut removed_statuses_iter = mem::take(&mut update.removed_statuses).into_iter().fuse();
-    let branch_list = mem::take(&mut update.branch_list);
-    let branch_list_error = update.branch_list_error.take();
-    std::iter::from_fn({
-        let update = update.clone();
-        move || {
-            let updated_statuses = updated_statuses_iter
-                .by_ref()
-                .take(MAX_WORKTREE_UPDATE_MAX_CHUNK_SIZE)
-                .collect::<Vec<_>>();
-            let removed_statuses = removed_statuses_iter
-                .by_ref()
-                .take(MAX_WORKTREE_UPDATE_MAX_CHUNK_SIZE)
-                .collect::<Vec<_>>();
-            if updated_statuses.is_empty() && removed_statuses.is_empty() {
-                return None;
-            }
-            Some(UpdateRepository {
-                updated_statuses,
-                removed_statuses,
-                branch_list: Vec::new(),
-                branch_list_error: None,
-                is_last_update: false,
-                ..update.clone()
-            })
-        }
-    })
-    .chain([UpdateRepository {
-        updated_statuses: Vec::new(),
-        removed_statuses: Vec::new(),
-        branch_list,
-        branch_list_error,
-        is_last_update: true,
-        ..update
-    }])
-}
-
 impl LspQuery {
     pub fn query_name_and_write_permissions(&self) -> (&str, bool) {
         match self.request {
@@ -1134,39 +851,5 @@ mod tests {
             id: u32::MAX,
         };
         assert_eq!(PeerId::from_u64(peer_id.as_u64()), peer_id);
-    }
-
-    #[test]
-    fn test_split_repository_update_keeps_branch_list_on_final_chunk() {
-        let update = UpdateRepository {
-            updated_statuses: vec![
-                StatusEntry::default(),
-                StatusEntry::default(),
-                StatusEntry::default(),
-            ],
-            branch_list: vec![Branch {
-                ref_name: "refs/heads/main".into(),
-                ..Default::default()
-            }],
-            branch_list_error: Some("partial branch scan".into()),
-            ..Default::default()
-        };
-
-        let chunks = split_repository_update(update).collect::<Vec<_>>();
-
-        assert_eq!(chunks.len(), 3);
-        assert!(chunks[0].branch_list.is_empty());
-        assert!(chunks[1].branch_list.is_empty());
-        assert_eq!(chunks[2].branch_list.len(), 1);
-        assert_eq!(chunks[2].branch_list[0].ref_name, "refs/heads/main");
-        assert_eq!(chunks[0].branch_list_error, None);
-        assert_eq!(chunks[1].branch_list_error, None);
-        assert_eq!(
-            chunks[2].branch_list_error.as_deref(),
-            Some("partial branch scan")
-        );
-        assert!(!chunks[0].is_last_update);
-        assert!(!chunks[1].is_last_update);
-        assert!(chunks[2].is_last_update);
     }
 }

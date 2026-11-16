@@ -170,7 +170,7 @@ pub use semantic_tokens::{
 
 pub use worktree::{
     Entry, EntryKind, FS_WATCH_LATENCY, File, LocalWorktree, PathChange, ProjectEntryId,
-    UpdatedEntriesSet, UpdatedGitRepositoriesSet, Worktree, WorktreeId, WorktreeSettings,
+    UpdatedEntriesSet, Worktree, WorktreeId, WorktreeSettings,
 };
 
 const SERVER_LAUNCHING_BEFORE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -5167,10 +5167,7 @@ impl LspStore {
                     worktree::Event::UpdatedEntries(changes) => {
                         this.update_local_worktree_language_servers(&worktree, changes, cx);
                     }
-                    worktree::Event::UpdatedGitRepositories(_)
-                    | worktree::Event::DeletedEntry(_)
-                    | worktree::Event::Deleted
-                    | worktree::Event::UpdatedRootRepoCommonDir { .. } => {}
+                    worktree::Event::DeletedEntry(_) | worktree::Event::Deleted => {}
                 })
                 .detach()
             }
@@ -5183,9 +5180,7 @@ impl LspStore {
             }
             WorktreeStoreEvent::WorktreeReleased(..)
             | WorktreeStoreEvent::WorktreeOrderChanged
-            | WorktreeStoreEvent::WorktreeUpdatedGitRepositories(..)
-            | WorktreeStoreEvent::WorktreeDeletedEntry(..)
-            | WorktreeStoreEvent::WorktreeUpdatedRootRepoCommonDir(..) => {}
+            | WorktreeStoreEvent::WorktreeDeletedEntry(..) => {}
         }
     }
 
@@ -18270,7 +18265,6 @@ mod tests {
                     root_name: "repo".to_string(),
                     visible: true,
                     abs_path: r"C:\repo".to_string(),
-                    ..Default::default()
                 },
                 AnyProtoClient::new(rpc::NoopProtoClient::new()),
                 PathStyle::Windows,

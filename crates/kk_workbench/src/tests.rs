@@ -379,19 +379,33 @@ fn file_information_preserves_binary_hashes_missing_files_and_lfs_identity() -> 
         assert_eq!(lfs.pointer_text().as_deref(), Some(pointer));
         assert_eq!(lfs.size, Some(3));
         let lfs_pointer = lfs.pointer.as_ref().context("LFS pointer")?;
-        assert!(repository.lfs_content(lfs_pointer).await.is_err());
+        let file_object = lfs.object_id.as_deref().context("LFS file object ID")?;
+        assert!(
+            repository
+                .lfs_content(file_object, lfs_pointer)
+                .await
+                .is_err()
+        );
         let directory = fixture.root().join(".kk/repo/store/git/lfs/objects/ba/78");
         fs::create_dir_all(&directory)?;
         let object = directory.join(&lfs_pointer.hash);
         fs::write(&object, b"abc")?;
-        assert_eq!(repository.lfs_content(lfs_pointer).await?, b"abc");
+        assert_eq!(
+            repository.lfs_content(file_object, lfs_pointer).await?,
+            b"abc"
+        );
         fs::write(&object, b"bad")?;
-        assert!(repository.lfs_content(lfs_pointer).await.is_err());
+        assert!(
+            repository
+                .lfs_content(file_object, lfs_pointer)
+                .await
+                .is_err()
+        );
         let invalid = LfsPointer {
             hash: "../outside".into(),
             size: 3,
         };
-        assert!(repository.lfs_content(&invalid).await.is_err());
+        assert!(repository.lfs_content(file_object, &invalid).await.is_err());
         let draft = repository
             .working_file_information("large.bin", Some(b"abc"))
             .await?;

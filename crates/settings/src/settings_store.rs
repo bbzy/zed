@@ -1715,7 +1715,7 @@ mod tests {
     #[derive(Debug, PartialEq)]
     struct ItemSettings {
         close_position: ClosePosition,
-        git_status: bool,
+        file_icons: bool,
     }
 
     impl Settings for ItemSettings {
@@ -1723,7 +1723,7 @@ mod tests {
             let content = content.tabs.clone().unwrap();
             ItemSettings {
                 close_position: content.close_position.unwrap(),
-                git_status: content.git_status.unwrap(),
+                file_icons: content.file_icons.unwrap(),
             }
         }
     }
@@ -2154,13 +2154,13 @@ mod tests {
             r#""#.unindent(),
             |settings| {
                 settings.tabs = Some(ItemSettingsContent {
-                    git_status: Some(true),
+                    file_icons: Some(true),
                     ..Default::default()
                 })
             },
             r#"{
               "tabs": {
-                "git_status": true
+                "file_icons": true
               }
             }
             "#
@@ -2174,10 +2174,15 @@ mod tests {
             }
             "#
             .unindent(),
-            |settings| settings.title_bar.get_or_insert_default().show_branch_name = Some(true),
+            |settings| {
+                settings
+                    .title_bar
+                    .get_or_insert_default()
+                    .show_project_items = Some(true)
+            },
             r#"{
               "title_bar": {
-                "show_branch_name": true
+                "show_project_items": true
               }
             }
             "#
@@ -2292,7 +2297,6 @@ mod tests {
             cx,
         );
 
-        // custom enum
         check_vscode_import(
             &mut store,
             r#"{
@@ -2301,16 +2305,7 @@ mod tests {
             .unindent(),
             r#"{ "git.decorations.enabled": true }"#.to_owned(),
             r#"{
-              "project_panel": {
-                "git_status": true
-              },
-              "outline_panel": {
-                "git_status": true
-              },
               "base_keymap": "VSCode",
-              "tabs": {
-                "git_status": true
-              },
               "minimap": {
                 "show": "always"
               }
@@ -2743,25 +2738,25 @@ mod tests {
     }
 
     #[gpui::test]
-    fn test_update_git_settings(cx: &mut App) {
+    fn test_update_diff_settings(cx: &mut App) {
         let store = SettingsStore::new(cx, &test_settings());
 
         let actual = store
             .new_text_for_update("{}".to_string(), |current| {
                 current
-                    .git
+                    .diff
                     .get_or_insert_default()
-                    .inline_blame
+                    .file_diff
                     .get_or_insert_default()
-                    .enabled = Some(true);
+                    .show_full_file = Some(true);
             })
             .unwrap();
         pretty_assertions::assert_str_eq!(
             actual,
             r#"{
-              "git": {
-                "inline_blame": {
-                  "enabled": true
+              "diff": {
+                "file_diff": {
+                  "show_full_file": true
                 }
               }
             }
@@ -2781,7 +2776,7 @@ mod tests {
                 r#"{
                     "tabs": {
                         "close_position": "right",
-                        "git_status": true,
+                        "file_icons": true,
                     }
                 }"#,
                 cx,
@@ -2793,7 +2788,7 @@ mod tests {
             store.get::<ItemSettings>(None),
             &ItemSettings {
                 close_position: ClosePosition::Right,
-                git_status: true,
+                file_icons: true,
             }
         );
 
@@ -2814,7 +2809,7 @@ mod tests {
             store.get::<ItemSettings>(None),
             &ItemSettings {
                 close_position: ClosePosition::Left,
-                git_status: true, // Staff from global settings
+                file_icons: true, // Staff from global settings
             }
         );
     }

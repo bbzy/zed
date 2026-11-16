@@ -13,6 +13,7 @@ path = "src/outline_panel.rs"
 doctest = false
 
 [dependencies]
+buffer_diff.workspace = true
 anyhow.workspace = true
 async-channel.workspace = true
 collections.workspace = true
@@ -21,7 +22,6 @@ editor.workspace = true
 file_icons.workspace = true
 fuzzy.workspace = true
 futures.workspace = true
-git.workspace = true
 gpui.workspace = true
 language.workspace = true
 log.workspace = true

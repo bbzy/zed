@@ -195,14 +195,14 @@ impl Editor {
         cx.notify();
     }
 
-    pub fn set_show_git_diff_gutter(&mut self, show_git_diff_gutter: bool, cx: &mut Context<Self>) {
-        self.show_git_diff_gutter = Some(show_git_diff_gutter);
+    pub fn set_show_diff_gutter(&mut self, show_diff_gutter: bool, cx: &mut Context<Self>) {
+        self.show_diff_gutter = Some(show_diff_gutter);
         cx.notify();
     }
 
-    pub fn set_allow_git_diff_scrollbar_markers(&mut self, allow: bool, cx: &mut Context<Self>) {
-        if self.allow_git_diff_scrollbar_markers != allow {
-            self.allow_git_diff_scrollbar_markers = allow;
+    pub fn set_allow_diff_scrollbar_markers(&mut self, allow: bool, cx: &mut Context<Self>) {
+        if self.allow_diff_scrollbar_markers != allow {
+            self.allow_diff_scrollbar_markers = allow;
             self.scrollbar_marker_state.dirty = true;
             self.scrollbar_marker_state.markers = Default::default();
             self.scrollbar_marker_state.pending_refresh = None;
@@ -210,11 +210,10 @@ impl Editor {
         }
     }
 
-    pub fn git_diff_scrollbar_markers_enabled(&self, cx: &App) -> bool {
-        EditorSettings::get_global(cx).scrollbar.git_diff
-            && (self.allow_git_diff_scrollbar_markers
-                || (self.buffer_kind(cx) == ItemBufferKind::Singleton
-                    && ProjectSettings::get_global(cx).git.enabled.diff))
+    pub fn diff_scrollbar_markers_enabled(&self, cx: &App) -> bool {
+        EditorSettings::get_global(cx).scrollbar.diff
+            && (self.allow_diff_scrollbar_markers
+                || self.buffer_kind(cx) == ItemBufferKind::Singleton)
     }
 
     pub fn set_show_code_actions(&mut self, show_code_actions: bool, cx: &mut Context<Self>) {
@@ -258,7 +257,7 @@ impl Editor {
                 SoftWrap::Bounded(soft_wrap) => {
                     wrap_guides.push((soft_wrap as usize, true));
                 }
-                SoftWrap::GitDiff | SoftWrap::None | SoftWrap::EditorWidth => {}
+                SoftWrap::Diff | SoftWrap::None | SoftWrap::EditorWidth => {}
             }
             wrap_guides.extend(settings.wrap_guides.iter().map(|guide| (*guide, false)))
         }
@@ -316,7 +315,7 @@ impl Editor {
             self.soft_wrap_mode_override.take();
         } else {
             let soft_wrap = match self.soft_wrap_mode(cx) {
-                SoftWrap::GitDiff => return,
+                SoftWrap::Diff => return,
                 SoftWrap::None => language_settings::SoftWrap::EditorWidth,
                 SoftWrap::EditorWidth | SoftWrap::Bounded(_) => language_settings::SoftWrap::None,
             };
@@ -408,19 +407,15 @@ mod tests {
     use crate::test::editor_test_context::EditorTestContext;
 
     #[gpui::test]
-    async fn explicit_diff_scrollbar_markers_respect_git_and_marker_settings(
+    async fn explicit_diff_scrollbar_markers_respect_marker_settings(
         cx: &mut gpui::TestAppContext,
     ) {
         crate::editor_tests::init_test(cx, |_| {});
         let mut cx = EditorTestContext::new(cx).await;
         for (settings, ordinary, explicit) in [
-            (r#"{"git":{"disable_git":true}}"#, false, true),
-            (
-                r#"{"git":{"disable_git":true},"scrollbar":{"git_diff":false}}"#,
-                false,
-                false,
-            ),
-            (r#"{"git":{"disable_git":false}}"#, true, true),
+            (r#"{}"#, true, true),
+            (r#"{"scrollbar":{"diff":false}}"#, false, false),
+            (r#"{"scrollbar":{"diff":true}}"#, true, true),
         ] {
             cx.update(|_, cx| {
                 let mut store = SettingsStore::test(cx);
@@ -430,10 +425,10 @@ mod tests {
                 cx.set_global(store);
             });
             cx.update_editor(|editor, _, cx| {
-                editor.set_allow_git_diff_scrollbar_markers(false, cx);
-                assert_eq!(editor.git_diff_scrollbar_markers_enabled(cx), ordinary);
-                editor.set_allow_git_diff_scrollbar_markers(true, cx);
-                assert_eq!(editor.git_diff_scrollbar_markers_enabled(cx), explicit);
+                editor.set_allow_diff_scrollbar_markers(false, cx);
+                assert_eq!(editor.diff_scrollbar_markers_enabled(cx), ordinary);
+                editor.set_allow_diff_scrollbar_markers(true, cx);
+                assert_eq!(editor.diff_scrollbar_markers_enabled(cx), explicit);
             });
         }
     }

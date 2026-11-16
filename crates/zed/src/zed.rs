@@ -25,13 +25,13 @@ use breadcrumbs::Breadcrumbs;
 use client::zed_urls;
 use collections::VecDeque;
 use debugger_ui::debugger_panel::DebugPanel;
+use diff_ui::file_diff_view::FileDiffStyleToolbar;
 use editor::{Editor, MultiBuffer};
 use extension_host::ExtensionStore;
 use feature_flags::{FeatureFlagAppExt as _, PanicFeatureFlag};
 use fs::Fs;
 use futures::FutureExt as _;
 use futures::{StreamExt, channel::mpsc, select_biased};
-use git_ui_core::file_diff_view::FileDiffStyleToolbar;
 use gpui::{
     Action, App, AppContext as _, AsyncWindowContext, ClipboardItem, Context, DismissEvent,
     Element, Entity, FocusHandle, Focusable, Image, ImageFormat, KeyBinding, ParentElement,
@@ -1288,7 +1288,6 @@ fn register_actions(
         })
         .register_action(open_project_settings_file)
         .register_action(open_project_tasks_file)
-        .register_action(open_worktree_setup_tasks_file)
         .register_action(open_project_debug_tasks_file)
         .register_action(
             |workspace: &mut Workspace,
@@ -2481,55 +2480,6 @@ fn open_project_tasks_file(
     ) {
         task.detach_and_log_err(cx);
     }
-}
-
-fn open_worktree_setup_tasks_file(
-    workspace: &mut Workspace,
-    _: &zed_actions::OpenWorktreeSetupTasks,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) {
-    // Kept harmless on purpose: tasks with the `create_worktree` hook run automatically
-    // when a worktree is created, so the example must be safe to save unedited.
-    const WORKTREE_SETUP_TASK_EXAMPLE: &str = r#"  {
-    // Runs automatically after Zed creates a new git worktree.
-    // $ZED_WORKTREE_ROOT is the new worktree's root directory, and
-    // $ZED_MAIN_GIT_WORKTREE is the original repository's working directory.
-    "label": "Set up new worktree",
-    "command": "echo \"Setting up $ZED_WORKTREE_ROOT — edit this command\"",
-    "cwd": "$ZED_WORKTREE_ROOT",
-    "hooks": ["create_worktree"]
-  }"#;
-
-    let Some(open_task) = open_local_file(
-        workspace,
-        local_tasks_file_relative_path(),
-        settings::initial_worktree_setup_tasks_content(),
-        window,
-        cx,
-    ) else {
-        return;
-    };
-
-    cx.spawn_in(window, async move |_, cx| {
-        let editor = open_task.await?;
-        editor.update_in(cx, |editor, window, cx| {
-            // Skip insertion if the file already mentions the hook (even in a comment,
-            // like the seeded template's example — uncommenting it beats duplicating it).
-            // `create_git_worktree` is a serde alias for the same hook.
-            let text = editor.text(cx);
-            if text.contains("create_worktree") || text.contains("create_git_worktree") {
-                return anyhow::Ok(());
-            }
-            tasks_ui::insert_task_json_into_editor(
-                editor,
-                WORKTREE_SETUP_TASK_EXAMPLE.to_string(),
-                window,
-                cx,
-            )
-        })?
-    })
-    .detach_and_log_err(cx);
 }
 
 fn open_project_debug_tasks_file(
@@ -6148,6 +6098,23 @@ mod tests {
     /// Checks that action namespaces are the expected set. The purpose of this is to prevent typos
     /// and let you know when introducing a new namespace.
     #[gpui::test]
+    fn test_bundled_keymaps(cx: &mut App) {
+        let errors = settings::SettingsAssets::iter()
+            .filter(|path| path.starts_with("keymaps/") && path.ends_with(".json"))
+            .filter_map(|path| {
+                KeymapFile::load_asset(&path, None, cx)
+                    .err()
+                    .map(|error| format!("{path}: {error:#}"))
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            errors.is_empty(),
+            "invalid bundled keymaps:\n{}",
+            errors.join("\n\n")
+        );
+    }
+
+    #[gpui::test]
     async fn test_action_namespaces(cx: &mut gpui::TestAppContext) {
         use itertools::Itertools;
 
@@ -6190,9 +6157,7 @@ mod tests {
                 "assistant",
                 "assistant2",
                 "auto_update",
-                "branch_picker",
                 "bedrock",
-                "branches",
                 "buffer_search",
                 "call_hierarchy",
                 "channel_modal",
@@ -6214,11 +6179,6 @@ mod tests {
                 "encoding_selector",
                 "feedback",
                 "file_finder",
-                "git",
-                "git_graph",
-                "git_onboarding",
-                "git_panel",
-                "git_picker",
                 "go_to_line",
                 "highlights_tree_view",
                 "icon_theme_selector",
@@ -6226,6 +6186,7 @@ mod tests {
                 "inline_assistant",
                 "journal",
                 "keymap_editor",
+                "kk_workbench",
                 "keystroke_input",
                 "language_selector",
                 "welcome",
@@ -6254,7 +6215,6 @@ mod tests {
                 "settings_profile_selector",
                 "skill_creator",
                 "snippets",
-                "stash_picker",
                 "svg",
                 "syntax_tree_view",
                 "tab_switcher",
@@ -6272,7 +6232,6 @@ mod tests {
                 "which_key",
                 "window",
                 "workspace",
-                "worktree_picker",
                 "zed",
                 "zed_actions",
                 "zed_predict_onboarding",
@@ -6464,7 +6423,7 @@ mod tests {
             command_palette::init(cx);
             editor::init(cx);
             collab_ui::init(&app_state, cx);
-            git_ui_core::init(cx);
+            diff_ui::init(cx);
             kk_ui::init(cx);
             project_panel::init(cx);
             outline_panel::init(cx);

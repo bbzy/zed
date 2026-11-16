@@ -1,6 +1,6 @@
 ---
 title: Parallel Agents - Zed
-description: Run multiple agent threads and Terminal Threads concurrently using the Threads Sidebar, manage them across projects, and isolate work using Git worktrees.
+description: Run multiple agent threads and Terminal Threads concurrently using the Threads Sidebar, manage them across projects, and use isolated workspaces.
 ---
 
 # Parallel Agents
@@ -9,11 +9,11 @@ Parallel Agents lets you run multiple agent threads and Terminal Threads at once
 
 Open the Threads Sidebar with {#kb multi_workspace::ToggleWorkspaceSidebar}.
 
-Use **Panel Layout > Agentic** from the user menu in the title bar (or the {#action workspace::UseAgenticLayout} action) to place the Agent Panel and Threads Sidebar on the left, with the Project Panel, Git Panel, and other panels on the right. Use **Panel Layout > Classic** (or {#action workspace::UseClassicLayout}) to restore the editor-oriented layout. You can still rearrange individual panels by right-clicking any panel icon.
+Use **Panel Layout > Agentic** from the user menu in the title bar (or the {#action workspace::UseAgenticLayout} action) to place the Agent Panel and Threads Sidebar on the left, with the Project Panel and other panels on the right. Use **Panel Layout > Classic** (or {#action workspace::UseClassicLayout}) to restore the editor-oriented layout. You can still rearrange individual panels by right-clicking any panel icon.
 
 ## Threads Sidebar {#threads-sidebar}
 
-The sidebar shows your threads grouped by project. Each project gets its own section with a header. Threads appear below with their title, status indicator, and which agent is running them. Threads running in linked Git worktrees appear under the same project as their main worktree. See [Worktree Isolation](#worktree-isolation).
+The sidebar shows your threads grouped by project. Each project gets its own section with a header. Threads appear below with their title, status indicator, and which agent is running them.
 
 Terminal Threads also appear as entries in the sidebar alongside agent threads, identified by a terminal icon. Click one to switch to it.
 
@@ -37,7 +37,7 @@ To remove a thread from the sidebar, you can archive it by hovering over it and 
 
 The Thread History view holds all your threads, including ones that you have archived. Toggle it with {#kb agents_sidebar::ToggleThreadHistory} or by clicking the clock icon in the sidebar bottom bar, next to the sidebar toggle.
 
-To restore a thread, open Thread History and click the thread you want to bring back. Zed moves it back to the thread list and opens it in the Agent Panel. If the thread was running in a Git worktree that was removed, Zed restores the worktree automatically.
+To restore a thread, open Thread History and click the thread you want to bring back. Zed moves it back to the thread list and opens it in the Agent Panel.
 
 To permanently delete a thread, open Thread History, hover over the thread, and click the trash icon. This removes the thread's conversation history and cleans up any associated worktree data. Deleted threads cannot be recovered.
 
@@ -79,17 +79,11 @@ A single project can contain multiple folders (a multi-root folder project). Age
 - **From the title bar:** Click the project picker (the leftmost project name). For any local entry in the recent projects list, hover it and click the folder-with-plus icon (**Add Folder to this Project**) to merge that project's folders into the current project.
 - **From the Project panel:** Right-click a root folder or any empty space in the Project panel and choose **Add Folders to Project** to add more folders to the current project.
 
-## Worktree Isolation {#worktree-isolation}
+## Workspace Isolation {#worktree-isolation}
 
-If two threads might edit the same files, start one in a new [Git worktree](../git.md#git-worktrees) to give it an isolated checkout.
+Use separate KK workspaces when concurrent threads need isolated files. Create a workspace using KK and open its folder as a separate project.
 
-Worktrees are managed from the title bar. Click the worktree picker (to the right of the project picker) to switch between existing worktrees or create a new one. New worktrees are created in a detached HEAD state, so you won't accidentally share a branch between worktrees.
-
-Once you're in a new worktree, use the branch picker next to the worktree picker to create a new branch or check out an existing one. If the branch you pick is already checked out in another worktree, the current worktree stays in detached HEAD until you choose a different branch.
-
-To automate setup steps whenever a new worktree is created, use a [Task hook](../tasks.md#hooks). The `create_worktree` hook runs automatically after Zed creates a linked worktree, with `ZED_WORKTREE_ROOT` pointing at the new worktree and `ZED_MAIN_GIT_WORKTREE` pointing at the original repository.
-
-After the agent finishes, review the diff and merge the changes through your normal Git workflow. If the thread was running in a linked worktree and no other active threads use it, moving the thread to Thread History saves the worktree's Git state and removes it from disk. Restoring the thread from history restores the worktree.
+Archiving a thread retains its metadata and hides it from the sidebar. For historical threads whose checkout was previously archived by Zed's Git integration, restore the checkout outside Zed and open the project before restoring the thread.
 
 ## See Also {#see-also}
 

@@ -11,7 +11,6 @@ pub struct OutlinePanelSettings {
     pub dock: DockSide,
     pub file_icons: bool,
     pub folder_indicator: FolderIndicator,
-    pub git_status: bool,
     pub indent_size: f32,
     pub indent_guides: IndentGuidesSettings,
     pub auto_reveal_entries: bool,
@@ -55,14 +54,6 @@ impl Settings for OutlinePanelSettings {
             dock: panel.dock.unwrap(),
             file_icons: panel.file_icons.unwrap(),
             folder_indicator: panel.folder_indicator.unwrap(),
-            git_status: panel.git_status.unwrap()
-                && content
-                    .git
-                    .as_ref()
-                    .unwrap()
-                    .enabled
-                    .unwrap()
-                    .is_git_status_enabled(),
             indent_size: *panel.indent_size.unwrap(),
             indent_guides: IndentGuidesSettings {
                 show: panel.indent_guides.unwrap().show.unwrap(),

@@ -6741,7 +6741,6 @@ impl ThreadView {
         let workspace = self.workspace.clone();
         let session_capabilities = self.session_capabilities.read();
         let supports_images = session_capabilities.supports_images();
-        let supports_embedded_context = session_capabilities.supports_embedded_context();
         let available_skills = session_capabilities.completion_skills();
         drop(session_capabilities);
 
@@ -6853,20 +6852,6 @@ impl ThreadView {
                                     zed_actions::agent::AddSelectionToThread.boxed_clone(),
                                     cx,
                                 );
-                            }
-                        }),
-                )
-                .item(
-                    ContextMenuEntry::new("Branch Diff")
-                        .icon(IconName::GitBranch)
-                        .icon_color(Color::Muted)
-                        .icon_size(IconSize::XSmall)
-                        .disabled(!supports_embedded_context)
-                        .handler({
-                            move |window, cx| {
-                                message_editor.update(cx, |editor, cx| {
-                                    editor.insert_branch_diff_crease(window, cx);
-                                });
                             }
                         }),
                 )

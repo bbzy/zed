@@ -8,7 +8,6 @@ use cloud_api_types::{ExtensionMetadata, ExtensionProvides};
 use collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use dashmap::DashMap;
 use futures::StreamExt;
-use project_repository_statuses::StatusKind;
 use rpc::{
     ConnectionId,
     proto::{self},
@@ -501,8 +500,6 @@ pub struct RejoinedProject {
     pub old_connection_id: ConnectionId,
     pub collaborators: Vec<ProjectCollaborator>,
     pub worktrees: Vec<RejoinedWorktree>,
-    pub updated_repositories: Vec<proto::UpdateRepository>,
-    pub removed_repositories: Vec<u64>,
     pub language_servers: Vec<LanguageServer>,
 }
 
@@ -524,9 +521,7 @@ impl RejoinedProject {
                     root_name: worktree.root_name.clone(),
                     visible: worktree.visible,
                     abs_path: worktree.abs_path.clone(),
-                    root_repo_common_dir: None,
                     // todo(collab): Get this field from database
-                    root_repo_is_linked_worktree: false,
                 })
                 .collect(),
             collaborators: self
@@ -548,13 +543,10 @@ pub struct RejoinedWorktree {
     pub visible: bool,
     pub updated_entries: Vec<proto::Entry>,
     pub removed_entries: Vec<u64>,
-    pub updated_repositories: Vec<proto::RepositoryEntry>,
-    pub removed_repositories: Vec<u64>,
     pub diagnostic_summaries: Vec<proto::DiagnosticSummary>,
     pub settings_files: Vec<WorktreeSettingsFile>,
     pub scan_id: u64,
     pub completed_scan_id: u64,
-    pub root_repo_common_dir: Option<String>,
 }
 
 pub struct LeftRoom {
@@ -582,7 +574,6 @@ pub struct Project {
     pub role: ChannelRole,
     pub collaborators: Vec<ProjectCollaborator>,
     pub worktrees: BTreeMap<u64, Worktree>,
-    pub repositories: Vec<proto::UpdateRepository>,
     pub language_servers: Vec<LanguageServer>,
     pub path_style: PathStyle,
     pub features: Vec<String>,
@@ -629,12 +620,10 @@ pub struct Worktree {
     pub root_name: String,
     pub visible: bool,
     pub entries: Vec<proto::Entry>,
-    pub legacy_repository_entries: BTreeMap<u64, proto::RepositoryEntry>,
     pub diagnostic_summaries: Vec<proto::DiagnosticSummary>,
     pub settings_files: Vec<WorktreeSettingsFile>,
     pub scan_id: u64,
     pub completed_scan_id: u64,
-    pub root_repo_common_dir: Option<String>,
 }
 
 #[derive(Debug)]
@@ -680,96 +669,4 @@ impl LocalSettingsKind {
             Self::Debug => proto::LocalSettingsKind::Debug,
         }
     }
-}
-
-fn db_status_to_proto(
-    entry: project_repository_statuses::Model,
-) -> anyhow::Result<proto::StatusEntry> {
-    use proto::git_file_status::{Tracked, Unmerged, Variant};
-
-    let (simple_status, variant) =
-        match (entry.status_kind, entry.first_status, entry.second_status) {
-            (StatusKind::Untracked, None, None) => (
-                proto::GitStatus::Added as i32,
-                Variant::Untracked(Default::default()),
-            ),
-            (StatusKind::Ignored, None, None) => (
-                proto::GitStatus::Added as i32,
-                Variant::Ignored(Default::default()),
-            ),
-            (StatusKind::Unmerged, Some(first_head), Some(second_head)) => (
-                proto::GitStatus::Conflict as i32,
-                Variant::Unmerged(Unmerged {
-                    first_head,
-                    second_head,
-                }),
-            ),
-            (StatusKind::Tracked, Some(index_status), Some(worktree_status)) => {
-                let simple_status = if worktree_status != proto::GitStatus::Unmodified as i32 {
-                    worktree_status
-                } else if index_status != proto::GitStatus::Unmodified as i32 {
-                    index_status
-                } else {
-                    proto::GitStatus::Unmodified as i32
-                };
-                (
-                    simple_status,
-                    Variant::Tracked(Tracked {
-                        index_status,
-                        worktree_status,
-                    }),
-                )
-            }
-            _ => {
-                anyhow::bail!("Unexpected combination of status fields: {entry:?}");
-            }
-        };
-    Ok(proto::StatusEntry {
-        repo_path: entry.repo_path,
-        simple_status,
-        status: Some(proto::GitFileStatus {
-            variant: Some(variant),
-        }),
-        diff_stat_added: entry.lines_added.map(|v| v as u32),
-        diff_stat_deleted: entry.lines_deleted.map(|v| v as u32),
-        staged_diff_stat_added: None,
-        staged_diff_stat_deleted: None,
-        unstaged_diff_stat_added: None,
-        unstaged_diff_stat_deleted: None,
-    })
-}
-
-fn proto_status_to_db(
-    status_entry: proto::StatusEntry,
-) -> (String, StatusKind, Option<i32>, Option<i32>) {
-    use proto::git_file_status::{Tracked, Unmerged, Variant};
-
-    let (status_kind, first_status, second_status) = status_entry
-        .status
-        .and_then(|status| status.variant)
-        .map_or(
-            (StatusKind::Untracked, None, None),
-            |variant| match variant {
-                Variant::Untracked(_) => (StatusKind::Untracked, None, None),
-                Variant::Ignored(_) => (StatusKind::Ignored, None, None),
-                Variant::Unmerged(Unmerged {
-                    first_head,
-                    second_head,
-                }) => (StatusKind::Unmerged, Some(first_head), Some(second_head)),
-                Variant::Tracked(Tracked {
-                    index_status,
-                    worktree_status,
-                }) => (
-                    StatusKind::Tracked,
-                    Some(index_status),
-                    Some(worktree_status),
-                ),
-            },
-        );
-    (
-        status_entry.repo_path,
-        status_kind,
-        first_status,
-        second_status,
-    )
 }

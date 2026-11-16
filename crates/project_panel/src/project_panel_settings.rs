@@ -19,7 +19,6 @@ pub struct ProjectPanelSettings {
     pub entry_spacing: ProjectPanelEntrySpacing,
     pub file_icons: bool,
     pub folder_indicator: FolderIndicator,
-    pub git_status: bool,
     pub indent_size: f32,
     pub indent_guides: IndentGuidesSettings,
     pub sticky_scroll: bool,
@@ -36,7 +35,6 @@ pub struct ProjectPanelSettings {
     pub sort_mode: ProjectPanelSortMode,
     pub sort_order: ProjectPanelSortOrder,
     pub diagnostic_badges: bool,
-    pub git_status_indicator: bool,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -105,14 +103,6 @@ impl Settings for ProjectPanelSettings {
             entry_spacing: project_panel.entry_spacing.unwrap(),
             file_icons: project_panel.file_icons.unwrap(),
             folder_indicator: project_panel.folder_indicator.unwrap(),
-            git_status: project_panel.git_status.unwrap()
-                && content
-                    .git
-                    .as_ref()
-                    .unwrap()
-                    .enabled
-                    .unwrap()
-                    .is_git_status_enabled(),
             indent_size: *project_panel.indent_size.unwrap(),
             indent_guides: IndentGuidesSettings {
                 show: project_panel.indent_guides.unwrap().show.unwrap(),
@@ -144,7 +134,6 @@ impl Settings for ProjectPanelSettings {
             sort_mode: project_panel.sort_mode.unwrap(),
             sort_order: project_panel.sort_order.unwrap(),
             diagnostic_badges: project_panel.diagnostic_badges.unwrap(),
-            git_status_indicator: project_panel.git_status_indicator.unwrap(),
         }
     }
 }

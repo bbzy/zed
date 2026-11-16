@@ -473,7 +473,6 @@ mod tests {
                 new_snapshot_version: current_snapshot.text.version.clone(),
                 total_edit_range: current_snapshot.anchor_before(5)
                     ..current_snapshot.anchor_before(8),
-                file_context: None,
             };
 
             let original_window =

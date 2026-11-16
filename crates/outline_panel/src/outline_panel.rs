@@ -7,13 +7,13 @@ use editor::{
     AnchorRangeExt, Bias, DisplayPoint, Editor, EditorEvent, ExcerptRange, MultiBufferSnapshot,
     RangeToAnchorExt, SelectionEffects,
     display_map::ToDisplayPoint,
-    items::{entry_git_aware_label_color, entry_label_color},
+    items::{entry_label_color, entry_status_label_color},
     scroll::{Autoscroll, ScrollAnchor},
 };
 use file_icons::FileIcons;
 
+use buffer_diff::FileStatus;
 use fuzzy::{StringMatch, StringMatchCandidate, match_strings};
-use git::status::{FileStatus, GitSummary};
 use gpui::{
     Action, AnyElement, App, AppContext as _, AsyncWindowContext, Bounds, ClipboardItem, Context,
     DismissEvent, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable, HighlightStyle,
@@ -59,7 +59,7 @@ use workspace::{
     item::ItemHandle,
     searchable::{SearchEvent, SearchableItem},
 };
-use worktree::{PathProgress, PathTarget, WorktreeId};
+use worktree::WorktreeId;
 
 use crate::outline_panel_settings::OutlinePanelSettingsScrollbarProxy;
 
@@ -843,7 +843,7 @@ impl OutlineEntry {
 #[derive(Debug, Clone, Eq)]
 struct FsEntryPath {
     path: Arc<RelPath>,
-    git_summary: GitSummary,
+    status: Option<FileStatus>,
     is_ignored: bool,
 }
 
@@ -2616,8 +2616,7 @@ impl OutlinePanel {
                 ..
             }) => {
                 let name = self.entry_name(worktree_id, entry, cx);
-                let color =
-                    entry_git_aware_label_color(entry.git_summary, entry.is_ignored, is_active);
+                let color = entry_status_label_color(entry.status, entry.is_ignored, is_active);
                 let icon = if settings.file_icons {
                     FileIcons::get_icon(Path::new(&name), cx)
                         .map(|icon_path| Icon::from_path(icon_path).color(color).into_any_element())
@@ -2652,8 +2651,8 @@ impl OutlinePanel {
                     directory.worktree_id,
                     directory.entry.path.clone(),
                 ));
-                let color = entry_git_aware_label_color(
-                    directory.entry.git_summary,
+                let color = entry_status_label_color(
+                    directory.entry.status,
                     directory.entry.is_ignored,
                     is_active,
                 );
@@ -2757,12 +2756,8 @@ impl OutlinePanel {
                 ))
             });
             let is_ignored = folded_dir.entries.iter().any(|entry| entry.is_ignored);
-            let git_status = folded_dir
-                .entries
-                .first()
-                .map(|entry| entry.git_summary)
-                .unwrap_or_default();
-            let color = entry_git_aware_label_color(git_status, is_ignored, is_active);
+            let status = folded_dir.entries.first().and_then(|entry| entry.status);
+            let color = entry_status_label_color(status, is_ignored, is_active);
             let icon = self.folder_expand_collapse_icon(
                 PanelEntry::FoldedDirs(folded_dir.clone()),
                 is_expanded,
@@ -3146,97 +3141,87 @@ impl OutlinePanel {
             }
 
             let mut new_buffers = HashMap::<BufferId, BufferOutlines>::default();
-            let Ok((
-                buffer_excerpts,
-                auto_fold_dirs,
-                repo_snapshots,
-                mut collapsed_entries,
-                mut unfolded_dirs,
-            )) = outline_panel.update(cx, |outline_panel, cx| {
-                outline_panel.fs_entries_update_pending = false;
-                let auto_fold_dirs = OutlinePanelSettings::get_global(cx).auto_fold_dirs;
-                let git_store = outline_panel.project.read(cx).git_store().clone();
-                let repo_snapshots = git_store.read(cx).display_repo_snapshots(cx);
-                let editor = active_editor.read(cx);
-                let snapshot = editor.buffer().read(cx).snapshot(cx);
-                let mut buffer_excerpts = IndexMap::<BufferId, BufferExcerpts>::default();
+            let Ok((buffer_excerpts, auto_fold_dirs, mut collapsed_entries, mut unfolded_dirs)) =
+                outline_panel.update(cx, |outline_panel, cx| {
+                    outline_panel.fs_entries_update_pending = false;
+                    let auto_fold_dirs = OutlinePanelSettings::get_global(cx).auto_fold_dirs;
+                    let editor = active_editor.read(cx);
+                    let snapshot = editor.buffer().read(cx).snapshot(cx);
+                    let mut buffer_excerpts = IndexMap::<BufferId, BufferExcerpts>::default();
 
-                for excerpt in snapshot.excerpts() {
-                    let buffer_id = excerpt.context.start.buffer_id;
-                    let Some(buffer) = snapshot.buffer_for_id(buffer_id) else {
-                        continue;
-                    };
-                    buffer_excerpts
-                        .entry(buffer_id)
-                        .or_insert_with(|| {
-                            let status = git_store
-                                .read(cx)
-                                .display_status_for_buffer_id(buffer_id, cx);
-                            let file = File::from_dyn(buffer.file());
-                            let is_deleted = file.is_some_and(|file| {
-                                is_deleted_file(
+                    for excerpt in snapshot.excerpts() {
+                        let buffer_id = excerpt.context.start.buffer_id;
+                        let Some(buffer) = snapshot.buffer_for_id(buffer_id) else {
+                            continue;
+                        };
+                        buffer_excerpts
+                            .entry(buffer_id)
+                            .or_insert_with(|| {
+                                let status = editor.status_for_buffer_id(buffer_id, cx);
+                                let file = File::from_dyn(buffer.file());
+                                let is_deleted = file.is_some_and(|file| {
+                                    is_deleted_file(
+                                        file,
+                                        status,
+                                        snapshot
+                                            .diff_for_buffer_id(buffer_id)
+                                            .is_some_and(|diff| diff.base_text_exists()),
+                                    )
+                                });
+                                let file = file.and_then(|file| {
+                                    let worktree = file.worktree.read(cx).snapshot();
+                                    let entry = file
+                                        .project_entry_id()
+                                        .and_then(|id| worktree.entry_for_id(id));
+                                    if entry.is_none() && !is_deleted {
+                                        return None;
+                                    }
+                                    let path_entry = FsEntryPath {
+                                        path: file.path.clone(),
+                                        status,
+                                        is_ignored: entry.is_some_and(|entry| entry.is_ignored),
+                                    };
+                                    Some((worktree, path_entry))
+                                });
+                                BufferExcerpts {
+                                    is_new: outline_panel
+                                        .new_entries_for_fs_update
+                                        .contains(&buffer_id)
+                                        || !outline_panel.buffers.contains_key(&buffer_id),
+                                    is_folded: editor.is_buffer_folded(buffer_id, cx),
+                                    excerpts: Vec::new(),
                                     file,
-                                    status,
-                                    snapshot
-                                        .diff_for_buffer_id(buffer_id)
-                                        .is_some_and(|diff| diff.base_text_exists()),
-                                )
-                            });
-                            let file = file.and_then(|file| {
-                                let worktree = file.worktree.read(cx).snapshot();
-                                let entry = file
-                                    .project_entry_id()
-                                    .and_then(|id| worktree.entry_for_id(id));
-                                if entry.is_none() && !is_deleted {
-                                    return None;
+                                    is_deleted,
                                 }
-                                let path_entry = FsEntryPath {
-                                    path: file.path.clone(),
-                                    git_summary: status.map(GitSummary::from).unwrap_or_default(),
-                                    is_ignored: entry.is_some_and(|entry| entry.is_ignored),
-                                };
-                                Some((worktree, path_entry))
-                            });
-                            BufferExcerpts {
-                                is_new: outline_panel
-                                    .new_entries_for_fs_update
-                                    .contains(&buffer_id)
-                                    || !outline_panel.buffers.contains_key(&buffer_id),
-                                is_folded: editor.is_buffer_folded(buffer_id, cx),
-                                excerpts: Vec::new(),
-                                file,
-                                is_deleted,
-                            }
-                        })
-                        .excerpts
-                        .push(excerpt.clone());
+                            })
+                            .excerpts
+                            .push(excerpt.clone());
 
-                    new_buffers
-                        .entry(buffer_id)
-                        .or_insert_with(|| {
-                            let outlines = match outline_panel.buffers.get(&buffer_id) {
-                                Some(BufferOutlines {
-                                    outlines: OutlineState::Outlines(outlines),
-                                    ..
-                                }) => OutlineState::Outlines(outlines.clone()),
-                                _ => OutlineState::NotFetched,
-                            };
-                            BufferOutlines {
-                                outlines,
-                                excerpts: Vec::new(),
-                            }
-                        })
-                        .excerpts
-                        .push(excerpt);
-                }
-                (
-                    buffer_excerpts,
-                    auto_fold_dirs,
-                    repo_snapshots,
-                    outline_panel.collapsed_entries.clone(),
-                    outline_panel.unfolded_dirs.clone(),
-                )
-            })
+                        new_buffers
+                            .entry(buffer_id)
+                            .or_insert_with(|| {
+                                let outlines = match outline_panel.buffers.get(&buffer_id) {
+                                    Some(BufferOutlines {
+                                        outlines: OutlineState::Outlines(outlines),
+                                        ..
+                                    }) => OutlineState::Outlines(outlines.clone()),
+                                    _ => OutlineState::NotFetched,
+                                };
+                                BufferOutlines {
+                                    outlines,
+                                    excerpts: Vec::new(),
+                                }
+                            })
+                            .excerpts
+                            .push(excerpt);
+                    }
+                    (
+                        buffer_excerpts,
+                        auto_fold_dirs,
+                        outline_panel.collapsed_entries.clone(),
+                        outline_panel.unfolded_dirs.clone(),
+                    )
+                })
             else {
                 return;
             };
@@ -3246,10 +3231,6 @@ impl OutlinePanel {
                     let mut fs_entries = Vec::new();
                     let mut directories = HashMap::<ProjectPath, FsEntryPath>::default();
                     let mut parent_paths = Vec::<ProjectPath>::new();
-                    let repositories_by_root = repo_snapshots
-                        .values()
-                        .map(|snapshot| (snapshot.work_directory_abs_path.as_ref(), snapshot))
-                        .collect::<BTreeMap<_, _>>();
                     for (buffer_id, buffer) in buffer_excerpts {
                         let collapsed_entry = match &buffer.file {
                             Some((worktree, _)) => CollapsedEntry::File(worktree.id(), buffer_id),
@@ -3309,36 +3290,9 @@ impl OutlinePanel {
                                     let indexed_entry = worktree
                                         .entry_for_path(&ancestor.path)
                                         .filter(|entry| entry.is_dir());
-                                    let git_summary = indexed_entry
-                                        .and_then(|_| {
-                                            let abs_path = worktree.absolutize(&ancestor.path);
-                                            for query in abs_path.ancestors() {
-                                                let (_, repository) = repositories_by_root
-                                                    .range(Path::new("")..=query)
-                                                    .next_back()?;
-                                                let Some(path) =
-                                                    repository.abs_path_to_repo_path(&abs_path)
-                                                else {
-                                                    continue;
-                                                };
-                                                let mut statuses = repository
-                                                    .statuses_by_path
-                                                    .cursor::<PathProgress>(());
-                                                statuses.seek_forward(
-                                                    &PathTarget::Path(&path),
-                                                    Bias::Left,
-                                                );
-                                                return Some(statuses.summary(
-                                                    &PathTarget::Successor(&path),
-                                                    Bias::Left,
-                                                ));
-                                            }
-                                            None
-                                        })
-                                        .unwrap_or_default();
                                     FsEntryPath {
                                         path: ancestor.path.clone(),
-                                        git_summary,
+                                        status: None,
                                         is_ignored: indexed_entry
                                             .is_some_and(|entry| entry.is_ignored),
                                     }
@@ -7453,7 +7407,7 @@ two/  <==== selected
                 .expect("file rename should succeed");
             cx.run_until_parked();
             project
-                .update(cx, |project, cx| project.git_scans_complete(cx))
+                .update(cx, |project, cx| project.wait_for_initial_scan(cx))
                 .await;
             flush_outline_tasks(cx);
             buffer.read_with(cx, |buffer, _| {
@@ -7656,176 +7610,6 @@ two/  <==== selected
             });
         }
     }
-
-    #[gpui::test]
-    async fn test_selected_folded_directory_survives_git_metadata_changes(cx: &mut TestAppContext) {
-        init_test(cx);
-        let fs = FakeFs::new(cx.background_executor.clone());
-        fs.insert_tree(
-            path!("/root"),
-            json!({
-                ".git": {},
-                "a": { "b": { "file.txt": "modified\n" } },
-                "z.txt": "unchanged\n"
-            }),
-        )
-        .await;
-        let base_contents = [
-            ("a/b/file.txt", "base\n".to_string()),
-            ("z.txt", "unchanged\n".to_string()),
-        ];
-        let dot_git = Path::new(path!("/root/.git"));
-        fs.set_head_for_repo(dot_git, &base_contents, "deadbeef");
-        fs.set_index_for_repo(dot_git, &base_contents);
-        let project = Project::test(fs.clone(), [Path::new(path!("/root"))], cx).await;
-        project
-            .update(cx, |project, cx| project.git_scans_complete(cx))
-            .await;
-        let (workspace, outline_panel, mut cx) = active_outline_panel(&project, cx).await;
-        let cx = &mut cx;
-        update_outline_panel_settings(cx, |settings| {
-            settings.auto_fold_dirs = Some(true);
-            settings.multi_buffer_hide_symbols = Some(true);
-        });
-        let buffer = open_buffer(&project, path!("/root/a/b/file.txt"), cx).await;
-        let buffer_z = open_buffer(&project, path!("/root/z.txt"), cx).await;
-        let worktree_id = buffer.read_with(cx, |buffer, cx| {
-            File::from_dyn(buffer.file())
-                .expect("buffer should have a file")
-                .worktree
-                .read(cx)
-                .id()
-        });
-        add_multi_buffer_editor(
-            &workspace,
-            &project,
-            &[(&buffer, Vec::new()), (&buffer_z, Vec::new())],
-            cx,
-        );
-        flush_outline_tasks(cx);
-        select_directory(&outline_panel, worktree_id, rel_path("a/b"), cx);
-        assert_tree(
-            &outline_panel,
-            &project,
-            indoc!(
-                "
-                root/
-                  a/b/  <==== selected
-                    file.txt
-                  z.txt"
-            ),
-            cx,
-        );
-        let metadata_before = outline_panel.read_with(cx, |panel, _| {
-            let Some(PanelEntry::FoldedDirs(group)) = panel.selected_entry() else {
-                panic!("folded directory should be selected");
-            };
-            assert_eq!(
-                group
-                    .entries
-                    .iter()
-                    .map(|entry| (
-                        entry.path.as_ref(),
-                        entry.git_summary.worktree.modified,
-                        entry.is_ignored
-                    ))
-                    .collect::<Vec<_>>(),
-                vec![(rel_path("a"), 1, false), (rel_path("a/b"), 1, false)],
-            );
-            group
-                .entries
-                .iter()
-                .map(|entry| entry.git_summary)
-                .collect::<Vec<_>>()
-        });
-
-        fs.remove_dir(
-            Path::new(path!("/root/a")),
-            project::RemoveOptions {
-                recursive: true,
-                ignore_if_not_exists: false,
-            },
-        )
-        .await
-        .expect("ancestor deletion should succeed");
-        cx.run_until_parked();
-        project
-            .update(cx, |project, cx| project.git_scans_complete(cx))
-            .await;
-        flush_outline_tasks(cx);
-        buffer.read_with(cx, |buffer, cx| {
-            let file = File::from_dyn(buffer.file()).expect("buffer should retain its file");
-            assert_eq!(file.disk_state, DiskState::Deleted);
-            assert_eq!(
-                file.worktree
-                    .read(cx)
-                    .entry_for_path(rel_path("a"))
-                    .map(|entry| entry.kind),
-                None
-            );
-        });
-        let metadata_after = outline_panel.read_with(cx, |panel, _| {
-            let group = panel
-                .cached_entries
-                .iter()
-                .find_map(|cached| match &cached.entry {
-                    PanelEntry::FoldedDirs(group)
-                        if group.worktree_id == worktree_id
-                            && group
-                                .entries
-                                .last()
-                                .is_some_and(|entry| entry.path.as_ref() == rel_path("a/b")) =>
-                    {
-                        Some(group)
-                    }
-                    _ => None,
-                })
-                .expect("folded directory should retain its row");
-            assert_eq!(
-                group
-                    .entries
-                    .iter()
-                    .map(|entry| entry.path.as_ref())
-                    .collect::<Vec<_>>(),
-                vec![rel_path("a"), rel_path("a/b")],
-            );
-            group
-                .entries
-                .iter()
-                .map(|entry| entry.git_summary)
-                .collect::<Vec<_>>()
-        });
-        assert_ne!(metadata_before, metadata_after);
-        assert_tree(
-            &outline_panel,
-            &project,
-            indoc!(
-                "
-                root/
-                  a/b/  <==== selected
-                    ~~file.txt~~
-                  z.txt"
-            ),
-            cx,
-        );
-        outline_panel.update_in(cx, |panel, window, cx| {
-            panel.select_next(&SelectNext, window, cx);
-        });
-        flush_outline_tasks(cx);
-        assert_tree(
-            &outline_panel,
-            &project,
-            indoc!(
-                "
-                root/
-                  a/b/
-                    ~~file.txt~~  <==== selected
-                  z.txt"
-            ),
-            cx,
-        );
-    }
-
     #[gpui::test]
     async fn test_deleted_file_nests_under_existing_parent(cx: &mut TestAppContext) {
         init_test(cx);
@@ -8799,214 +8583,6 @@ two/  <==== selected
             assert_tree(&outline_panel, &project, expected, cx);
         }
     }
-
-    #[gpui::test]
-    async fn test_scan_excluded_modified_file_stays_external(cx: &mut TestAppContext) {
-        init_test(cx);
-        cx.update(|cx| {
-            SettingsStore::update_global(cx, |store, cx| {
-                store.update_user_settings(cx, |settings| {
-                    settings.project.worktree.file_scan_exclusions =
-                        Some(settings::SplicingVec::from(vec![
-                            "**/excluded.txt".to_string(),
-                        ]));
-                });
-            });
-        });
-
-        let fs = FakeFs::new(cx.background_executor.clone());
-        fs.insert_tree(
-            path!("/root"),
-            json!({
-                ".git": {},
-                "keep.txt": "hello there",
-                "excluded.txt": "new",
-            }),
-        )
-        .await;
-        let dot_git = Path::new(path!("/root/.git"));
-        fs.set_head_for_repo(
-            dot_git,
-            &[
-                ("keep.txt", "hello there".into()),
-                ("excluded.txt", "old".into()),
-            ],
-            "deadbeef",
-        );
-
-        let project = Project::test(fs.clone(), [Path::new(path!("/root"))], cx).await;
-        project
-            .update(cx, |project, cx| project.git_scans_complete(cx))
-            .await;
-        let (workspace, outline_panel, mut cx) = active_outline_panel(&project, cx).await;
-        let cx = &mut cx;
-
-        let buffer_keep = open_buffer(&project, path!("/root/keep.txt"), cx).await;
-        let buffer_excluded = open_buffer(&project, path!("/root/excluded.txt"), cx).await;
-        buffer_excluded.read_with(cx, |buffer, _cx| {
-            let file = File::from_dyn(buffer.file()).expect("excluded buffer should have a file");
-            assert_eq!(
-                file.project_entry_id(),
-                None,
-                "sanity check: a scan-excluded file has no worktree entry"
-            );
-            assert!(
-                matches!(file.disk_state, language::DiskState::Present { .. }),
-                "sanity check: a scan-excluded file is present on disk, got {:?}",
-                file.disk_state
-            );
-        });
-
-        add_diff_editor(
-            &workspace,
-            &project,
-            &[
-                (&buffer_keep, "previous contents\n"),
-                (&buffer_excluded, "old\n"),
-            ],
-            cx,
-        );
-        assert_tree(
-            &outline_panel,
-            &project,
-            indoc!(
-                "
-                external: excluded.txt
-                root/
-                  keep.txt"
-            ),
-            cx,
-        );
-    }
-
-    #[gpui::test]
-    async fn test_diff_deletions_group_under_scanned_and_excluded_parents(cx: &mut TestAppContext) {
-        init_test(cx);
-        cx.update(|cx| {
-            SettingsStore::update_global(cx, |store, cx| {
-                store.update_user_settings(cx, |settings| {
-                    settings.project.worktree.file_scan_exclusions =
-                        Some(settings::SplicingVec::from(vec![
-                            "**/excluded".to_string(),
-                            "**/missing".to_string(),
-                        ]));
-                });
-            });
-        });
-
-        let fs = FakeFs::new(cx.background_executor.clone());
-        fs.insert_tree(
-            path!("/root"),
-            json!({
-                ".git": {},
-                "scanned": { "keep.txt": "still here" },
-                "excluded": { "keep.txt": "still here" }
-            }),
-        )
-        .await;
-        let dot_git = Path::new(path!("/root/.git"));
-        fs.set_branch_name(dot_git, Some("feature"));
-        fs.insert_branches(dot_git, &["main"]);
-        fs.set_head_for_repo(
-            dot_git,
-            &[
-                ("scanned/keep.txt", "still here".to_string()),
-                ("excluded/keep.txt", "still here".to_string()),
-            ],
-            "deadbeef",
-        );
-
-        let project = Project::test(fs.clone(), [Path::new(path!("/root"))], cx).await;
-        project
-            .update(cx, |project, cx| project.git_scans_complete(cx))
-            .await;
-        let (workspace, outline_panel, mut cx) = active_outline_panel(&project, cx).await;
-        let cx = &mut cx;
-        update_outline_panel_settings(cx, |settings| {
-            settings.auto_fold_dirs = Some(false);
-        });
-
-        let buffer_scanned = open_buffer(&project, path!("/root/scanned/gone.txt"), cx).await;
-        let buffer_excluded = open_buffer(&project, path!("/root/excluded/gone.txt"), cx).await;
-        let buffer_missing = open_buffer(&project, path!("/root/missing/gone.txt"), cx).await;
-        for buffer in [&buffer_scanned, &buffer_excluded, &buffer_missing] {
-            buffer.read_with(cx, |buffer, cx| {
-                let file = File::from_dyn(buffer.file()).expect("buffer should have a file");
-                assert_eq!(file.disk_state, DiskState::New);
-                assert_eq!(file.project_entry_id(), None);
-                assert_eq!(
-                    project
-                        .read(cx)
-                        .git_store()
-                        .read(cx)
-                        .display_status_for_buffer_id(buffer.remote_id(), cx),
-                    None,
-                );
-            });
-        }
-        buffer_excluded.read_with(cx, |buffer, cx| {
-            let file = File::from_dyn(buffer.file()).expect("buffer should have a file");
-            let worktree = file.worktree.read(cx);
-            assert_eq!(
-                worktree
-                    .entry_for_path(rel_path("excluded"))
-                    .map(|entry| entry.kind),
-                None
-            );
-            assert_eq!(
-                worktree
-                    .entry_for_path(rel_path("missing"))
-                    .map(|entry| entry.kind),
-                None
-            );
-            assert_eq!(
-                worktree
-                    .entry_for_path(rel_path("scanned"))
-                    .map(|entry| entry.is_dir()),
-                Some(true),
-            );
-        });
-        assert_eq!(
-            fs.metadata(Path::new(path!("/root/excluded")))
-                .await
-                .expect("metadata should be readable")
-                .map(|metadata| metadata.is_dir),
-            Some(true),
-        );
-        assert_eq!(
-            fs.metadata(Path::new(path!("/root/missing")))
-                .await
-                .expect("metadata should be readable")
-                .map(|metadata| metadata.is_dir),
-            None,
-        );
-        add_diff_editor(
-            &workspace,
-            &project,
-            &[
-                (&buffer_scanned, "scanned base\n"),
-                (&buffer_excluded, "excluded base\n"),
-                (&buffer_missing, "missing base\n"),
-            ],
-            cx,
-        );
-        assert_tree(
-            &outline_panel,
-            &project,
-            indoc!(
-                "
-                root/
-                  excluded/
-                    ~~gone.txt~~
-                  missing/
-                    ~~gone.txt~~
-                  scanned/
-                    ~~gone.txt~~"
-            ),
-            cx,
-        );
-    }
-
     #[gpui::test]
     async fn test_auto_reveal_ignores_external_file_on_nonexistent_path(cx: &mut TestAppContext) {
         init_test(cx);
@@ -9827,7 +9403,7 @@ outline: struct OutlineEntryExcerpt
             .expect("file rename should succeed");
         cx.run_until_parked();
         project
-            .update(cx, |project, cx| project.git_scans_complete(cx))
+            .update(cx, |project, cx| project.wait_for_initial_scan(cx))
             .await;
     }
 

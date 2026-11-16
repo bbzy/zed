@@ -28,7 +28,6 @@ use editor::Editor;
 use extension::ExtensionHostProxy;
 use fs::{Fs, RealFs};
 use futures::{FutureExt, StreamExt, channel::oneshot, future};
-use git::GitHostingProviderRegistry;
 use gpui::{
     App, AppContext, Application, AsyncApp, QuitMode, Task, TaskExt, UpdateGlobal as _, block_on,
 };
@@ -421,20 +420,7 @@ fn main() {
         None
     };
 
-    let git_hosting_provider_registry = Arc::new(GitHostingProviderRegistry::new());
-    let git_binary_path =
-        if cfg!(target_os = "macos") && option_env!("ZED_BUNDLE").as_deref() == Some("true") {
-            app.path_for_auxiliary_executable("git")
-                .context("could not find git binary path")
-                .log_err()
-        } else {
-            None
-        };
-    if let Some(git_binary_path) = &git_binary_path {
-        log::info!("Using git binary path: {:?}", git_binary_path);
-    }
-
-    let fs = RealFs::new(git_binary_path, app.background_executor());
+    let fs = RealFs::new(app.background_executor());
     let (user_keymap_file_rx, user_keymap_watcher) = watch_config_file(
         &app.background_executor(),
         fs.clone(),
@@ -516,9 +502,6 @@ fn main() {
         cx.set_http_client(Arc::new(http));
 
         <dyn Fs>::set_global(fs.clone(), cx);
-
-        GitHostingProviderRegistry::set_global(git_hosting_provider_registry, cx);
-        git_hosting_providers::init(cx);
 
         OpenListener::set_global(cx, open_listener.clone());
 
@@ -774,7 +757,7 @@ fn main() {
         call::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         collab_ui::init(&app_state, cx);
-        git_ui_core::init(cx);
+        diff_ui::init(cx);
         kk_ui::init(cx);
         feedback::init(cx);
         markdown_preview::init(cx);

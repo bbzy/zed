@@ -157,8 +157,7 @@ async fn test_modal_editing_is_limited_to_workspace_content(cx: &mut TestAppCont
             "Editor mode = full",
             "ProjectPanel not_editing",
             "OutlinePanel not_editing",
-            "GitGraph",
-            "GitPanel ChangesList",
+            "KKWorkbench",
             "ThreadsSidebar",
             "NavigationMenu",
         ] {

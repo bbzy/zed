@@ -3,11 +3,11 @@ pub mod agent_server_store;
 pub mod bookmark_store;
 pub mod buffer_store;
 pub mod color_extractor;
+pub mod conflict_set;
 pub mod connection_manager;
 pub mod context_server_store;
 pub mod debounced_delay;
 pub mod debugger;
-pub mod git_store;
 pub mod image_store;
 mod kk_workbench_transport;
 pub mod lsp_command;
@@ -26,11 +26,8 @@ pub mod trusted_worktrees;
 pub mod worktree_store;
 
 mod environment;
-use buffer_diff::BufferDiff;
 use context_server_store::ContextServerStore;
 pub use environment::ProjectEnvironmentEvent;
-use git::repository::get_git_committer;
-use git_store::{Repository, RepositoryId};
 pub mod search_history;
 pub mod yarn;
 
@@ -39,7 +36,6 @@ use itertools::{Either, Itertools};
 
 use crate::{
     bookmark_store::BookmarkStore,
-    git_store::GitStore,
     lsp_store::{SymbolLocation, log_store::LogKind},
     project_search::SearchResultsHandle,
     trusted_worktrees::{PathTrust, RemoteHostLocation, TrustedWorktrees},
@@ -47,15 +43,10 @@ use crate::{
 };
 pub use agent_registry_store::{AgentRegistryStore, RegistryAgent};
 pub use agent_server_store::{AgentId, AgentServerStore, AgentServersUpdated, ExternalAgentSource};
-pub use git_store::{
-    ConflictRegion, ConflictSet, ConflictSetSnapshot, ConflictSetUpdate,
-    git_traversal::{ChildEntriesGitIter, GitEntry, GitEntryRef, GitTraversal},
-    is_submodule_git_dir, linked_worktree_short_name, repo_identity_path,
-    worktrees_directory_for_repo,
-};
+pub use conflict_set::{ConflictRegion, ConflictSet, ConflictSetSnapshot, ConflictSetUpdate};
 pub use manifest_tree::ManifestTree;
 pub use project_search::{Search, SearchResults};
-pub use worktree_store::WorktreePaths;
+pub use worktree_store::{WorktreePaths, linked_worktree_short_name};
 
 use anyhow::{Context as _, Result, anyhow};
 use buffer_store::{BufferStore, BufferStoreEvent};
@@ -70,7 +61,6 @@ use dap::{
 };
 
 use collections::{BTreeSet, HashMap, HashSet, IndexSet};
-use debounced_delay::DebouncedDelay;
 pub use debugger::breakpoint_store::BreakpointWithPosition;
 use debugger::{
     breakpoint_store::{ActiveStackFrame, BreakpointStore},
@@ -88,7 +78,6 @@ use futures::{
 pub use image_store::{ImageItem, ImageStore};
 use image_store::{ImageItemEvent, ImageStoreEvent};
 
-use ::git::{blame::Blame, status::FileStatus};
 use gpui::{
     App, AppContext, AsyncApp, BorrowAppContext, Context, Entity, EventEmitter, Hsla, SharedString,
     Task, TaskExt, WeakEntity, Window,
@@ -135,7 +124,6 @@ use std::{
     pin::pin,
     str::{self, FromStr},
     sync::Arc,
-    time::Duration,
 };
 
 use task_store::TaskStore;
@@ -151,8 +139,7 @@ use util::{
 use worktree::{CreatedEntry, Snapshot, Traversal};
 pub use worktree::{
     Entry, EntryKind, FS_WATCH_LATENCY, File, LocalWorktree, PathChange, ProjectEntryId,
-    UpdatedEntriesSet, UpdatedGitRepositoriesSet, Worktree, WorktreeId, WorktreeSettings,
-    discover_root_repo_common_dir,
+    UpdatedEntriesSet, Worktree, WorktreeId, WorktreeSettings,
 };
 use worktree_store::{WorktreeStore, WorktreeStoreEvent};
 
@@ -163,8 +150,8 @@ pub use prettier::FORMAT_SUFFIX as TEST_PRETTIER_FORMAT_SUFFIX;
 #[cfg(any(test, feature = "test-support"))]
 pub use prettier::RANGE_FORMAT_SUFFIX as TEST_PRETTIER_RANGE_FORMAT_SUFFIX;
 pub use task_inventory::{
-    BasicContextProvider, ContextProviderWithTasks, DebugScenarioContext, GIT_COMMAND_TASK_TAG,
-    Inventory, TaskContexts, TaskSourceKind,
+    BasicContextProvider, ContextProviderWithTasks, DebugScenarioContext, Inventory, TaskContexts,
+    TaskSourceKind,
 };
 
 pub use buffer_store::ProjectTransaction;
@@ -242,7 +229,6 @@ pub struct Project {
     kk_workbench_client: std::sync::OnceLock<kk_workbench::remote::Client>,
     // todo lw explain the client_state x remote_client matrix, its super confusing
     client_state: ProjectClientState,
-    git_store: Entity<GitStore>,
     collaborators: HashMap<proto::PeerId, Collaborator>,
     client_subscriptions: Vec<client::Subscription>,
     worktree_store: Entity<WorktreeStore>,
@@ -251,8 +237,6 @@ pub struct Project {
     image_store: Entity<ImageStore>,
     lsp_store: Entity<LspStore>,
     _subscriptions: Vec<gpui::Subscription>,
-    buffers_needing_diff: HashSet<WeakEntity<Buffer>>,
-    git_diff_debouncer: DebouncedDelay<Self>,
     remotely_created_models: Arc<Mutex<RemotelyCreatedModels>>,
     terminals: Terminals,
     node: Option<NodeRuntime>,
@@ -384,7 +368,6 @@ pub enum Event {
     WorktreeOrderChanged,
     WorktreeRemoved(WorktreeId),
     WorktreeUpdatedEntries(WorktreeId, UpdatedEntriesSet),
-    WorktreeUpdatedRootRepoCommonDir(WorktreeId),
     WorktreePathsChanged {
         old_worktree_paths: WorktreePaths,
     },
@@ -1027,7 +1010,6 @@ impl Hover {
 enum EntitySubscription {
     Project(PendingEntitySubscription<Project>),
     BufferStore(PendingEntitySubscription<BufferStore>),
-    GitStore(PendingEntitySubscription<GitStore>),
     WorktreeStore(PendingEntitySubscription<WorktreeStore>),
     LspStore(PendingEntitySubscription<LspStore>),
     SettingsObserver(PendingEntitySubscription<SettingsObserver>),
@@ -1306,7 +1288,6 @@ impl Project {
         WorktreeStore::init(&client);
         BufferStore::init(&client);
         LspStore::init(&client);
-        GitStore::init(&client);
         SettingsObserver::init(&client);
         TaskStore::init(Some(&client));
         ToolchainStore::init(&client);
@@ -1407,24 +1388,12 @@ impl Project {
                 )
             });
 
-            let git_store = cx.new(|cx| {
-                GitStore::local(
-                    &worktree_store,
-                    buffer_store.clone(),
-                    environment.clone(),
-                    fs.clone(),
-                    cx,
-                )
-            });
-            git_store.update(cx, |git_store, _| git_store.set_project(weak_self.clone()));
-
             let task_store = cx.new(|cx| {
                 TaskStore::local(
                     buffer_store.downgrade(),
                     worktree_store.clone(),
                     toolchain_store.read(cx).as_language_toolchain_store(),
                     environment.clone(),
-                    git_store.clone(),
                     cx,
                 )
             });
@@ -1482,7 +1451,6 @@ impl Project {
                 context_server_store,
                 join_project_response_message_id: 0,
                 client_state: ProjectClientState::Local,
-                git_store,
                 client_subscriptions: Vec::new(),
                 _subscriptions: vec![cx.on_release(Self::release)],
                 active_entry: None,
@@ -1500,8 +1468,6 @@ impl Project {
                 dap_store,
                 agent_server_store,
 
-                buffers_needing_diff: Default::default(),
-                git_diff_debouncer: DebouncedDelay::new(),
                 terminals: Terminals {
                     local_handles: Vec::new(),
                 },
@@ -1653,17 +1619,6 @@ impl Project {
                 )
             });
 
-            let git_store = cx.new(|cx| {
-                GitStore::remote(
-                    &worktree_store,
-                    buffer_store.clone(),
-                    remote_proto.clone(),
-                    REMOTE_SERVER_PROJECT_ID,
-                    cx,
-                )
-            });
-            git_store.update(cx, |git_store, _| git_store.set_project(weak_self.clone()));
-
             let task_store = cx.new(|cx| {
                 TaskStore::remote(
                     buffer_store.downgrade(),
@@ -1671,7 +1626,6 @@ impl Project {
                     toolchain_store.read(cx).as_language_toolchain_store(),
                     remote.read(cx).proto_client(),
                     REMOTE_SERVER_PROJECT_ID,
-                    git_store.clone(),
                     cx,
                 )
             });
@@ -1712,7 +1666,6 @@ impl Project {
                 dap_store,
                 join_project_response_message_id: 0,
                 client_state: ProjectClientState::Local,
-                git_store,
                 agent_server_store,
                 client_subscriptions: Vec::new(),
                 _subscriptions: vec![
@@ -1744,8 +1697,6 @@ impl Project {
                 fs,
                 remote_client: Some(remote.clone()),
                 kk_workbench_client: std::sync::OnceLock::new(),
-                buffers_needing_diff: Default::default(),
-                git_diff_debouncer: DebouncedDelay::new(),
                 terminals: Terminals {
                     local_handles: Vec::new(),
                 },
@@ -1771,7 +1722,6 @@ impl Project {
             remote_proto.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &this.dap_store);
             remote_proto.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &this.breakpoint_store);
             remote_proto.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &this.settings_observer);
-            remote_proto.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &this.git_store);
             remote_proto.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &this.agent_server_store);
 
             remote_proto.add_entity_message_handler(Self::handle_create_buffer_for_peer);
@@ -1799,7 +1749,6 @@ impl Project {
             ToolchainStore::init(&remote_proto);
             DapStore::init(&remote_proto, cx);
             BreakpointStore::init(&remote_proto);
-            GitStore::init(&remote_proto);
             AgentServerStore::init_remote(&remote_proto);
 
             this
@@ -1819,7 +1768,6 @@ impl Project {
         let subscriptions = [
             EntitySubscription::Project(client.subscribe_to_entity::<Self>(remote_id)?),
             EntitySubscription::BufferStore(client.subscribe_to_entity::<BufferStore>(remote_id)?),
-            EntitySubscription::GitStore(client.subscribe_to_entity::<GitStore>(remote_id)?),
             EntitySubscription::WorktreeStore(
                 client.subscribe_to_entity::<WorktreeStore>(remote_id)?,
             ),
@@ -1832,12 +1780,11 @@ impl Project {
                 client.subscribe_to_entity::<BreakpointStore>(remote_id)?,
             ),
         ];
-        let committer = get_git_committer(&cx).await;
         let response = client
             .request_envelope(proto::JoinProject {
                 project_id: remote_id,
-                committer_email: committer.email,
-                committer_name: committer.name,
+                committer_email: None,
+                committer_name: None,
                 features: CURRENT_PROJECT_FEATURES
                     .iter()
                     .map(|s| s.to_string())
@@ -1859,7 +1806,7 @@ impl Project {
 
     async fn from_join_project_response(
         response: TypedEnvelope<proto::JoinProjectResponse>,
-        subscriptions: [EntitySubscription; 8],
+        subscriptions: [EntitySubscription; 7],
         client: Arc<Client>,
         run_tasks: bool,
         user_store: Entity<UserStore>,
@@ -1928,17 +1875,6 @@ impl Project {
             )
         });
 
-        let git_store = cx.new(|cx| {
-            GitStore::remote(
-                // In this remote case we pass None for the environment
-                &worktree_store,
-                buffer_store.clone(),
-                client.clone().into(),
-                remote_id,
-                cx,
-            )
-        });
-
         let task_store = cx.new(|cx| {
             if run_tasks {
                 TaskStore::remote(
@@ -1947,7 +1883,6 @@ impl Project {
                     Arc::new(EmptyToolchainStore),
                     client.clone().into(),
                     remote_id,
-                    git_store.clone(),
                     cx,
                 )
             } else {
@@ -1973,7 +1908,6 @@ impl Project {
             let snippets = SnippetProvider::new(fs.clone(), BTreeSet::from_iter([]), cx);
 
             let weak_self = cx.weak_entity();
-            git_store.update(cx, |git_store, _| git_store.set_project(weak_self.clone()));
             let context_server_store = cx.new(|cx| {
                 ContextServerStore::local(worktree_store.clone(), Some(weak_self), false, cx)
             });
@@ -2036,10 +1970,7 @@ impl Project {
                 bookmark_store: bookmark_store.clone(),
                 breakpoint_store: breakpoint_store.clone(),
                 dap_store: dap_store.clone(),
-                git_store: git_store.clone(),
                 agent_server_store,
-                buffers_needing_diff: Default::default(),
-                git_diff_debouncer: DebouncedDelay::new(),
                 terminals: Terminals {
                     local_handles: Vec::new(),
                 },
@@ -2080,9 +2011,7 @@ impl Project {
                 EntitySubscription::WorktreeStore(subscription) => {
                     subscription.set_entity(&worktree_store, &cx)
                 }
-                EntitySubscription::GitStore(subscription) => {
-                    subscription.set_entity(&git_store, &cx)
-                }
+
                 EntitySubscription::SettingsObserver(subscription) => {
                     subscription.set_entity(&settings_observer, &cx)
                 }
@@ -2168,7 +2097,7 @@ impl Project {
     ) -> Entity<Project> {
         use clock::FakeSystemClock;
 
-        let fs = RealFs::new(None, cx.background_executor().clone());
+        let fs = RealFs::new(cx.background_executor().clone());
         let languages = LanguageRegistry::test(cx.background_executor().clone());
         let clock = Arc::new(FakeSystemClock::new());
         let http_client = http_client::FakeHttpClient::with_404_response();
@@ -2298,8 +2227,6 @@ impl Project {
                 root_name,
                 visible: true,
                 abs_path: abs_path.to_string(),
-                root_repo_common_dir: None,
-                root_repo_is_linked_worktree: false,
             },
             client,
             PathStyle::Unix,
@@ -2657,18 +2584,6 @@ impl Project {
             })
             .unwrap_or(false)
     }
-
-    #[inline]
-    pub fn project_path_git_status(
-        &self,
-        project_path: &ProjectPath,
-        cx: &App,
-    ) -> Option<FileStatus> {
-        self.git_store
-            .read(cx)
-            .project_path_git_status(project_path, cx)
-    }
-
     #[inline]
     pub fn visibility_for_paths(
         &self,
@@ -2961,9 +2876,6 @@ impl Project {
             self.collab_client
                 .subscribe_to_entity(project_id)?
                 .set_entity(&self.breakpoint_store, &cx.to_async()),
-            self.collab_client
-                .subscribe_to_entity(project_id)?
-                .set_entity(&self.git_store, &cx.to_async()),
         ]);
 
         self.buffer_store.update(cx, |buffer_store, cx| {
@@ -2987,9 +2899,6 @@ impl Project {
         self.settings_observer.update(cx, |settings_observer, cx| {
             settings_observer.shared(project_id, self.collab_client.clone().into(), cx)
         });
-        self.git_store.update(cx, |git_store, cx| {
-            git_store.shared(project_id, self.collab_client.clone().into(), cx)
-        });
 
         self.client_state = ProjectClientState::Shared {
             remote_id: project_id,
@@ -3011,11 +2920,6 @@ impl Project {
         self.worktree_store.update(cx, |worktree_store, cx| {
             worktree_store.send_project_updates(cx);
         });
-        if let Some(remote_id) = self.remote_id() {
-            self.git_store.update(cx, |git_store, cx| {
-                git_store.shared(remote_id, self.collab_client.clone().into(), cx)
-            });
-        }
         cx.emit(Event::Reshared);
         Ok(())
     }
@@ -3088,9 +2992,6 @@ impl Project {
             });
             self.settings_observer.update(cx, |settings_observer, cx| {
                 settings_observer.unshared(cx);
-            });
-            self.git_store.update(cx, |git_store, cx| {
-                git_store.unshared(cx);
             });
 
             self.collab_client
@@ -3438,101 +3339,6 @@ impl Project {
             lsp_store.register_buffer_with_language_servers(buffer, HashSet::default(), cx)
         })
     }
-
-    pub fn open_unstaged_diff(
-        &mut self,
-        buffer: Entity<Buffer>,
-        cx: &mut Context<Self>,
-    ) -> Task<Result<Entity<BufferDiff>>> {
-        if self.is_disconnected(cx) {
-            return Task::ready(Err(anyhow!(ErrorCode::Disconnected)));
-        }
-        self.git_store
-            .update(cx, |git_store, cx| git_store.open_unstaged_diff(buffer, cx))
-    }
-
-    /// Opens the staged (HEAD-vs-index) diff for the given buffer, along with
-    /// the index text buffer that is the diff's main buffer.
-    #[ztracing::instrument(skip_all)]
-    pub fn open_staged_diff(
-        &mut self,
-        buffer: Entity<Buffer>,
-        cx: &mut Context<Self>,
-    ) -> Task<Result<(Entity<BufferDiff>, Entity<Buffer>)>> {
-        if self.is_disconnected(cx) {
-            return Task::ready(Err(anyhow!(ErrorCode::Disconnected)));
-        }
-        self.git_store
-            .update(cx, |git_store, cx| git_store.open_staged_diff(buffer, cx))
-    }
-
-    #[ztracing::instrument(skip_all)]
-    pub fn open_uncommitted_diff(
-        &mut self,
-        buffer: Entity<Buffer>,
-        cx: &mut Context<Self>,
-    ) -> Task<Result<Entity<BufferDiff>>> {
-        if self.is_disconnected(cx) {
-            return Task::ready(Err(anyhow!(ErrorCode::Disconnected)));
-        }
-        self.git_store.update(cx, |git_store, cx| {
-            git_store.open_uncommitted_diff(buffer, cx)
-        })
-    }
-
-    /// Stages the worktree changes covered by `worktree_ranges` (in the worktree
-    /// buffer's coordinates), acting on the given unstaged diff. Used by both the
-    /// unstaged-changes view and the uncommitted (gutter) controls.
-    pub fn stage_hunks(
-        &mut self,
-        buffer: Entity<Buffer>,
-        unstaged_diff: Entity<BufferDiff>,
-        worktree_ranges: Vec<Range<Anchor>>,
-        cx: &mut Context<Self>,
-    ) -> Result<()> {
-        if self.is_disconnected(cx) {
-            return Err(anyhow!(ErrorCode::Disconnected));
-        }
-        self.git_store.update(cx, |git_store, cx| {
-            git_store.stage_hunks(buffer, unstaged_diff, worktree_ranges, cx)
-        })
-    }
-
-    /// Unstages the worktree changes covered by `worktree_ranges` (in the worktree
-    /// buffer's coordinates), acting on the given uncommitted diff. Used by the
-    /// uncommitted (gutter) controls.
-    pub fn unstage_uncommitted_hunks(
-        &mut self,
-        buffer: Entity<Buffer>,
-        uncommitted_diff: Entity<BufferDiff>,
-        worktree_ranges: Vec<Range<Anchor>>,
-        cx: &mut Context<Self>,
-    ) -> Result<()> {
-        if self.is_disconnected(cx) {
-            return Err(anyhow!(ErrorCode::Disconnected));
-        }
-        self.git_store.update(cx, |git_store, cx| {
-            git_store.unstage_uncommitted_hunks(buffer, uncommitted_diff, worktree_ranges, cx)
-        })
-    }
-
-    /// Unstages the staged changes covered by `index_ranges` (in the index
-    /// buffer's coordinates), acting on the given staged diff. Used by the
-    /// staged-changes view.
-    pub fn unstage_staged_hunks(
-        &mut self,
-        staged_diff: Entity<BufferDiff>,
-        index_ranges: Vec<Range<Anchor>>,
-        cx: &mut Context<Self>,
-    ) -> Result<()> {
-        if self.is_disconnected(cx) {
-            return Err(anyhow!(ErrorCode::Disconnected));
-        }
-        self.git_store.update(cx, |git_store, cx| {
-            git_store.unstage_staged_hunks(staged_diff, index_ranges, cx)
-        })
-    }
-
     pub fn open_buffer_by_id(
         &mut self,
         id: BufferId,
@@ -3604,8 +3410,6 @@ impl Project {
                 remotely_created_models.buffers.push(buffer.clone())
             }
         }
-
-        self.request_buffer_diff_recalculation(buffer, cx);
 
         cx.subscribe(buffer, |this, buffer, event, cx| {
             this.on_buffer_event(buffer, event, cx);
@@ -4126,12 +3930,6 @@ impl Project {
             WorktreeStoreEvent::WorktreeDeletedEntry(worktree_id, id) => {
                 cx.emit(Event::DeletedEntry(*worktree_id, *id))
             }
-            // Listen to the GitStore instead.
-            WorktreeStoreEvent::WorktreeUpdatedGitRepositories(_, _) => {}
-            WorktreeStoreEvent::WorktreeUpdatedRootRepoCommonDir(worktree_id) => {
-                cx.emit(Event::WorktreeUpdatedRootRepoCommonDir(*worktree_id));
-                self.emit_group_key_changed_if_needed(cx);
-            }
         }
     }
 
@@ -4160,10 +3958,6 @@ impl Project {
         event: &BufferEvent,
         cx: &mut Context<Self>,
     ) -> Option<()> {
-        if matches!(event, BufferEvent::Edited { .. } | BufferEvent::Reloaded) {
-            self.request_buffer_diff_recalculation(&buffer, cx);
-        }
-
         if let BufferEvent::Edited { source } = event {
             cx.emit(Event::BufferEdited { source: *source });
         }
@@ -4172,7 +3966,7 @@ impl Project {
         match event {
             BufferEvent::ReloadNeeded => {
                 if !self.is_via_collab() {
-                    self.reload_buffers([buffer.clone()].into_iter().collect(), true, cx)
+                    self.reload_buffers([buffer].into_iter().collect(), true, cx)
                         .detach_and_log_err(cx);
                 }
             }
@@ -4223,71 +4017,6 @@ impl Project {
 
         None
     }
-
-    fn request_buffer_diff_recalculation(
-        &mut self,
-        buffer: &Entity<Buffer>,
-        cx: &mut Context<Self>,
-    ) {
-        self.buffers_needing_diff.insert(buffer.downgrade());
-        let first_insertion = self.buffers_needing_diff.len() == 1;
-        let settings = ProjectSettings::get_global(cx);
-        let delay = settings.git.gutter_debounce;
-
-        if delay == 0 {
-            if first_insertion {
-                let this = cx.weak_entity();
-                cx.defer(move |cx| {
-                    if let Some(this) = this.upgrade() {
-                        this.update(cx, |this, cx| {
-                            this.recalculate_buffer_diffs(cx).detach();
-                        });
-                    }
-                });
-            }
-            return;
-        }
-
-        const MIN_DELAY: u64 = 50;
-        let delay = delay.max(MIN_DELAY);
-        let duration = Duration::from_millis(delay);
-
-        self.git_diff_debouncer
-            .fire_new(duration, cx, move |this, cx| {
-                this.recalculate_buffer_diffs(cx)
-            });
-    }
-
-    fn recalculate_buffer_diffs(&mut self, cx: &mut Context<Self>) -> Task<()> {
-        cx.spawn(async move |this, cx| {
-            loop {
-                let task = this
-                    .update(cx, |this, cx| {
-                        let buffers = this
-                            .buffers_needing_diff
-                            .drain()
-                            .filter_map(|buffer| buffer.upgrade())
-                            .collect::<Vec<_>>();
-                        if buffers.is_empty() {
-                            None
-                        } else {
-                            Some(this.git_store.update(cx, |git_store, cx| {
-                                git_store.recalculate_buffer_diffs(buffers, cx)
-                            }))
-                        }
-                    })
-                    .ok()
-                    .flatten();
-
-                if let Some(task) = task {
-                    task.await;
-                } else {
-                    break;
-                }
-            }
-        })
-    }
-
     pub fn set_language_for_buffer(
         &mut self,
         buffer: &Entity<Buffer>,
@@ -5721,39 +5450,6 @@ impl Project {
                 .to_path_buf(),
         )
     }
-
-    pub fn blame_buffer(
-        &self,
-        buffer: &Entity<Buffer>,
-        version: Option<clock::Global>,
-        cx: &mut App,
-    ) -> Task<Result<Option<Blame>>> {
-        self.git_store.update(cx, |git_store, cx| {
-            git_store.blame_buffer(buffer, version, cx)
-        })
-    }
-
-    pub fn get_permalink_to_line(
-        &self,
-        buffer: &Entity<Buffer>,
-        selection: Range<u32>,
-        cx: &mut App,
-    ) -> Task<Result<url::Url>> {
-        self.git_store.update(cx, |git_store, cx| {
-            git_store.get_permalink_to_line(buffer, selection, cx)
-        })
-    }
-
-    pub fn get_file_permalink(
-        &self,
-        project_path: &ProjectPath,
-        cx: &mut App,
-    ) -> Task<Result<url::Url>> {
-        self.git_store.update(cx, |git_store, cx| {
-            git_store.get_file_permalink(project_path, cx)
-        })
-    }
-
     // RPC message handlers
 
     async fn handle_unshare_project(
@@ -5855,9 +5551,6 @@ impl Project {
                 for buffer in buffer_store.buffers() {
                     buffer.update(cx, |buffer, cx| buffer.remove_peer(replica_id, cx));
                 }
-            });
-            this.git_store.update(cx, |git_store, _| {
-                git_store.forget_shared_diffs_for(&peer_id);
             });
 
             cx.emit(Event::CollaboratorLeft(peer_id));
@@ -6791,71 +6484,12 @@ impl Project {
                 .is_some()
         })
     }
-
-    pub fn git_init(
-        &self,
-        path: Arc<Path>,
-        fallback_branch_name: String,
-        cx: &App,
-    ) -> Task<Result<()>> {
-        self.git_store
-            .read(cx)
-            .git_init(path, fallback_branch_name, cx)
-    }
-
-    pub fn git_config(&self, path: Arc<Path>, args: Vec<String>, cx: &App) -> Task<Result<String>> {
-        self.git_store.read(cx).git_config(path, args, cx)
-    }
-
     pub fn buffer_store(&self) -> &Entity<BufferStore> {
         &self.buffer_store
     }
-
-    pub fn git_store(&self) -> &Entity<GitStore> {
-        &self.git_store
-    }
-
     pub fn agent_server_store(&self) -> &Entity<AgentServerStore> {
         &self.agent_server_store
     }
-
-    #[cfg(feature = "test-support")]
-    pub fn git_scans_complete(&self, cx: &Context<Self>) -> Task<()> {
-        use futures::future::join_all;
-        cx.spawn(async move |this, cx| {
-            let scans_complete = this
-                .read_with(cx, |this, cx| {
-                    this.worktrees(cx)
-                        .filter_map(|worktree| Some(worktree.read(cx).as_local()?.scan_complete()))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap();
-            join_all(scans_complete).await;
-            let barriers = this
-                .update(cx, |this, cx| {
-                    let repos = this.repositories(cx).values().cloned().collect::<Vec<_>>();
-                    repos
-                        .into_iter()
-                        .map(|repo| repo.update(cx, |repo, _| repo.barrier()))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap();
-            join_all(barriers).await;
-        })
-    }
-
-    pub fn active_repository(&self, cx: &App) -> Option<Entity<Repository>> {
-        self.git_store.read(cx).active_repository()
-    }
-
-    pub fn repositories<'a>(&self, cx: &'a App) -> &'a HashMap<RepositoryId, Entity<Repository>> {
-        self.git_store.read(cx).repositories()
-    }
-
-    pub fn status_for_buffer_id(&self, buffer_id: BufferId, cx: &App) -> Option<FileStatus> {
-        self.git_store.read(cx).status_for_buffer_id(buffer_id, cx)
-    }
-
     pub fn set_agent_location(
         &mut self,
         new_location: Option<AgentLocation>,

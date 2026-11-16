@@ -1669,10 +1669,6 @@ impl Editor {
             self.refresh_matching_bracket_highlights(&display_map, cx);
             self.refresh_outline_symbols_at_cursor(cx);
             self.update_visible_edit_prediction(window, cx);
-            self.hide_blame_popover(true, cx);
-            if self.git_blame_inline_enabled {
-                self.start_inline_blame_timer(window, cx);
-            }
         }
 
         self.blink_manager.update(cx, BlinkManager::pause_blinking);

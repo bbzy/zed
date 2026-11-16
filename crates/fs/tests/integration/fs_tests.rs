@@ -1,5 +1,3 @@
-mod fake_git_repo_tests;
-
 use std::{
     collections::BTreeSet,
     io::Write,
@@ -484,7 +482,7 @@ async fn test_copy_recursive_with_ignoring(executor: BackgroundExecutor) {
 async fn test_realfs_atomic_write(executor: BackgroundExecutor) {
     // With the file handle still open, the file should be replaced
     // https://github.com/zed-industries/zed/issues/30054
-    let fs = RealFs::new(None, executor);
+    let fs = RealFs::new(executor);
     let temp_dir = TempDir::new().unwrap();
     let file_to_be_replaced = temp_dir.path().join("file.txt");
     let mut file = std::fs::File::create_new(&file_to_be_replaced).unwrap();
@@ -499,7 +497,7 @@ async fn test_realfs_atomic_write(executor: BackgroundExecutor) {
 
 #[gpui::test]
 async fn test_realfs_atomic_write_non_existing_file(executor: BackgroundExecutor) {
-    let fs = RealFs::new(None, executor);
+    let fs = RealFs::new(executor);
     let temp_dir = TempDir::new().unwrap();
     let file_to_be_replaced = temp_dir.path().join("file.txt");
     gpui::block_on(fs.atomic_write(file_to_be_replaced.clone(), "Hello".into())).unwrap();
@@ -512,7 +510,7 @@ async fn test_realfs_atomic_write_non_existing_file(executor: BackgroundExecutor
 async fn test_realfs_canonicalize(executor: BackgroundExecutor) {
     use util::paths::SanitizedPath;
 
-    let fs = RealFs::new(None, executor);
+    let fs = RealFs::new(executor);
     let temp_dir = TempDir::new().unwrap();
     let file = temp_dir.path().join("test (1).txt");
     let file = SanitizedPath::new(&file);
@@ -597,7 +595,7 @@ async fn test_realfs_parallel_rename_without_overwrite_preserves_losing_source(
     std::fs::write(&source_a, "from a").unwrap();
     std::fs::write(&source_b, "from b").unwrap();
 
-    let fs = RealFs::new(None, executor);
+    let fs = RealFs::new(executor);
     let (first_result, second_result) = futures::future::join(
         fs.rename(&source_a, &target, RenameOptions::default()),
         fs.rename(&source_b, &target, RenameOptions::default()),
@@ -622,7 +620,7 @@ async fn test_realfs_rename_ignore_if_exists_leaves_source_and_target_unchanged(
     std::fs::write(&source, "from source").unwrap();
     std::fs::write(&target, "from target").unwrap();
 
-    let fs = RealFs::new(None, executor);
+    let fs = RealFs::new(executor);
     let result = fs
         .rename(
             &source,
@@ -755,7 +753,7 @@ async fn test_realfs_copy_and_remove_semantics(cx: &mut TestAppContext) {
     std::fs::create_dir(root.join("dir")).unwrap();
     std::fs::write(root.join("dir").join("inner.txt"), "inner").unwrap();
 
-    let fs = RealFs::new(None, executor);
+    let fs = RealFs::new(executor);
     assert_copy_and_remove_semantics(root, fs.as_ref()).await;
 
     // Creating symlinks requires elevated privileges on Windows, so like the
@@ -830,7 +828,7 @@ async fn test_realfs_executable_metadata(executor: BackgroundExecutor) {
     permissions.set_mode(0o755);
     std::fs::set_permissions(&executable_path, permissions).unwrap();
 
-    let fs = RealFs::new(None, executor);
+    let fs = RealFs::new(executor);
     gpui::block_on(fs.create_symlink(&symlink_path, PathBuf::from("executable.sh"))).unwrap();
 
     let non_executable_metadata = fs
@@ -861,7 +859,7 @@ async fn test_realfs_executable_metadata(executor: BackgroundExecutor) {
 async fn test_realfs_broken_symlink_metadata(executor: BackgroundExecutor) {
     let tempdir = TempDir::new().unwrap();
     let path = tempdir.path();
-    let fs = RealFs::new(None, executor);
+    let fs = RealFs::new(executor);
     let symlink_path = path.join("symlink");
     gpui::block_on(fs.create_symlink(&symlink_path, PathBuf::from("file_a.txt"))).unwrap();
     let metadata = fs
@@ -881,7 +879,7 @@ async fn test_realfs_broken_symlink_metadata(executor: BackgroundExecutor) {
 async fn test_realfs_symlink_loop_metadata(executor: BackgroundExecutor) {
     let tempdir = TempDir::new().unwrap();
     let path = tempdir.path();
-    let fs = RealFs::new(None, executor);
+    let fs = RealFs::new(executor);
     let symlink_path = path.join("symlink");
     gpui::block_on(fs.create_symlink(&symlink_path, PathBuf::from("symlink"))).unwrap();
     let metadata = fs
@@ -1111,7 +1109,7 @@ async fn watcher_delivered_event(
 #[gpui::test]
 async fn test_realfs_watcher_diagnostics(executor: BackgroundExecutor, cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let fs = RealFs::new(None, executor.clone());
+    let fs = RealFs::new(executor.clone());
     let directory = TempDir::new().unwrap();
     let root = std::fs::canonicalize(directory.path()).unwrap();
     // Windows canonicalization adds a verbatim prefix that watcher paths omit.
@@ -1190,7 +1188,7 @@ async fn test_realfs_watch_aliased_watch_paths_deliver_events(
 ) {
     cx.executor().allow_parking();
 
-    let fs = RealFs::new(None, executor.clone());
+    let fs = RealFs::new(executor.clone());
     let temp_dir = TempDir::new().expect("create temp dir");
     let root = temp_dir.path().to_path_buf();
     let latency = Duration::from_millis(10);
@@ -1368,7 +1366,7 @@ async fn test_realfs_watch_stress_reports_missed_paths(
     const FILE_COUNT: usize = 32000;
     cx.executor().allow_parking();
 
-    let fs = RealFs::new(None, executor.clone());
+    let fs = RealFs::new(executor.clone());
     let temp_dir = TempDir::new().expect("create temp dir");
     let root = temp_dir.path();
 

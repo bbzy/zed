@@ -729,7 +729,7 @@ async fn test_find_or_create_workspace_uses_project_group_key_when_paths_are_mis
     cx.update(|cx| <dyn Fs>::set_global(fs.clone(), cx));
     let project = Project::test(fs.clone(), ["/project".as_ref()], cx).await;
     project
-        .update(cx, |project, cx| project.git_scans_complete(cx))
+        .update(cx, |project, cx| project.wait_for_initial_scan(cx))
         .await;
 
     let project_group_key = project.read_with(cx, |project, cx| project.project_group_key(cx));
@@ -1421,10 +1421,6 @@ async fn test_remote_project_root_dir_changes_update_groups(cx: &mut TestAppCont
                 removed_entries: vec![],
                 scan_id: 1,
                 is_last_update: true,
-                updated_repositories: vec![],
-                removed_repositories: vec![],
-                root_repo_common_dir: None,
-                root_repo_is_linked_worktree: false,
             });
     });
     cx.run_until_parked();

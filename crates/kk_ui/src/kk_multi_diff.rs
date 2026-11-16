@@ -93,7 +93,7 @@ impl editor::Addon for MultiDiffAddon {
         &self,
         buffer_id: language::BufferId,
         cx: &App,
-    ) -> Option<git::status::FileStatus> {
+    ) -> Option<buffer_diff::FileStatus> {
         let view = self.0.upgrade()?;
         view.read(cx).entries.iter().find_map(|entry| {
             let entry = entry.read(cx);
@@ -509,7 +509,7 @@ impl KkMultiDiff {
             editor.rhs_editor().update(cx, |editor, cx| {
                 editor.set_read_only(!working_copy);
                 editor.set_show_diff_review_button(true, cx);
-                editor.set_allow_git_diff_scrollbar_markers(showing_full_file, cx);
+                editor.set_allow_diff_scrollbar_markers(showing_full_file, cx);
             });
             editor
         });

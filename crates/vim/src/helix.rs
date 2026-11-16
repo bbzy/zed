@@ -4780,7 +4780,7 @@ mod test {
             three"},
             Mode::HelixNormal,
         );
-        cx.set_head_text(indoc! {"
+        cx.set_diff_base(indoc! {"
             one
             CHANGED
             three"});
@@ -4809,7 +4809,7 @@ mod test {
             ˇthree"},
             Mode::HelixNormal,
         );
-        cx.set_head_text(indoc! {"
+        cx.set_diff_base(indoc! {"
             one
             CHANGED
             three"});

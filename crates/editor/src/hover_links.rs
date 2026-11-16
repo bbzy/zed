@@ -2823,7 +2823,7 @@ mod tests {
             type_hint_at(2, 1, "u64", HintEdits::InResponse),
         ]);
         cx.set_state("aa\nbb\ncˇc");
-        cx.set_head_text("aa\nold\nbb\ncc");
+        cx.set_diff_base("aa\nold\nbb\ncc");
         cx.dispatch_action(crate::ExpandAllDiffHunks);
         let cloned_editor = cx.update_editor(|editor, window, cx| {
             editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {

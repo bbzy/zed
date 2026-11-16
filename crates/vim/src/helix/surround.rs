@@ -392,7 +392,7 @@ mod test {
         cx.enable_helix();
 
         cx.set_state("ˇa\nb\n", Mode::HelixNormal);
-        cx.set_head_text("a\nX\nb\n");
+        cx.set_diff_base("a\nX\nb\n");
         cx.update_editor(|editor, window, cx| {
             editor.expand_all_diff_hunks(&ExpandAllDiffHunks, window, cx);
             editor.change_selections(Default::default(), window, cx, |s| {

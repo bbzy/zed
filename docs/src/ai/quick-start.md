@@ -68,7 +68,6 @@ For general settings mechanics, see [Configuring Zed](../configuring-zed.md).
 | Accept AI completions while typing             | [Edit Prediction](./edit-prediction.md)              |
 | Rewrite selected code or terminal text         | [Inline Assistant](./inline-assistant.md)            |
 | Run multiple AI tasks at once                  | [Parallel Agents](./parallel-agents.md)              |
-| Generate commit messages                       | [Git commit generation](../git.md#ai-support-in-git) |
 
 ## Learn More {#learn-more}
 

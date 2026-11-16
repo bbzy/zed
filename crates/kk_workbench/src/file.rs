@@ -181,6 +181,41 @@ impl FileInformation {
 }
 
 impl Snapshot {
+    pub async fn lfs_content(
+        &self,
+        revision: &str,
+        path: &str,
+        pointer: &LfsPointer,
+    ) -> Result<Vec<u8>> {
+        let information = self.file_information(revision, path).await?;
+        let object = information
+            .object_id
+            .as_deref()
+            .context("Missing LFS file object ID")?;
+        self.repository().lfs_content(object, pointer).await
+    }
+
+    pub async fn merged_parent_lfs_content(
+        &self,
+        revision: &str,
+        path: &str,
+        pointer: &LfsPointer,
+    ) -> Result<Vec<u8>> {
+        let revisions = self.revisions(Some(revision), 1).await?;
+        let revision = revisions.first().context("Missing merged revision")?;
+        for parent in &revision.parent_commit_ids {
+            let information = self.file_information(parent, path).await?;
+            if information.pointer.as_ref() == Some(pointer) {
+                let object = information
+                    .object_id
+                    .as_deref()
+                    .context("Missing LFS file object ID")?;
+                return self.repository().lfs_content(object, pointer).await;
+            }
+        }
+        anyhow::bail!("No parent file object matches the merged LFS pointer")
+    }
+
     pub async fn merged_parent_file(
         &self,
         revision: &str,
@@ -510,11 +545,12 @@ impl Repository {
         }
     }
 
-    pub async fn lfs_content(&self, pointer: &LfsPointer) -> Result<Vec<u8>> {
+    pub async fn lfs_content(&self, object: &str, pointer: &LfsPointer) -> Result<Vec<u8>> {
         if let Some(remote) = self.remote() {
             return remote
                 .data(crate::remote::Request::LfsContent {
                     repository: remote.id,
+                    object: object.into(),
                     pointer: pointer.clone(),
                 })
                 .await;
@@ -528,13 +564,13 @@ impl Repository {
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
             "Invalid LFS object ID"
         );
-        let size = self.file_object_size(&pointer.hash).await?;
+        let size = self.file_object_size(object).await?;
         ensure!(
             size == pointer.size,
             "Invalid local LFS size for {}",
             pointer.hash
         );
-        let bytes = self.file_object_content(&pointer.hash).await?;
+        let bytes = self.file_object_content(object).await?;
         ensure!(
             bytes.len() as u64 == pointer.size
                 && format!("{:x}", Sha256::digest(&bytes)) == pointer.hash,

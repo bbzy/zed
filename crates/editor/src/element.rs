@@ -10,11 +10,11 @@ use crate::{
     BUFFER_HEADER_PADDING, BlockId, ChunkRendererContext, ChunkReplacement, CodeActionSource,
     ConflictsOurs, ConflictsOursMarker, ConflictsOuter, ConflictsTheirs, ConflictsTheirsMarker,
     ContextMenuPlacement, CursorShape, CustomBlockId, DisplayDiffHunk, DisplayPoint, DisplayRow,
-    EditDisplayMode, EditPrediction, Editor, EditorMode, EditorSettings, EditorSnapshot,
-    EditorStyle, FILE_HEADER_HEIGHT, FocusedBlock, GutterDimensions, HalfPageDown, HalfPageUp,
-    HandleInput, HoveredCursor, InlayHintRefreshReason, LineDown, LineHighlight, LineUp,
-    MAX_LINE_LEN, MINIMAP_FONT_SIZE, PageDown, PageUp, Point, RowExt, RowRangeExt, Selection,
-    SelectionDragState, SizingBehavior, SoftWrap, ToPoint,
+    Editor, EditorMode, EditorSettings, EditorSnapshot, EditorStyle, FILE_HEADER_HEIGHT,
+    FocusedBlock, GutterDimensions, HalfPageDown, HalfPageUp, HandleInput, HoveredCursor,
+    InlayHintRefreshReason, LineDown, LineHighlight, LineUp, MAX_LINE_LEN, MINIMAP_FONT_SIZE,
+    PageDown, PageUp, Point, RowExt, RowRangeExt, Selection, SelectionDragState, SizingBehavior,
+    SoftWrap, ToPoint,
     code_context_menus::{CodeActionsMenu, MENU_ASIDE_MAX_WIDTH, MENU_ASIDE_MIN_WIDTH, MENU_GAP},
     column_pixels,
     cursor_animation::{CursorViewport, LogicalCursorPosition, animated_corners_overlap_target},
@@ -23,10 +23,9 @@ use crate::{
         HighlightKey, HighlightedChunk, ToDisplayPoint,
     },
     editor_settings::{
-        CurrentLineHighlight, DocumentColorsRenderMode, GitGutterWidth, Minimap, MinimapThumb,
+        CurrentLineHighlight, DiffGutterWidth, DocumentColorsRenderMode, Minimap, MinimapThumb,
         MinimapThumbBorder, ScrollBeyondLastLine, ScrollbarAxes, ScrollbarDiagnostics, ShowMinimap,
     },
-    git::blame::{BlameRenderer, GitBlame, GlobalBlameRenderer},
     hover_popover::{
         self, HOVER_POPOVER_GAP, MIN_POPOVER_CHARACTER_WIDTH, MIN_POPOVER_LINE_HEIGHT,
         POPOVER_RIGHT_OFFSET,
@@ -40,24 +39,22 @@ use crate::{
 use buffer_diff::{DiffHunkStatus, DiffHunkStatusKind};
 use collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use feature_flags::{DiffReviewFeatureFlag, FeatureFlagAppExt as _};
-use git::{Oid, blame::BlameEntry, commit::ParsedCommitMessage};
 use gpui::{
     Action, Along, AnyElement, App, AppContext, AvailableSpace, Axis as ScrollbarAxis, BorderStyle,
     Bounds, ClipboardItem, ContentMask, Context, Corners, CursorStyle, DispatchPhase, Edges,
     Element, ElementInputHandler, Entity, Focusable as _, Font, FontId, FontWeight,
     GlobalElementId, Hitbox, HitboxBehavior, Hsla, InteractiveElement, IntoElement, IsZero,
     ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
-    ParentElement, Pixels, ScaledPixels, ScrollHandle, ShapedLine, SharedString, Size,
+    ParentElement, Pixels, ScaledPixels, ShapedLine, SharedString, Size,
     StatefulInteractiveElement, Style, Styled, StyledText, TaskExt, TextAlign, TextRun,
-    TextStyleRefinement, UnderlineStyle, WeakEntity, Window, div, fill, outline, pattern_slash,
-    point, px, quad, relative, size, solid_background, transparent_black, underline_y_offset,
+    TextStyleRefinement, UnderlineStyle, Window, div, fill, outline, pattern_slash, point, px,
+    quad, relative, size, solid_background, transparent_black, underline_y_offset,
 };
 use itertools::Itertools;
 use language::{
     Diagnostic, HighlightedText, IndentGuideSettings, LanguageAwareStyling,
     language_settings::ShowWhitespaceSetting,
 };
-use markdown::Markdown;
 use multi_buffer::{
     Anchor, ExcerptRange, ExpandExcerptDirection, ExpandInfo, MultiBufferOffset, MultiBufferPoint,
     MultiBufferRow, MultiBufferSnapshot, RowInfo, ToOffset,
@@ -65,10 +62,10 @@ use multi_buffer::{
 
 use project::{
     debugger::breakpoint_store::{Breakpoint, BreakpointSessionState},
-    project_settings::{InlineBlameLocation, ProjectSettings},
+    project_settings::ProjectSettings,
 };
 use settings::{
-    GitGutterSetting, GitHunkStyleSetting, IndentGuideBackgroundColoring, IndentGuideColoring,
+    DiffGutterSetting, DiffHunkStyleSetting, IndentGuideBackgroundColoring, IndentGuideColoring,
     Settings,
 };
 use smallvec::{SmallVec, smallvec};
@@ -93,7 +90,7 @@ use ui::{ButtonLike, POPOVER_Y_PADDING, Tooltip, prelude::*, scrollbars::ShowScr
 use unicode_segmentation::UnicodeSegmentation;
 use util::{ResultExt, debug_panic};
 use workspace::{
-    CollaboratorId, ItemHandle, Workspace,
+    CollaboratorId, ItemHandle,
     item::{Item, ItemBufferKind},
 };
 
@@ -149,13 +146,6 @@ struct SelectionLayout {
     range: Range<DisplayPoint>,
     active_rows: Range<DisplayRow>,
     user_name: Option<SharedString>,
-}
-
-struct InlineBlameLayout {
-    element: AnyElement,
-    bounds: Bounds<Pixels>,
-    buffer_id: BufferId,
-    entry: BlameEntry,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -408,7 +398,6 @@ impl EditorElement {
         register_action(editor, window, Editor::select_page_down);
         register_action(editor, window, Editor::select_page_up);
         register_action(editor, window, Editor::cancel);
-        register_action(editor, window, Editor::blame_hover);
         register_action(editor, window, Editor::debugger_hover_expand_selected);
         register_action(editor, window, Editor::debugger_hover_collapse_selected);
         register_action(editor, window, Editor::debugger_hover_select_next);
@@ -631,28 +620,8 @@ impl EditorElement {
         register_action(editor, window, Editor::copy_file_name);
         register_action(editor, window, Editor::copy_file_name_without_extension);
         register_action(editor, window, Editor::copy_highlight_json);
-        register_action(editor, window, Editor::copy_permalink_to_line);
-        register_action(editor, window, Editor::open_permalink_to_line);
         register_action(editor, window, Editor::copy_file_location);
-        register_action(editor, window, Editor::toggle_git_blame);
-        register_action(editor, window, Editor::toggle_git_blame_inline);
-        if editor.read(cx).blame().is_some() {
-            register_action(editor, window, Editor::open_git_blame_commit);
-            if editor.update(cx, |editor, cx| {
-                editor.blame_revision_target(window, cx).is_some()
-            }) {
-                register_action(editor, window, Editor::blame_revision);
-            }
-            if editor.update(cx, |editor, cx| {
-                editor.blame_previous_revision_target(window, cx).is_some()
-            }) {
-                register_action(editor, window, Editor::blame_previous_revision);
-            }
-        }
         register_action(editor, window, Editor::toggle_selected_diff_hunks);
-        register_action(editor, window, Editor::toggle_staged_selected_diff_hunks);
-        register_action(editor, window, Editor::stage_and_next);
-        register_action(editor, window, Editor::unstage_and_next);
         register_action(editor, window, Editor::expand_all_diff_hunks);
         register_action(editor, window, Editor::collapse_all_diff_hunks);
         register_action(editor, window, Editor::toggle_all_diff_hunks);
@@ -780,8 +749,6 @@ impl EditorElement {
             register_edit_action(editor, window, Editor::accept_next_word_edit_prediction);
             register_edit_action(editor, window, Editor::accept_next_line_edit_prediction);
             register_edit_action(editor, window, Editor::accept_edit_prediction);
-            register_edit_action(editor, window, Editor::restore_file);
-            register_edit_action(editor, window, Editor::restore_and_next);
             register_edit_action(editor, window, Editor::apply_all_diff_hunks);
             register_edit_action(editor, window, Editor::apply_selected_diff_hunks);
             register_edit_action(editor, window, Editor::insert_uuid_v4);
@@ -1524,7 +1491,7 @@ impl EditorElement {
                 let editor = self.editor.read(cx);
                 let is_singleton = editor.buffer_kind(cx) == ItemBufferKind::Singleton;
                 // Git
-                (editor.git_diff_scrollbar_markers_enabled(cx) && snapshot.buffer_snapshot().has_diff_hunks())
+                (editor.diff_scrollbar_markers_enabled(cx) && snapshot.buffer_snapshot().has_diff_hunks())
                 ||
                 // Buffer Search Results
                 (is_singleton && scrollbar_settings.search_results && editor.has_background_highlights(HighlightKey::BufferSearchHighlights))
@@ -1879,8 +1846,8 @@ impl EditorElement {
             .display_diff_hunks_for_rows(display_rows, folded_buffers)
             .map(|hunk| (hunk, None))
             .collect::<Vec<_>>();
-        let git_gutter_setting = ProjectSettings::get_global(cx).git.git_gutter;
-        if let GitGutterSetting::TrackedFiles = git_gutter_setting {
+        let diff_gutter_setting = ProjectSettings::get_global(cx).diff.gutter;
+        if let DiffGutterSetting::TrackedFiles = diff_gutter_setting {
             for (hunk, hitbox) in &mut display_hunks {
                 if matches!(hunk, DisplayDiffHunk::Unfolded { .. }) {
                     let hunk_bounds = Self::diff_hunk_bounds(
@@ -2129,197 +2096,7 @@ impl EditorElement {
         );
         Some(button)
     }
-
-    fn layout_inline_blame(
-        &self,
-        display_row: DisplayRow,
-        row_info: &RowInfo,
-        line_layout: &LineWithInvisibles,
-        crease_trailer: Option<&CreaseTrailerLayout>,
-        em_width: Pixels,
-        content_origin: gpui::Point<Pixels>,
-        scroll_position: gpui::Point<ScrollOffset>,
-        scroll_pixel_position: gpui::Point<ScrollPixelOffset>,
-        line_height: Pixels,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Option<InlineBlameLayout> {
-        if !self
-            .editor
-            .update(cx, |editor, cx| editor.render_git_blame_inline(window, cx))
-        {
-            return None;
-        }
-
-        let editor = self.editor.read(cx);
-        let blame = editor.blame.clone()?;
-        let padding = {
-            const INLINE_ACCEPT_SUGGESTION_EM_WIDTHS: f32 = 14.;
-
-            let mut padding = ProjectSettings::get_global(cx).git.inline_blame.padding as f32;
-
-            if let Some(edit_prediction) = editor.active_edit_prediction.as_ref()
-                && let EditPrediction::Edit {
-                    display_mode: EditDisplayMode::TabAccept,
-                    ..
-                } = &edit_prediction.completion
-            {
-                padding += INLINE_ACCEPT_SUGGESTION_EM_WIDTHS
-            }
-
-            padding * em_width
-        };
-
-        let (buffer_id, entry) = blame
-            .update(cx, |blame, cx| {
-                blame.blame_for_rows(&[*row_info], cx).next()
-            })
-            .flatten()?;
-
-        let mut element = render_inline_blame_entry(entry.clone(), &self.style, cx)?;
-
-        let start_y =
-            content_origin.y + line_height * ((display_row.as_f64() - scroll_position.y) as f32);
-
-        let start_x = {
-            let line_end = if let Some(crease_trailer) = crease_trailer {
-                crease_trailer.bounds.right()
-            } else {
-                Pixels::from(
-                    ScrollPixelOffset::from(content_origin.x + line_layout.width)
-                        - scroll_pixel_position.x,
-                )
-            };
-
-            let padded_line_end = line_end + padding;
-
-            let min_column_in_pixels = column_pixels(
-                &self.style,
-                ProjectSettings::get_global(cx).git.inline_blame.min_column as usize,
-                window,
-            );
-            let min_start = Pixels::from(
-                ScrollPixelOffset::from(content_origin.x + min_column_in_pixels)
-                    - scroll_pixel_position.x,
-            );
-
-            cmp::max(padded_line_end, min_start)
-        };
-
-        let absolute_offset = point(start_x, start_y);
-        let size = element.layout_as_root(AvailableSpace::min_size(), window, cx);
-        let bounds = Bounds::new(absolute_offset, size);
-
-        element.prepaint_as_root(absolute_offset, AvailableSpace::min_size(), window, cx);
-
-        Some(InlineBlameLayout {
-            element,
-            bounds,
-            buffer_id,
-            entry,
-        })
-    }
-
-    fn layout_blame_popover(
-        &self,
-        editor_snapshot: &EditorSnapshot,
-        text_hitbox: &Hitbox,
-        line_height: Pixels,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        if !self.editor.read(cx).inline_blame_popover.is_some() {
-            return;
-        }
-
-        let Some(blame) = self.editor.read(cx).blame.clone() else {
-            return;
-        };
-        let cursor_point = self
-            .editor
-            .read(cx)
-            .selections
-            .newest::<language::Point>(&editor_snapshot.display_snapshot)
-            .head();
-
-        let Some((buffer, buffer_point)) = editor_snapshot
-            .buffer_snapshot()
-            .point_to_buffer_point(cursor_point)
-        else {
-            return;
-        };
-
-        let row_info = RowInfo {
-            buffer_id: Some(buffer.remote_id()),
-            buffer_row: Some(buffer_point.row),
-            ..Default::default()
-        };
-
-        let Some((buffer_id, blame_entry)) = blame
-            .update(cx, |blame, cx| blame.blame_for_rows(&[row_info], cx).next())
-            .flatten()
-        else {
-            return;
-        };
-
-        let Some((popover_state, target_point)) = self.editor.read_with(cx, |editor, _| {
-            editor
-                .inline_blame_popover
-                .as_ref()
-                .map(|state| (state.popover_state.clone(), state.position))
-        }) else {
-            return;
-        };
-
-        let workspace = self
-            .editor
-            .read_with(cx, |editor, _| editor.workspace().map(|w| w.downgrade()));
-
-        let maybe_element = workspace.and_then(|workspace| {
-            render_blame_entry_popover(
-                blame_entry,
-                popover_state.scroll_handle,
-                popover_state.commit_message,
-                popover_state.markdown,
-                workspace,
-                &blame,
-                buffer_id,
-                window,
-                cx,
-            )
-        });
-
-        if let Some(mut element) = maybe_element {
-            let size = element.layout_as_root(AvailableSpace::min_size(), window, cx);
-            let overall_height = size.height + HOVER_POPOVER_GAP;
-            let popover_origin = if target_point.y > overall_height {
-                point(target_point.x, target_point.y - size.height)
-            } else {
-                point(
-                    target_point.x,
-                    target_point.y + line_height + HOVER_POPOVER_GAP,
-                )
-            };
-
-            let horizontal_offset = (text_hitbox.top_right().x
-                - POPOVER_RIGHT_OFFSET
-                - (popover_origin.x + size.width))
-                .min(Pixels::ZERO);
-
-            let origin = point(popover_origin.x + horizontal_offset, popover_origin.y);
-            let popover_bounds = Bounds::new(origin, size);
-
-            self.editor.update(cx, |editor, _| {
-                if let Some(state) = &mut editor.inline_blame_popover {
-                    state.popover_bounds = Some(popover_bounds);
-                }
-            });
-
-            window.defer_draw(element, origin, 2, None);
-        }
-    }
-
-    fn layout_blame_entries(
+    fn layout_gutter_annotations(
         &self,
         buffer_rows: &[RowInfo],
         em_width: Pixels,
@@ -2354,64 +2131,7 @@ impl EditorElement {
                     .collect(),
             );
         }
-        if !self
-            .editor
-            .update(cx, |editor, cx| editor.render_git_blame_gutter(cx))
-        {
-            return None;
-        }
-
-        let blame = self.editor.read(cx).blame.clone()?;
-        let workspace = self.editor.read(cx).workspace()?;
-        let blamed_rows: Vec<_> = blame.update(cx, |blame, cx| {
-            blame.blame_for_rows(buffer_rows, cx).collect()
-        });
-
-        let width = if let Some(max_width) = max_width {
-            AvailableSpace::Definite(max_width)
-        } else {
-            AvailableSpace::MaxContent
-        };
-        let start_x = em_width;
-
-        let mut last_used_color: Option<(Hsla, Oid)> = None;
-        let blame_renderer = cx.global::<GlobalBlameRenderer>().0.clone();
-
-        let shaped_lines = blamed_rows
-            .into_iter()
-            .enumerate()
-            .flat_map(|(ix, blame_entry)| {
-                let (buffer_id, blame_entry) = blame_entry?;
-                let mut element = render_blame_entry(
-                    ix,
-                    &blame,
-                    blame_entry,
-                    &self.style,
-                    &mut last_used_color,
-                    self.editor.clone(),
-                    workspace.clone(),
-                    buffer_id,
-                    &*blame_renderer,
-                    window,
-                    cx,
-                )?;
-
-                let start_y = line_height
-                    * (DisplayRow(start_row.0 + ix as u32).as_f64() - scroll_position.y) as f32;
-                let absolute_offset = gutter_hitbox.origin + point(start_x, start_y);
-
-                element.prepaint_as_root(
-                    absolute_offset,
-                    size(width, AvailableSpace::MinContent),
-                    window,
-                    cx,
-                );
-
-                Some(element)
-            })
-            .collect();
-
-        Some(shaped_lines)
+        None
     }
 
     fn layout_indent_guides(
@@ -2815,11 +2535,9 @@ impl EditorElement {
             .ilog10()
             + 1;
 
-        let git_gutter_width = Self::gutter_strip_width(line_height, cx)
-            + gutter_dimensions
-                .git_blame_entries_width
-                .unwrap_or_default();
-        let available_width = gutter_dimensions.left_padding - git_gutter_width;
+        let diff_gutter_width = Self::gutter_strip_width(line_height, cx)
+            + gutter_dimensions.annotation_width.unwrap_or_default();
+        let available_width = gutter_dimensions.left_padding - diff_gutter_width;
 
         buffer_rows
             .iter()
@@ -2866,7 +2584,7 @@ impl EditorElement {
                     .into_any_element();
 
                 let position = point(
-                    git_gutter_width + px(1.),
+                    diff_gutter_width + px(1.),
                     line_height
                         * (DisplayRow(start_row.0 + ix as u32).as_f64() - scroll_position.y) as f32
                         + px(1.),
@@ -5535,15 +5253,15 @@ impl EditorElement {
     const MIN_DELETED_MARKER_WIDTH_RATIO: f32 = 0.2;
 
     fn gutter_strip_width(line_height: Pixels, cx: &App) -> Pixels {
-        match EditorSettings::get_global(cx).gutter.git_gutter_width {
-            GitGutterWidth::Custom(width) => px(*width),
-            GitGutterWidth::Default => (Self::DEFAULT_STRIP_WIDTH_RATIO * line_height).floor(),
+        match EditorSettings::get_global(cx).gutter.diff_gutter_width {
+            DiffGutterWidth::Custom(width) => px(*width),
+            DiffGutterWidth::Default => (Self::DEFAULT_STRIP_WIDTH_RATIO * line_height).floor(),
         }
     }
 
-    fn deleted_marker_base_width(setting: GitGutterWidth, line_height: Pixels) -> Pixels {
+    fn deleted_marker_base_width(setting: DiffGutterWidth, line_height: Pixels) -> Pixels {
         match setting {
-            GitGutterWidth::Custom(width) => {
+            DiffGutterWidth::Custom(width) => {
                 let scaled_width = px(*width * Self::DELETED_MARKER_WIDTH_RATIO);
                 if scaled_width > Pixels::ZERO {
                     let default_strip_width = Self::DEFAULT_STRIP_WIDTH_RATIO * line_height;
@@ -5553,7 +5271,7 @@ impl EditorElement {
                     Pixels::ZERO
                 }
             }
-            GitGutterWidth::Default => {
+            DiffGutterWidth::Default => {
                 (Self::DEFAULT_STRIP_WIDTH_RATIO * line_height * Self::DELETED_MARKER_WIDTH_RATIO)
                     .floor()
             }
@@ -5596,7 +5314,7 @@ impl EditorElement {
                     let end_y = start_y + line_height;
 
                     let width = Self::deleted_marker_base_width(
-                        EditorSettings::get_global(cx).gutter.git_gutter_width,
+                        EditorSettings::get_global(cx).gutter.diff_gutter_width,
                         line_height,
                     );
                     let highlight_origin = gutter_bounds.origin + point(px(0.), start_y);
@@ -5697,17 +5415,17 @@ impl EditorElement {
             }
         }
 
-        let show_git_gutter = layout
+        let show_diff_gutter = layout
             .position_map
             .snapshot
-            .show_git_diff_gutter
+            .show_diff_gutter
             .unwrap_or_else(|| {
                 matches!(
-                    ProjectSettings::get_global(cx).git.git_gutter,
-                    GitGutterSetting::TrackedFiles
+                    ProjectSettings::get_global(cx).diff.gutter,
+                    DiffGutterSetting::TrackedFiles
                 )
             });
-        if show_git_gutter {
+        if show_diff_gutter {
             self.paint_gutter_diff_hunks(layout, self.split_side, window, cx)
         }
 
@@ -5747,19 +5465,19 @@ impl EditorElement {
         });
     }
 
-    fn paint_blamed_display_rows(
+    fn paint_gutter_annotations(
         &self,
         layout: &mut EditorLayout,
         window: &mut Window,
         cx: &mut App,
     ) {
-        let Some(blamed_display_rows) = layout.blamed_display_rows.take() else {
+        let Some(gutter_annotations) = layout.gutter_annotations.take() else {
             return;
         };
 
         window.paint_layer(layout.gutter_hitbox.bounds, |window| {
-            for mut blame_element in blamed_display_rows.into_iter() {
-                blame_element.paint(window, cx);
+            for mut annotation in gutter_annotations.into_iter() {
+                annotation.paint(window, cx);
             }
         })
     }
@@ -5985,7 +5703,6 @@ impl EditorElement {
                 self.paint_navigation_overlays(layout, window, cx);
                 self.paint_cursors(layout, window, cx);
                 self.paint_inline_diagnostics(layout, window, cx);
-                self.paint_inline_blame(layout, window, cx);
                 self.paint_inline_code_actions(layout, window, cx);
                 self.paint_diff_hunk_controls(layout, window, cx);
                 window.with_element_namespace("crease_trailers", |window| {
@@ -6432,8 +6149,8 @@ impl EditorElement {
         self.editor.update(cx, |editor, cx| {
             let is_singleton = editor.buffer_kind(cx) == ItemBufferKind::Singleton;
             let scrollbar_settings = EditorSettings::get_global(cx).scrollbar;
-            let show_git_diff_markers = editor.git_diff_scrollbar_markers_enabled(cx);
-            if !is_singleton && !show_git_diff_markers {
+            let show_diff_markers = editor.diff_scrollbar_markers_enabled(cx);
+            if !is_singleton && !show_diff_markers {
                 editor.scrollbar_marker_state.dirty = true;
                 editor.scrollbar_marker_state.markers = Default::default();
                 editor.scrollbar_marker_state.pending_refresh = None;
@@ -6459,7 +6176,7 @@ impl EditorElement {
                         .background_spawn(async move {
                             let max_point = snapshot.display_snapshot.buffer_snapshot().max_point();
                             let mut marker_quads = Vec::new();
-                            if show_git_diff_markers {
+                            if show_diff_markers {
                                 let marker_row_ranges =
                                     snapshot.buffer_snapshot().diff_hunks().map(|hunk| {
                                         let start_display_row =
@@ -6700,15 +6417,6 @@ impl EditorElement {
             inline_diagnostic.1.paint(window, cx);
         }
     }
-
-    fn paint_inline_blame(&mut self, layout: &mut EditorLayout, window: &mut Window, cx: &mut App) {
-        if let Some(mut blame_layout) = layout.inline_blame_layout.take() {
-            window.paint_layer(layout.position_map.text_hitbox.bounds, |window| {
-                blame_layout.element.paint(window, cx);
-            })
-        }
-    }
-
     fn paint_inline_code_actions(
         &mut self,
         layout: &mut EditorLayout,
@@ -7005,8 +6713,8 @@ impl EditorElement {
             .diff_hunk_renderer()
             .render_hunk_as_staged(&status, cx);
         let unstaged_hollow = matches!(
-            ProjectSettings::get_global(cx).git.hunk_style,
-            GitHunkStyleSetting::UnstagedHollow
+            ProjectSettings::get_global(cx).diff.hunk_style,
+            DiffHunkStyleSetting::UnstagedHollow
         );
 
         unstaged == unstaged_hollow
@@ -7135,10 +6843,10 @@ impl Gutter<'_> {
             AvailableSpace::Definite(self.line_height),
         );
         let indicator_size = button.layout_as_root(available_space, window, cx);
-        let git_gutter_width = EditorElement::gutter_strip_width(self.line_height, cx)
-            + self.dimensions.git_blame_entries_width.unwrap_or_default();
+        let diff_gutter_width = EditorElement::gutter_strip_width(self.line_height, cx)
+            + self.dimensions.annotation_width.unwrap_or_default();
 
-        let x = git_gutter_width + px(2.);
+        let x = diff_gutter_width + px(2.);
 
         let mut y = Pixels::from(
             (row.as_f64() - self.scroll_position.y) * ScrollPixelOffset::from(self.line_height),
@@ -7354,93 +7062,6 @@ fn apply_dirty_filename_style(
             .into_any(),
     )
 }
-
-fn render_inline_blame_entry(
-    blame_entry: BlameEntry,
-    style: &EditorStyle,
-    cx: &mut App,
-) -> Option<AnyElement> {
-    let renderer = cx.global::<GlobalBlameRenderer>().0.clone();
-    renderer.render_inline_blame_entry(&style.text, blame_entry, cx)
-}
-
-fn render_blame_entry_popover(
-    blame_entry: BlameEntry,
-    scroll_handle: ScrollHandle,
-    commit_message: Option<ParsedCommitMessage>,
-    markdown: Entity<Markdown>,
-    workspace: WeakEntity<Workspace>,
-    blame: &Entity<GitBlame>,
-    buffer: BufferId,
-    window: &mut Window,
-    cx: &mut App,
-) -> Option<AnyElement> {
-    if markdown.read(cx).is_parsing() {
-        return None;
-    }
-
-    let renderer = cx.global::<GlobalBlameRenderer>().0.clone();
-    let blame = blame.read(cx);
-    let repository = blame.repository(cx, buffer)?;
-    let tag_names = blame.tag_names_for_entry(buffer, &blame_entry);
-    renderer.render_blame_entry_popover(
-        blame_entry,
-        scroll_handle,
-        commit_message,
-        tag_names,
-        markdown,
-        repository,
-        workspace,
-        window,
-        cx,
-    )
-}
-
-fn render_blame_entry(
-    ix: usize,
-    blame: &Entity<GitBlame>,
-    blame_entry: BlameEntry,
-    style: &EditorStyle,
-    last_used_color: &mut Option<(Hsla, Oid)>,
-    editor: Entity<Editor>,
-    workspace: Entity<Workspace>,
-    buffer: BufferId,
-    renderer: &dyn BlameRenderer,
-    window: &mut Window,
-    cx: &mut App,
-) -> Option<AnyElement> {
-    let index: u32 = blame_entry.sha.into();
-    let mut sha_color = cx.theme().players().color_for_participant(index).cursor;
-
-    // If the last color we used is the same as the one we get for this line, but
-    // the commit SHAs are different, then we try again to get a different color.
-    if let Some((color, sha)) = *last_used_color
-        && sha != blame_entry.sha
-        && color == sha_color
-    {
-        sha_color = cx.theme().players().color_for_participant(index + 1).cursor;
-    }
-    last_used_color.replace((sha_color, blame_entry.sha));
-
-    let blame = blame.read(cx);
-    let details = blame.details_for_entry(buffer, &blame_entry);
-    let tag_names = blame.tag_names_for_entry(buffer, &blame_entry);
-    let repository = blame.repository(cx, buffer)?;
-    renderer.render_blame_entry(
-        &style.text,
-        blame_entry,
-        details,
-        tag_names,
-        repository,
-        workspace.downgrade(),
-        editor,
-        ix,
-        sha_color,
-        window,
-        cx,
-    )
-}
-
 #[derive(Debug)]
 pub(crate) struct LineWithInvisibles {
     fragments: SmallVec<[LineFragment; 1]>,
@@ -9223,41 +8844,6 @@ impl Element for EditorElement {
                         );
                     }
 
-                    let longest_line_blame_width = self
-                        .editor
-                        .update(cx, |editor, cx| {
-                            if !editor.show_git_blame_inline {
-                                return None;
-                            }
-                            // Blame is only painted inline for the Inline location, so
-                            // reserving scroll room for it in other locations would let
-                            // the editor scroll into blank space.
-                            if ProjectSettings::get_global(cx).git.inline_blame.location
-                                != InlineBlameLocation::Inline
-                            {
-                                return None;
-                            }
-                            let blame = editor.blame.as_ref()?;
-                            let (_, blame_entry) = blame
-                                .update(cx, |blame, cx| {
-                                    let row_infos =
-                                        snapshot.row_infos(snapshot.longest_row()).next()?;
-                                    blame.blame_for_rows(&[row_infos], cx).next()
-                                })
-                                .flatten()?;
-                            let mut element = render_inline_blame_entry(blame_entry, style, cx)?;
-                            let inline_blame_padding =
-                                ProjectSettings::get_global(cx).git.inline_blame.padding as f32
-                                    * em_advance;
-                            Some(
-                                element
-                                    .layout_as_root(AvailableSpace::min_size(), window, cx)
-                                    .width
-                                    + inline_blame_padding,
-                            )
-                        })
-                        .unwrap_or(Pixels::ZERO);
-
                     let longest_line_width = layout_line(
                         snapshot.longest_row(),
                         &snapshot,
@@ -9276,7 +8862,6 @@ impl Element for EditorElement {
                             longest_line_width,
                             Pixels::from(max_row.as_f64() * f64::from(line_height)),
                         ),
-                        longest_line_blame_width,
                         EditorSettings::get_global(cx),
                         scroll_beyond_last_line,
                     );
@@ -9509,7 +9094,7 @@ impl Element for EditorElement {
                         })
                         .unzip();
 
-                    let mut inline_diagnostics = self.layout_inline_diagnostics(
+                    let inline_diagnostics = self.layout_inline_diagnostics(
                         &line_layouts,
                         &crease_trailers,
                         &row_block_types,
@@ -9526,7 +9111,6 @@ impl Element for EditorElement {
                         cx,
                     );
 
-                    let mut inline_blame_layout = None;
                     let mut inline_code_actions = None;
                     if let Some(newest_selection_head) = newest_selection_head {
                         let display_row = newest_selection_head.row();
@@ -9543,53 +9127,17 @@ impl Element for EditorElement {
                                 window,
                                 cx,
                             );
-
-                            let line_ix = display_row.minus(start_row) as usize;
-                            if let (Some(row_info), Some(line_layout), Some(crease_trailer)) = (
-                                row_infos.get(line_ix),
-                                line_layouts.get(line_ix),
-                                crease_trailers.get(line_ix),
-                            ) {
-                                let crease_trailer_layout = crease_trailer.as_ref();
-                                if let Some(layout) = self.layout_inline_blame(
-                                    display_row,
-                                    row_info,
-                                    line_layout,
-                                    crease_trailer_layout,
-                                    em_width,
-                                    content_origin,
-                                    scroll_position,
-                                    scroll_pixel_position,
-                                    line_height,
-                                    window,
-                                    cx,
-                                ) {
-                                    inline_blame_layout = Some(layout);
-                                    // Blame overrides inline diagnostics
-                                    inline_diagnostics.remove(&display_row);
-                                }
-                            } else {
-                                log::error!(
-                                    "bug: line_ix {} is out of bounds - row_infos.len(): {}, \
-                                    line_layouts.len(): {}, \
-                                    crease_trailers.len(): {}",
-                                    line_ix,
-                                    row_infos.len(),
-                                    line_layouts.len(),
-                                    crease_trailers.len(),
-                                );
-                            }
                         }
                     }
 
-                    let blamed_display_rows = self.layout_blame_entries(
+                    let gutter_annotations = self.layout_gutter_annotations(
                         &row_infos,
                         em_width,
                         scroll_position,
                         start_row,
                         line_height,
                         &gutter_hitbox,
-                        gutter_dimensions.git_blame_entries_width,
+                        gutter_dimensions.annotation_width,
                         window,
                         cx,
                     );
@@ -9804,11 +9352,9 @@ impl Element for EditorElement {
                         );
                     }
 
-                    let git_gutter_width = Self::gutter_strip_width(line_height, cx)
-                        + gutter_dimensions
-                            .git_blame_entries_width
-                            .unwrap_or_default();
-                    let available_width = gutter_dimensions.left_padding - git_gutter_width;
+                    let diff_gutter_width = Self::gutter_strip_width(line_height, cx)
+                        + gutter_dimensions.annotation_width.unwrap_or_default();
+                    let available_width = gutter_dimensions.left_padding - diff_gutter_width;
 
                     let max_line_number_length = self
                         .editor
@@ -9878,8 +9424,6 @@ impl Element for EditorElement {
                             window,
                             cx,
                         );
-
-                        self.layout_blame_popover(&snapshot, &hitbox, line_height, window, cx);
                     }
 
                     let mouse_context_menu = self.layout_mouse_context_menu(
@@ -10046,9 +9590,6 @@ impl Element for EditorElement {
                         content_origin,
                         gutter_hitbox: gutter_hitbox.clone(),
                         text_hitbox: text_hitbox.clone(),
-                        inline_blame_bounds: inline_blame_layout
-                            .as_ref()
-                            .map(|layout| (layout.bounds, layout.buffer_id, layout.entry.clone())),
                         display_hunks: display_hunks.clone(),
                         diff_hunk_control_bounds,
                     });
@@ -10084,10 +9625,9 @@ impl Element for EditorElement {
                         document_colors,
                         line_elements,
                         line_numbers,
-                        blamed_display_rows,
+                        gutter_annotations,
                         inline_diagnostics,
                         point_diagnostic_underline_offset,
-                        inline_blame_layout,
                         inline_code_actions,
                         blocks,
                         spacer_blocks,
@@ -10182,7 +9722,7 @@ impl Element for EditorElement {
                         self.paint_indent_guides(layout, window, cx);
 
                         if layout.gutter_hitbox.size.width > Pixels::ZERO {
-                            self.paint_blamed_display_rows(layout, window, cx);
+                            self.paint_gutter_annotations(layout, window, cx);
                             self.paint_line_numbers(layout, window, cx);
                         }
 
@@ -10255,7 +9795,6 @@ impl ScrollbarLayoutInformation {
         editor_bounds: Bounds<Pixels>,
         glyph_grid_cell: Size<Pixels>,
         document_size: Size<Pixels>,
-        longest_line_blame_width: Pixels,
         settings: &EditorSettings,
         scroll_beyond_last_line: ScrollBeyondLastLine,
     ) -> Self {
@@ -10267,7 +9806,7 @@ impl ScrollbarLayoutInformation {
             }
         };
 
-        let overscroll = size(longest_line_blame_width, vertical_overscroll);
+        let overscroll = size(Pixels::ZERO, vertical_overscroll);
 
         ScrollbarLayoutInformation {
             editor_bounds,
@@ -10301,10 +9840,9 @@ pub struct EditorLayout {
     line_elements: SmallVec<[AnyElement; 1]>,
     line_numbers: Arc<HashMap<MultiBufferRow, LineNumberLayout>>,
     display_hunks: Vec<(DisplayDiffHunk, Option<Hitbox>)>,
-    blamed_display_rows: Option<Vec<AnyElement>>,
+    gutter_annotations: Option<Vec<AnyElement>>,
     inline_diagnostics: HashMap<DisplayRow, AnyElement>,
     point_diagnostic_underline_offset: Pixels,
-    inline_blame_layout: Option<InlineBlameLayout>,
     inline_code_actions: Option<AnyElement>,
     blocks: Vec<BlockLayout>,
     spacer_blocks: Vec<BlockLayout>,
@@ -10809,7 +10347,6 @@ pub(crate) struct PositionMap {
     pub content_origin: gpui::Point<Pixels>,
     pub text_hitbox: Hitbox,
     pub gutter_hitbox: Hitbox,
-    pub inline_blame_bounds: Option<(Bounds<Pixels>, BufferId, BlameEntry)>,
     pub display_hunks: Vec<(DisplayDiffHunk, Option<Hitbox>)>,
     pub diff_hunk_control_bounds: Vec<(DisplayRow, Bounds<Pixels>)>,
 }
@@ -11419,7 +10956,7 @@ fn calculate_wrap_width(
     let wrap_width_for = |column: u32| (column as f32 * em_width).ceil();
 
     match soft_wrap {
-        SoftWrap::GitDiff => None,
+        SoftWrap::Diff => None,
         SoftWrap::None => Some(wrap_width_for(MAX_LINE_LEN as u32 / 2)),
         SoftWrap::EditorWidth => Some(editor_width),
         SoftWrap::Bounded(column) => Some(editor_width.min(wrap_width_for(column))),
@@ -11758,7 +11295,7 @@ mod tests {
             right_padding: Pixels::ZERO,
             width: px(30.0),
             margin: Pixels::ZERO,
-            git_blame_entries_width: None,
+            annotation_width: None,
         };
         const EMPTY_ROW_INFO: RowInfo = RowInfo {
             buffer_id: None,
@@ -12428,197 +11965,6 @@ mod tests {
             );
         }
     }
-
-    #[gpui::test]
-    async fn test_status_bar_blame_location_reserves_no_scroll_width(cx: &mut TestAppContext) {
-        struct FixedWidthBlameRenderer;
-
-        impl BlameRenderer for FixedWidthBlameRenderer {
-            fn max_author_length(&self) -> usize {
-                20
-            }
-
-            fn render_blame_entry(
-                &self,
-                _: &gpui::TextStyle,
-                _: BlameEntry,
-                _: Option<ParsedCommitMessage>,
-                _: Vec<SharedString>,
-                _: Entity<project::git_store::Repository>,
-                _: WeakEntity<Workspace>,
-                _: Entity<Editor>,
-                _: usize,
-                _: Hsla,
-                _: &mut Window,
-                _: &mut App,
-            ) -> Option<AnyElement> {
-                None
-            }
-
-            fn render_inline_blame_entry(
-                &self,
-                _: &gpui::TextStyle,
-                _: BlameEntry,
-                _: &mut App,
-            ) -> Option<AnyElement> {
-                Some(div().w(px(160.)).into_any_element())
-            }
-
-            fn render_blame_entry_popover(
-                &self,
-                _: BlameEntry,
-                _: ScrollHandle,
-                _: Option<ParsedCommitMessage>,
-                _: Vec<SharedString>,
-                _: Entity<Markdown>,
-                _: Entity<project::git_store::Repository>,
-                _: WeakEntity<Workspace>,
-                _: &mut Window,
-                _: &mut App,
-            ) -> Option<AnyElement> {
-                None
-            }
-
-            fn open_blame_commit(
-                &self,
-                _: BlameEntry,
-                _: Entity<project::git_store::Repository>,
-                _: WeakEntity<Workspace>,
-                _: &mut Window,
-                _: &mut App,
-            ) {
-            }
-        }
-
-        init_test(cx, |_| {});
-        cx.update(|cx| crate::git::set_blame_renderer(FixedWidthBlameRenderer, cx));
-
-        let fs = project::FakeFs::new(cx.executor());
-        fs.insert_tree(
-            util::path!("/my-repo"),
-            serde_json::json!({
-                ".git": {},
-                "file.txt": "a ".repeat(100),
-            }),
-        )
-        .await;
-        fs.set_blame_for_repo(
-            std::path::Path::new(util::path!("/my-repo/.git")),
-            vec![(
-                git::repository::repo_path("file.txt"),
-                git::blame::Blame {
-                    entries: vec![BlameEntry {
-                        sha: "1b1b1b".parse().unwrap(),
-                        range: 0..1,
-                        original_line_number: 0,
-                        author: None,
-                        author_mail: None,
-                        author_time: None,
-                        author_tz: None,
-                        committer_name: None,
-                        committer_email: None,
-                        committer_time: None,
-                        committer_tz: None,
-                        summary: None,
-                        previous: None,
-                        filename: String::new(),
-                        boundary: false,
-                    }],
-                    ..Default::default()
-                },
-            )],
-        );
-
-        let project = project::Project::test(fs, [util::path!("/my-repo").as_ref()], cx).await;
-        let buffer = project
-            .update(cx, |project, cx| {
-                project.open_local_buffer(util::path!("/my-repo/file.txt"), cx)
-            })
-            .await
-            .unwrap();
-        let buffer_id = buffer.read_with(cx, |buffer, _| buffer.remote_id());
-        let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
-
-        let window = cx.add_window(|window, cx| {
-            // No soft wrap: a long line legitimately scrolls horizontally, so the
-            // inline blame width reservation is meaningful and observable here.
-            let mut editor = Editor::new(EditorMode::full(), buffer, Some(project), window, cx);
-            editor.set_soft_wrap_mode(language_settings::SoftWrap::None, cx);
-            editor
-        });
-        let cx = &mut VisualTestContext::from_window(*window, cx);
-        let editor = window.root(cx).unwrap();
-        cx.update(|window, cx| window.focus(&editor.read(cx).focus_handle(cx), cx));
-        editor.update(cx, |editor, cx| {
-            editor
-                .blame()
-                .expect("inline blame should be running")
-                .clone()
-                .update(cx, |blame, cx| blame.focus(cx))
-        });
-        cx.executor().run_until_parked();
-
-        // Ensure the blame entry actually loaded, so a broken setup can't let this
-        // test pass vacuously with a zero-width blame reservation on both draws.
-        editor.update(cx, |editor, cx| {
-            assert!(editor.show_git_blame_inline);
-            let blame = editor
-                .blame()
-                .expect("inline blame should be running")
-                .clone();
-            let entry = blame.update(cx, |blame, cx| {
-                blame
-                    .blame_for_rows(
-                        &[RowInfo {
-                            buffer_row: Some(0),
-                            buffer_id: Some(buffer_id),
-                            ..Default::default()
-                        }],
-                        cx,
-                    )
-                    .next()
-                    .flatten()
-            });
-            assert!(entry.is_some(), "blame entry should be available");
-        });
-
-        let style = cx.update(|_, cx| editor.update(cx, |editor, cx| editor.style(cx).clone()));
-
-        // Default `Inline` location: the long line plus the reserved inline blame
-        // width push the horizontal scroll range past the viewport.
-        let (_, state) = cx.draw(Default::default(), size(px(226.), px(500.)), |_, _| {
-            EditorElement::new(&editor, style.clone())
-        });
-        let scroll_max_with_inline_blame = state.position_map.scroll_max.x;
-        assert!(
-            scroll_max_with_inline_blame > 0.,
-            "inline blame on a long line should reserve horizontal scroll room"
-        );
-
-        // Moving blame to the status bar paints nothing inline, so the reservation
-        // must be dropped and the scroll range shrink accordingly.
-        cx.update(|_, cx| {
-            cx.update_global::<settings::SettingsStore, _>(|store, cx| {
-                store.update_user_settings(cx, |settings| {
-                    settings
-                        .git
-                        .get_or_insert_default()
-                        .inline_blame
-                        .get_or_insert_default()
-                        .location = Some(settings::InlineBlameLocation::StatusBar);
-                });
-            });
-        });
-
-        let (_, state) = cx.draw(Default::default(), size(px(226.), px(500.)), |_, _| {
-            EditorElement::new(&editor, style.clone())
-        });
-        assert!(
-            state.position_map.scroll_max.x < scroll_max_with_inline_blame,
-            "Blame in the status bar should not reserve horizontal scroll room"
-        );
-    }
-
     #[gpui::test]
     async fn test_point_for_position_clipped_rows(cx: &mut TestAppContext) {
         init_test(cx, |_| {});
@@ -13922,7 +13268,7 @@ mod tests {
         let em_width = px(8.0);
 
         assert_eq!(
-            calculate_wrap_width(SoftWrap::GitDiff, editor_width, em_width),
+            calculate_wrap_width(SoftWrap::Diff, editor_width, em_width),
             None,
         );
 
@@ -13951,12 +13297,12 @@ mod tests {
         use settings::PixelSetting;
 
         assert_eq!(
-            EditorElement::deleted_marker_base_width(GitGutterWidth::Default, px(22.0)),
+            EditorElement::deleted_marker_base_width(DiffGutterWidth::Default, px(22.0)),
             px(7.0),
         );
 
         let boosted = EditorElement::deleted_marker_base_width(
-            GitGutterWidth::Custom(PixelSetting(6.0)),
+            DiffGutterWidth::Custom(PixelSetting(6.0)),
             px(22.0),
         );
         assert!(
@@ -13967,7 +13313,7 @@ mod tests {
         for line_height in [22.0, 40.0] {
             let widths = [1.0, 2.0, 3.0, 6.0].map(|width| {
                 EditorElement::deleted_marker_base_width(
-                    GitGutterWidth::Custom(PixelSetting(width)),
+                    DiffGutterWidth::Custom(PixelSetting(width)),
                     px(line_height),
                 )
             });
@@ -13983,7 +13329,7 @@ mod tests {
 
         assert_eq!(
             EditorElement::deleted_marker_base_width(
-                GitGutterWidth::Custom(PixelSetting(0.275 * 40.0)),
+                DiffGutterWidth::Custom(PixelSetting(0.275 * 40.0)),
                 px(40.0),
             ),
             px(14.0),
@@ -13991,7 +13337,7 @@ mod tests {
 
         assert_eq!(
             EditorElement::deleted_marker_base_width(
-                GitGutterWidth::Custom(PixelSetting(0.0)),
+                DiffGutterWidth::Custom(PixelSetting(0.0)),
                 px(22.0),
             ),
             px(0.0),

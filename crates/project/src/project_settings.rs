@@ -4,7 +4,6 @@ use context_server::ContextServerCommand;
 use dap::adapters::DebugAdapterName;
 use fs::Fs;
 use futures::StreamExt as _;
-use git::repository::DEFAULT_WORKTREE_DIRECTORY;
 use gpui::{AsyncApp, BorrowAppContext, Context, Entity, EventEmitter, Subscription, Task};
 use lsp::{DEFAULT_LSP_REQUEST_TIMEOUT_SECS, LanguageServerName};
 use paths::{
@@ -69,7 +68,7 @@ pub struct ProjectSettings {
     pub diagnostics: DiagnosticsSettings,
 
     /// Configuration for Git-related features
-    pub git: GitSettings,
+    pub diff: DiffSettings,
 
     /// Configuration for Node-related features
     pub node: NodeBinarySettings,
@@ -456,181 +455,9 @@ impl GoToDiagnosticSeverityFilter {
 }
 
 #[derive(Clone, Debug)]
-pub struct GitSettings {
-    /// Whether or not git integration is enabled.
-    ///
-    /// Default: true
-    pub enabled: GitEnabledSettings,
-    /// Whether or not to show the git gutter.
-    ///
-    /// Default: tracked_files
-    pub git_gutter: settings::GitGutterSetting,
-    /// Sets the debounce threshold (in milliseconds) after which changes are reflected in the git gutter.
-    ///
-    /// Default: 0
-    pub gutter_debounce: u64,
-    /// Whether or not to show git blame data inline in
-    /// the currently focused line.
-    ///
-    /// Default: on
-    pub inline_blame: InlineBlameSettings,
-    /// Git blame settings.
-    pub blame: BlameSettings,
-    /// Which information to show in the branch picker.
-    ///
-    /// Default: on
-    pub branch_picker: BranchPickerSettings,
-    /// How hunks are displayed visually in the editor.
-    ///
-    /// Default: staged_hollow
-    pub hunk_style: settings::GitHunkStyleSetting,
-    /// Which base git features diff against.
-    ///
-    /// Default: head
-    pub diff_base: settings::GitDiffBaseSetting,
-    /// How file paths are displayed in the git gutter.
-    ///
-    /// Default: file_name_first
-    pub path_style: GitPathStyle,
-    /// Whether to show the stage and restore buttons on diff hunks.
-    ///
-    /// Default: true
-    pub show_stage_restore_buttons: bool,
-    /// Directory where git worktrees are created, relative to the repository
-    /// working directory. When the resolved directory is outside the project
-    /// root, the project's directory name is automatically appended so that
-    /// sibling repos don't collide.
-    ///
-    /// Default: ../worktrees
-    pub worktree_directory: String,
-    /// Settings for automatically fetching the default branch's remote and the current branch's upstream remote.
-    pub auto_fetch: AutoFetchSettings,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AutoFetchSettings {
-    /// Whether to automatically fetch in the background.
-    ///
-    /// Default: false
-    pub enabled: bool,
-    /// How long to wait between automatic fetches, in seconds.
-    /// Only applies when `enabled` is true. (min: 15)
-    ///
-    /// Default: 60
-    pub interval_secs: u64,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct GitEnabledSettings {
-    /// Whether all Git integration features are disabled.
-    pub disabled: bool,
-    /// Whether git integration is enabled for showing git status.
-    ///
-    /// Default: true
-    pub status: bool,
-    /// Whether git integration is enabled for showing diffs.
-    ///
-    /// Default: true
-    pub diff: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
-pub enum GitPathStyle {
-    #[default]
-    FileNameFirst,
-    FilePathFirst,
-}
-
-impl From<settings::GitPathStyle> for GitPathStyle {
-    fn from(style: settings::GitPathStyle) -> Self {
-        match style {
-            settings::GitPathStyle::FileNameFirst => GitPathStyle::FileNameFirst,
-            settings::GitPathStyle::FilePathFirst => GitPathStyle::FilePathFirst,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum InlineBlameLocation {
-    #[default]
-    Inline,
-    StatusBar,
-}
-
-impl From<settings::InlineBlameLocation> for InlineBlameLocation {
-    fn from(location: settings::InlineBlameLocation) -> Self {
-        match location {
-            settings::InlineBlameLocation::Inline => InlineBlameLocation::Inline,
-            settings::InlineBlameLocation::StatusBar => InlineBlameLocation::StatusBar,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct InlineBlameSettings {
-    /// Whether or not to show git blame data inline in
-    /// the currently focused line.
-    ///
-    /// Default: true
-    pub enabled: bool,
-    /// Whether to only show the inline blame information
-    /// after a delay once the cursor stops moving.
-    ///
-    /// Default: 0
-    pub delay_ms: settings::DelayMs,
-    /// Where to render the blame information when enabled.
-    ///
-    /// Default: inline
-    pub location: InlineBlameLocation,
-    /// The amount of padding between the end of the source line and the start
-    /// of the inline blame in units of columns.
-    ///
-    /// Default: 7
-    pub padding: u32,
-    /// The minimum column number to show the inline blame information at
-    ///
-    /// Default: 0
-    pub min_column: u32,
-    /// Whether to show commit summary as part of the inline blame.
-    ///
-    /// Default: false
-    pub show_commit_summary: bool,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct BlameSettings {
-    /// Whether to show the avatar of the author of the commit.
-    ///
-    /// Default: true
-    pub show_avatar: bool,
-}
-
-impl GitSettings {
-    pub fn inline_blame_delay(&self) -> Option<Duration> {
-        if self.inline_blame.delay_ms.0 > 0 {
-            Some(Duration::from_millis(self.inline_blame.delay_ms.0))
-        } else {
-            None
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub struct BranchPickerSettings {
-    /// Whether to show author name as part of the commit information.
-    ///
-    /// Default: false
-    #[serde(default)]
-    pub show_author_name: bool,
-}
-
-impl Default for BranchPickerSettings {
-    fn default() -> Self {
-        Self {
-            show_author_name: true,
-        }
-    }
+pub struct DiffSettings {
+    pub gutter: settings::DiffGutterSetting,
+    pub hunk_style: settings::DiffHunkStyleSetting,
 }
 
 #[derive(Clone, Debug)]
@@ -694,60 +521,10 @@ impl Settings for ProjectSettings {
         let lsp_pull_diagnostics = diagnostics.lsp_pull_diagnostics.as_ref().unwrap();
         let inline_diagnostics = diagnostics.inline.as_ref().unwrap();
 
-        let git = content.git.as_ref().unwrap();
-        let git_enabled = {
-            GitEnabledSettings {
-                disabled: git
-                    .enabled
-                    .as_ref()
-                    .and_then(|enabled| enabled.disable_git)
-                    .unwrap_or(false),
-                status: git.enabled.as_ref().unwrap().is_git_status_enabled(),
-                diff: git.enabled.as_ref().unwrap().is_git_diff_enabled(),
-            }
-        };
-        let git_settings = GitSettings {
-            enabled: git_enabled,
-            git_gutter: git.git_gutter.unwrap(),
-            gutter_debounce: git.gutter_debounce.unwrap_or_default(),
-            inline_blame: {
-                let inline = git.inline_blame.unwrap();
-                InlineBlameSettings {
-                    enabled: inline.enabled.unwrap(),
-                    delay_ms: inline.delay_ms.unwrap(),
-                    location: inline.location.unwrap().into(),
-                    padding: inline.padding.unwrap(),
-                    min_column: inline.min_column.unwrap(),
-                    show_commit_summary: inline.show_commit_summary.unwrap(),
-                }
-            },
-            blame: {
-                let blame = git.blame.unwrap();
-                BlameSettings {
-                    show_avatar: blame.show_avatar.unwrap(),
-                }
-            },
-            branch_picker: {
-                let branch_picker = git.branch_picker.unwrap();
-                BranchPickerSettings {
-                    show_author_name: branch_picker.show_author_name.unwrap(),
-                }
-            },
-            hunk_style: git.hunk_style.unwrap(),
-            diff_base: git.diff_base.unwrap_or_default(),
-            path_style: git.path_style.unwrap().into(),
-            show_stage_restore_buttons: git.show_stage_restore_buttons.unwrap_or(true),
-            worktree_directory: git
-                .worktree_directory
-                .clone()
-                .unwrap_or_else(|| DEFAULT_WORKTREE_DIRECTORY.to_string()),
-            auto_fetch: {
-                let auto_fetch = git.auto_fetch.unwrap_or_default();
-                AutoFetchSettings {
-                    enabled: auto_fetch.enabled.unwrap_or(false),
-                    interval_secs: auto_fetch.interval_secs.unwrap_or(60).max(15),
-                }
-            },
+        let diff = content.diff.as_ref().unwrap();
+        let diff_settings = DiffSettings {
+            gutter: diff.gutter.unwrap(),
+            hunk_style: diff.hunk_style.unwrap(),
         };
         Self {
             context_servers: project
@@ -822,7 +599,7 @@ impl Settings for ProjectSettings {
                     max_severity: inline_diagnostics.max_severity.map(Into::into),
                 },
             },
-            git: git_settings,
+            diff: diff_settings,
             node: content.node.clone().unwrap().into(),
             load_direnv: project.load_direnv.clone().unwrap(),
             session: SessionSettings {

@@ -750,7 +750,7 @@ mod test {
             "},
             Mode::Normal,
         );
-        cx.set_head_text(diff_base);
+        cx.set_diff_base(diff_base);
         cx.update_editor(|editor, window, cx| {
             editor.expand_all_diff_hunks(&editor::actions::ExpandAllDiffHunks, window, cx);
         });

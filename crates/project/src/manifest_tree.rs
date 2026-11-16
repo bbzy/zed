@@ -50,7 +50,6 @@ impl WorktreeRoots {
                             }
                         }
                     }
-                    WorktreeEvent::UpdatedGitRepositories(_) => {}
                     WorktreeEvent::DeletedEntry(entry_id) => {
                         let Some(entry) = this.worktree_store.read(cx).entry_for_id(*entry_id, cx)
                         else {
@@ -59,7 +58,7 @@ impl WorktreeRoots {
                         let path = TriePath::from(entry.path.as_ref());
                         this.roots.remove(&path);
                     }
-                    WorktreeEvent::Deleted | WorktreeEvent::UpdatedRootRepoCommonDir { .. } => {}
+                    WorktreeEvent::Deleted => {}
                 }
             }),
         })

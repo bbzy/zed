@@ -4,7 +4,6 @@ package zed.messages;
 import "buffer.proto";
 import "channel.proto";
 import "core.proto";
-import "git.proto";
 import "lsp.proto";
 import "worktree.proto";
 
@@ -42,7 +41,8 @@ message RejoinRemoteProjectsResponse {
 message RejoinProject {
   uint64 id = 1;
   repeated RejoinWorktree worktrees = 2;
-  repeated RejoinRepository repositories = 3;
+  reserved 3;
+  reserved "repositories";
 }
 
 message RejoinWorktree {
@@ -50,10 +50,7 @@ message RejoinWorktree {
   uint64 scan_id = 2;
 }
 
-message RejoinRepository {
-  uint64 id = 1;
-  uint64 scan_id = 2;
-}
+
 
 message RejoinRoomResponse {
   Room room = 1;
@@ -225,24 +222,18 @@ message UpdateWorktree {
   string root_name = 3;
   repeated Entry updated_entries = 4;
   repeated uint64 removed_entries = 5;
-  repeated RepositoryEntry updated_repositories = 6; // deprecated
-  repeated uint64 removed_repositories = 7; // deprecated
+  reserved 6, 7;
+  reserved "updated_repositories", "removed_repositories";
   uint64 scan_id = 8;
   bool is_last_update = 9;
   string abs_path = 10;
-  optional string root_repo_common_dir = 11;
-  bool root_repo_is_linked_worktree = 12;
+  reserved 11;
+  reserved "root_repo_common_dir";
+  reserved 12;
+  reserved "root_repo_is_linked_worktree";
 }
 
-// deprecated
-message RepositoryEntry {
-  uint64 repository_id = 1;
-  reserved 2;
-  repeated StatusEntry updated_statuses = 3;
-  repeated string removed_statuses = 4;
-  repeated string current_merge_conflicts = 5;
-  optional Branch branch_summary = 6;
-}
+
 
 message AddProjectCollaborator {
   uint64 project_id = 1;

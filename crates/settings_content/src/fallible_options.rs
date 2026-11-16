@@ -76,13 +76,15 @@ macro_rules! flattened_deserialize {
     ($type_name:ty {
         sections: { $($section:ident),* $(,)? },
         options: { $($option_field:ident),* $(,)? },
-        defaults: { $($default_field:ident),* $(,)? } $(,)?
+        defaults: { $($default_field:ident),* $(,)? },
+        $(aliases: { $($legacy:literal => $current:literal),* $(,)? } $(,)?)?
     }) => {
         impl $type_name {
             #[doc(hidden)]
             pub const NAMED_DESERIALIZE_KEYS: &'static [&'static str] = &[
                 $(stringify!($option_field),)*
                 $(stringify!($default_field),)*
+                $($($legacy,)*)?
             ];
         }
 
@@ -92,6 +94,11 @@ macro_rules! flattened_deserialize {
             ) -> Result<Self, D::Error> {
                 let mut object =
                     serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+                $($(
+                    if let Some(value) = object.remove($legacy) {
+                        object.entry($current.to_owned()).or_insert(value);
+                    }
+                )*)?
                 (|| -> Result<Self, serde_json::Error> {
                     $(
                         let $option_field =

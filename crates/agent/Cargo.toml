@@ -37,7 +37,6 @@ db.workspace = true
 feature_flags.workspace = true
 fs.workspace = true
 futures.workspace = true
-git.workspace = true
 gpui.workspace = true
 handlebars = { workspace = true, features = ["rust-embed"] }
 heck.workspace = true
@@ -98,7 +97,6 @@ editor = { workspace = true, "features" = ["test-support"] }
 env_logger.workspace = true
 eval_utils.workspace = true
 fs = { workspace = true, "features" = ["test-support"] }
-git = { workspace = true, "features" = ["test-support"] }
 gpui = { workspace = true, "features" = ["test-support"] }
 gpui_tokio.workspace = true
 language = { workspace = true, "features" = ["test-support"] }

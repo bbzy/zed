@@ -1,7 +1,7 @@
 use gpui::{Action, actions};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 // If the zed binary doesn't use anything in this crate, it will be optimized away
 // and the actions won't initialize. So we just provide an empty initialization function
@@ -49,8 +49,6 @@ actions!(
         OpenProjectSettings,
         /// Opens the project tasks configuration.
         OpenProjectTasks,
-        /// Opens the project tasks configuration with worktree setup guidance.
-        OpenWorktreeSetupTasks,
         /// Opens the default keymap file.
         OpenDefaultKeymap,
         /// Opens the user keymap file.
@@ -293,89 +291,6 @@ pub mod workspace {
             /// Opens the selected file with the system's default application.
             #[action(deprecated_aliases = ["project_panel::OpenWithSystem"])]
             OpenWithSystem,
-        ]
-    );
-}
-
-/// Describes which ref to base a new git worktree on. The worktree is
-/// always created in a detached HEAD state; users can opt into creating
-/// a branch afterwards from the worktree itself.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum NewWorktreeBranchTarget {
-    /// Create a detached worktree from the current HEAD.
-    #[default]
-    CurrentBranch,
-    /// Create a detached worktree at the tip of an existing branch.
-    ExistingBranch { name: String },
-    /// Create a detached worktree at the tip of a remote-tracking branch.
-    RemoteBranch {
-        remote_name: String,
-        branch_name: String,
-    },
-}
-
-/// Creates a new git worktree and switches the workspace to it.
-/// Dispatched by the unified worktree picker when the user selects a "Create new worktree" entry.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Action)]
-#[action(namespace = git)]
-#[serde(deny_unknown_fields)]
-pub struct CreateWorktree {
-    /// When this is None, Zed will randomly generate a worktree name.
-    pub worktree_name: Option<String>,
-    pub branch_target: NewWorktreeBranchTarget,
-}
-
-/// Switches the workspace to an existing linked worktree.
-/// Dispatched by the unified worktree picker when the user selects an existing worktree.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Action)]
-#[action(namespace = git)]
-#[serde(deny_unknown_fields)]
-pub struct SwitchWorktree {
-    pub path: PathBuf,
-    pub display_name: String,
-}
-
-/// Opens an existing worktree in a new window.
-/// Dispatched by the worktree picker's "Open in New Window" button.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Action)]
-#[action(namespace = git)]
-#[serde(deny_unknown_fields)]
-pub struct OpenWorktreeInNewWindow {
-    pub path: PathBuf,
-}
-
-pub mod git {
-    use gpui::actions;
-
-    actions!(
-        git,
-        [
-            /// Checks out a different git branch.
-            CheckoutBranch,
-            /// Switches to a different git branch.
-            Switch,
-            /// Selects a different repository.
-            SelectRepo,
-            /// Filter remotes.
-            FilterRemotes,
-            /// Create a git remote.
-            CreateRemote,
-            /// Opens the git branch selector.
-            #[action(deprecated_aliases = ["branches::OpenRecent"])]
-            Branch,
-            /// Shows uncommitted changes across the project.
-            ViewUncommittedChanges,
-            /// Shows unstaged changes across the project.
-            ViewUnstagedChanges,
-            /// Shows staged changes across the project.
-            ViewStagedChanges,
-            /// Opens the git stash selector.
-            ViewStash,
-            /// Opens the git worktree selector.
-            Worktree,
-            /// Creates a pull request for the current branch.
-            CreatePullRequest
         ]
     );
 }
@@ -814,13 +729,7 @@ actions!(
         OpenZedPredictOnboarding
     ]
 );
-actions!(
-    git_onboarding,
-    [
-        /// Opens the git integration onboarding modal.
-        OpenGitIntegrationOnboarding
-    ]
-);
+
 actions!(
     call_hierarchy,
     [ShowIncomingCalls, ShowOutgoingCalls, ToggleDirection]
@@ -986,18 +895,6 @@ pub mod notebook {
             EnterEditMode,
             /// Exits the cell editor and returns to cell command mode.
             EnterCommandMode,
-        ]
-    );
-}
-
-pub mod git_panel {
-    use gpui::actions;
-
-    actions!(
-        git_panel,
-        [
-            /// Toggles focus on the git panel.
-            ToggleFocus,
         ]
     );
 }

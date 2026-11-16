@@ -16,7 +16,6 @@ use futures::{
     channel::{mpsc, oneshot},
     select, select_biased,
 };
-use git::GitHostingProviderRegistry;
 use gpui::{App, AppContext as _, Context, Entity, UpdateGlobal as _};
 use gpui_tokio::Tokio;
 use http_client::{Url, read_proxy_from_env};
@@ -740,7 +739,6 @@ pub fn execute_run(
     #[cfg(windows)]
     let shell_env_loaded_rx: Option<oneshot::Receiver<()>> = None;
 
-    let git_hosting_provider_registry = Arc::new(GitHostingProviderRegistry::new());
     let run = move |cx: &mut App| {
         if let Some(crash_handler) = crash_handler {
             cx.spawn(async move |_cx| {
@@ -773,8 +771,6 @@ pub fn execute_run(
         init_telemetry_forwarding(session.clone(), cx);
         trusted_worktrees::init(HashMap::default(), cx);
 
-        GitHostingProviderRegistry::set_global(git_hosting_provider_registry, cx);
-        git_hosting_providers::init(cx);
         dap_adapters::init(cx);
 
         extension::init(cx);
@@ -783,7 +779,7 @@ pub fn execute_run(
         json_schema_store::init(cx);
 
         let project = cx.new(|cx| {
-            let fs = RealFs::new(None, cx.background_executor().clone());
+            let fs = RealFs::new(cx.background_executor().clone());
             let node_settings_rx = initialize_settings(session.clone(), fs.clone(), cx);
 
             let proxy_url = read_proxy_settings(cx);

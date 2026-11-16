@@ -6,7 +6,6 @@ use collab::db::UserId;
 use collections::{BTreeMap, HashMap};
 use editor::Bias;
 use fs::{FakeFs, Fs as _};
-use git::status::{FileStatus, StatusCode, TrackedStatus, UnmergedStatus, UnmergedStatusCode};
 use gpui::{BackgroundExecutor, Entity, TaskExt, TestAppContext};
 use language::{
     FakeLspAdapter, Language, LanguageConfig, LanguageMatcher, PointUtf16, range_to_lsp,
@@ -29,7 +28,6 @@ use std::{
 };
 use util::{
     ResultExt, path,
-    paths::PathStyle,
     rel_path::{RelPath, RelPathBuf, rel_path},
 };
 
@@ -110,25 +108,6 @@ enum ClientOperation {
         path: PathBuf,
         is_dir: bool,
         content: String,
-    },
-    GitOperation {
-        operation: GitOperation,
-    },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-enum GitOperation {
-    WriteGitIndex {
-        repo_path: PathBuf,
-        contents: Vec<(RelPathBuf, String)>,
-    },
-    WriteGitBranch {
-        repo_path: PathBuf,
-        new_branch: Option<String>,
-    },
-    WriteGitStatuses {
-        repo_path: PathBuf,
-        statuses: Vec<(RelPathBuf, FileStatus)>,
     },
 }
 
@@ -462,15 +441,8 @@ impl RandomizedTest for ProjectCollaborationTest {
                     }
                 }
 
-                // Update a git related action
-                91..=95 => {
-                    break ClientOperation::GitOperation {
-                        operation: generate_git_operation(rng, client),
-                    };
-                }
-
                 // Create or update a file or directory
-                96.. => {
+                91.. => {
                     let is_dir = rng.random::<bool>();
                     let content;
                     let mut path;
@@ -939,106 +911,6 @@ impl RandomizedTest for ProjectCollaborationTest {
                         .unwrap();
                 }
             }
-
-            ClientOperation::GitOperation { operation } => match operation {
-                GitOperation::WriteGitIndex {
-                    repo_path,
-                    contents,
-                } => {
-                    if !client.fs().directories(false).contains(&repo_path) {
-                        return Err(TestError::Inapplicable);
-                    }
-
-                    for (path, _) in contents.iter() {
-                        if !client
-                            .fs()
-                            .files()
-                            .contains(&repo_path.join(path.as_std_path()))
-                        {
-                            return Err(TestError::Inapplicable);
-                        }
-                    }
-
-                    log::info!(
-                        "{}: writing git index for repo {:?}: {:?}",
-                        client.username,
-                        repo_path,
-                        contents
-                    );
-
-                    let dot_git_dir = repo_path.join(".git");
-                    let contents = contents
-                        .iter()
-                        .map(|(path, contents)| (path.as_unix_str(), contents.clone()))
-                        .collect::<Vec<_>>();
-                    if client.fs().metadata(&dot_git_dir).await?.is_none() {
-                        client.fs().create_dir(&dot_git_dir).await?;
-                    }
-                    client.fs().set_index_for_repo(&dot_git_dir, &contents);
-                }
-                GitOperation::WriteGitBranch {
-                    repo_path,
-                    new_branch,
-                } => {
-                    if !client.fs().directories(false).contains(&repo_path) {
-                        return Err(TestError::Inapplicable);
-                    }
-
-                    log::info!(
-                        "{}: writing git branch for repo {:?}: {:?}",
-                        client.username,
-                        repo_path,
-                        new_branch
-                    );
-
-                    let dot_git_dir = repo_path.join(".git");
-                    if client.fs().metadata(&dot_git_dir).await?.is_none() {
-                        client.fs().create_dir(&dot_git_dir).await?;
-                    }
-                    client
-                        .fs()
-                        .set_branch_name(&dot_git_dir, new_branch.clone());
-                }
-                GitOperation::WriteGitStatuses {
-                    repo_path,
-                    statuses,
-                } => {
-                    if !client.fs().directories(false).contains(&repo_path) {
-                        return Err(TestError::Inapplicable);
-                    }
-                    for (path, _) in statuses.iter() {
-                        if !client
-                            .fs()
-                            .files()
-                            .contains(&repo_path.join(path.as_std_path()))
-                        {
-                            return Err(TestError::Inapplicable);
-                        }
-                    }
-
-                    log::info!(
-                        "{}: writing git statuses for repo {:?}: {:?}",
-                        client.username,
-                        repo_path,
-                        statuses
-                    );
-
-                    let dot_git_dir = repo_path.join(".git");
-
-                    let statuses = statuses
-                        .iter()
-                        .map(|(path, val)| (path.as_unix_str(), *val))
-                        .collect::<Vec<_>>();
-
-                    if client.fs().metadata(&dot_git_dir).await?.is_none() {
-                        client.fs().create_dir(&dot_git_dir).await?;
-                    }
-
-                    client
-                        .fs()
-                        .set_status_for_repo(&dot_git_dir, statuses.as_slice());
-                }
-            },
         }
         Ok(())
     }
@@ -1202,11 +1074,6 @@ impl RandomizedTest for ProjectCollaborationTest {
                                         (worktree.id(), worktree.snapshot())
                                     })
                                     .collect::<BTreeMap<_, _>>();
-                                let host_repository_snapshots = host_project.read_with(host_cx, |host_project, cx| {
-                                    host_project.git_store().read(cx).repo_snapshots(cx)
-                                });
-                                let guest_repository_snapshots = guest_project.git_store().read(cx).repo_snapshots(cx);
-
                                 assert_eq!(
                                     guest_worktree_snapshots.values().map(|w| w.abs_path()).collect::<Vec<_>>(),
                                     host_worktree_snapshots.values().map(|w| w.abs_path()).collect::<Vec<_>>(),
@@ -1214,12 +1081,7 @@ impl RandomizedTest for ProjectCollaborationTest {
                                     client.username, guest_project.remote_id(),
                                 );
 
-                                assert_eq!(
-                                    guest_repository_snapshots.values().collect::<Vec<_>>(),
-                                    host_repository_snapshots.values().collect::<Vec<_>>(),
-                                    "{} has different repositories than the host for project {:?}",
-                                    client.username, guest_project.remote_id(),
-                                );
+
 
                                 for (id, host_snapshot) in &host_worktree_snapshots {
                                     let guest_snapshot = &guest_worktree_snapshots[id];
@@ -1369,30 +1231,6 @@ impl RandomizedTest for ProjectCollaborationTest {
                         (_, None) => panic!("guest's file is None, hosts's isn't"),
                     }
 
-                    let host_diff_base = host_project.read_with(host_cx, |project, cx| {
-                        project
-                            .git_store()
-                            .read(cx)
-                            .get_unstaged_diff(host_buffer.read(cx).remote_id(), cx)
-                            .unwrap()
-                            .read(cx)
-                            .base_text_string(cx)
-                    });
-                    let guest_diff_base = guest_project.read_with(client_cx, |project, cx| {
-                        project
-                            .git_store()
-                            .read(cx)
-                            .get_unstaged_diff(guest_buffer.read(cx).remote_id(), cx)
-                            .unwrap()
-                            .read(cx)
-                            .base_text_string(cx)
-                    });
-                    assert_eq!(
-                        guest_diff_base, host_diff_base,
-                        "guest {} diff base does not match host's for path {path:?} in project {project_id}",
-                        client.username
-                    );
-
                     let host_saved_version =
                         host_buffer.read_with(host_cx, |b, _| b.saved_version().clone());
                     let guest_saved_version =
@@ -1441,74 +1279,6 @@ impl RandomizedTest for ProjectCollaborationTest {
         }
     }
 }
-
-fn generate_git_operation(rng: &mut StdRng, client: &TestClient) -> GitOperation {
-    fn generate_file_paths(
-        repo_path: &Path,
-        rng: &mut StdRng,
-        client: &TestClient,
-    ) -> Vec<RelPathBuf> {
-        let mut paths = client
-            .fs()
-            .files()
-            .into_iter()
-            .filter(|path| path.starts_with(repo_path))
-            .collect::<Vec<_>>();
-
-        let count = rng.random_range(0..=paths.len());
-        paths.shuffle(rng);
-        paths.truncate(count);
-
-        paths
-            .iter()
-            .map(|path| {
-                RelPath::new(path.strip_prefix(repo_path).unwrap(), PathStyle::local())
-                    .unwrap()
-                    .to_rel_path_buf()
-            })
-            .collect::<Vec<_>>()
-    }
-
-    let repo_path = client.fs().directories(false).choose(rng).unwrap().clone();
-
-    match rng.random_range(0..100_u32) {
-        0..=25 => {
-            let file_paths = generate_file_paths(&repo_path, rng, client);
-
-            let contents = file_paths
-                .into_iter()
-                .map(|path| (path, distr::Alphanumeric.sample_string(rng, 16)))
-                .collect();
-
-            GitOperation::WriteGitIndex {
-                repo_path,
-                contents,
-            }
-        }
-        26..=63 => {
-            let new_branch =
-                (rng.random_range(0..10) > 3).then(|| distr::Alphanumeric.sample_string(rng, 8));
-
-            GitOperation::WriteGitBranch {
-                repo_path,
-                new_branch,
-            }
-        }
-        64..=100 => {
-            let file_paths = generate_file_paths(&repo_path, rng, client);
-            let statuses = file_paths
-                .into_iter()
-                .map(|path| (path, gen_status(rng)))
-                .collect::<Vec<_>>();
-            GitOperation::WriteGitStatuses {
-                repo_path,
-                statuses,
-            }
-        }
-        _ => unreachable!(),
-    }
-}
-
 fn buffer_for_full_path(
     client: &TestClient,
     project: &Entity<Project>,
@@ -1643,46 +1413,4 @@ fn gen_file_name(rng: &mut StdRng) -> String {
         name.push(letter);
     }
     name
-}
-
-fn gen_status(rng: &mut StdRng) -> FileStatus {
-    fn gen_tracked_status(rng: &mut StdRng) -> TrackedStatus {
-        match rng.random_range(0..3) {
-            0 => TrackedStatus {
-                index_status: StatusCode::Unmodified,
-                worktree_status: StatusCode::Unmodified,
-            },
-            1 => TrackedStatus {
-                index_status: StatusCode::Modified,
-                worktree_status: StatusCode::Modified,
-            },
-            2 => TrackedStatus {
-                index_status: StatusCode::Added,
-                worktree_status: StatusCode::Modified,
-            },
-            3 => TrackedStatus {
-                index_status: StatusCode::Added,
-                worktree_status: StatusCode::Unmodified,
-            },
-            _ => unreachable!(),
-        }
-    }
-
-    fn gen_unmerged_status_code(rng: &mut StdRng) -> UnmergedStatusCode {
-        match rng.random_range(0..3) {
-            0 => UnmergedStatusCode::Updated,
-            1 => UnmergedStatusCode::Added,
-            2 => UnmergedStatusCode::Deleted,
-            _ => unreachable!(),
-        }
-    }
-
-    match rng.random_range(0..2) {
-        0 => FileStatus::Unmerged(UnmergedStatus {
-            first_head: gen_unmerged_status_code(rng),
-            second_head: gen_unmerged_status_code(rng),
-        }),
-        1 => FileStatus::Tracked(gen_tracked_status(rng)),
-        _ => unreachable!(),
-    }
 }

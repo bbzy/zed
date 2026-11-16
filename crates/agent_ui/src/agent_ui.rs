@@ -32,7 +32,6 @@ pub mod terminal_thread_metadata_store;
 pub mod test_support;
 mod thread_import;
 pub mod thread_metadata_store;
-pub mod thread_worktree_archive;
 
 pub mod threads_archive_view;
 mod ui;
@@ -95,7 +94,6 @@ pub use thread_import::{
     channels_with_threads, import_threads_from_other_channels,
 };
 use zed_actions;
-pub use zed_actions::{CreateWorktree, NewWorktreeBranchTarget, SwitchWorktree};
 
 pub(crate) fn resolve_agent_image(
     dest_url: &str,
@@ -270,7 +268,7 @@ const PARALLEL_AGENT_LAYOUT_BACKFILL_KEY: &str = "parallel_agent_layout_backfill
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentThreadSource {
     AgentPanel,
-    GitPanel,
+    KkWorkbench,
     Sidebar,
 }
 
@@ -278,7 +276,7 @@ impl AgentThreadSource {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::AgentPanel => "agent_panel",
-            Self::GitPanel => "git_panel",
+            Self::KkWorkbench => "kk_workbench",
             Self::Sidebar => "sidebar",
         }
     }
@@ -1014,10 +1012,6 @@ fn update_active_language_model_from_settings(cx: &mut App) {
         .inline_assistant_model
         .as_ref()
         .map(to_selected_model);
-    let commit_message = settings
-        .commit_message_model
-        .as_ref()
-        .map(to_selected_model);
     let thread_summary = settings
         .thread_summary_model
         .as_ref()
@@ -1032,7 +1026,6 @@ fn update_active_language_model_from_settings(cx: &mut App) {
     LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
         registry.select_default_model(default.as_ref(), cx);
         registry.select_inline_assistant_model(inline_assistant.as_ref(), cx);
-        registry.select_commit_message_model(commit_message.as_ref(), cx);
         registry.select_thread_summary_model(thread_summary.as_ref(), cx);
         registry.select_compaction_model(compaction.as_ref(), cx);
         registry.select_inline_alternative_models(inline_alternatives, cx);
@@ -1077,9 +1070,6 @@ mod tests {
             subagent_model: None,
             inline_assistant_model: None,
             inline_assistant_use_streaming_tools: false,
-            commit_message_model: None,
-            commit_message_include_project_rules: true,
-            commit_message_instructions: None,
             thread_summary_model: None,
             compaction_model: None,
             inline_alternatives: vec![],

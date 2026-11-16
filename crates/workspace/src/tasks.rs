@@ -1,14 +1,13 @@
 use std::process::ExitStatus;
 
 use anyhow::Result;
-use collections::HashSet;
-use gpui::{AppContext, AsyncWindowContext, Context, Entity, Task, TaskExt, WeakEntity};
+use gpui::{AppContext, AsyncWindowContext, Context, Entity, Task, WeakEntity};
 use language::Buffer;
-use project::{TaskSourceKind, WorktreeId, trusted_worktrees::TrustedWorktrees};
+use project::{TaskSourceKind, WorktreeId};
 use remote::ConnectionState;
 use task::{
     DebugScenario, ResolvedTask, SaveStrategy, SharedTaskContext, SpawnInTerminal, TaskContext,
-    TaskHook, TaskTemplate, TaskVariables, VariableName,
+    TaskTemplate,
 };
 use ui::Window;
 use util::TryFutureExt;
@@ -230,121 +229,6 @@ impl Workspace {
         } else {
             Task::ready(None)
         }
-    }
-
-    pub fn run_create_worktree_tasks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let project = self.project().clone();
-        let hooks = HashSet::from_iter([TaskHook::CreateWorktree]);
-        let worktree_store = project.read(cx).worktree_store();
-        let mut worktrees: Vec<_> = project.read(cx).worktrees(cx).collect();
-        if let Some(trusted_worktrees) = TrustedWorktrees::try_get_global(cx) {
-            worktrees.retain(|worktree| {
-                let worktree_id = worktree.read(cx).id();
-                trusted_worktrees.update(cx, |trusted_worktrees, cx| {
-                    trusted_worktrees.can_trust(&worktree_store, worktree_id, cx)
-                })
-            });
-        }
-
-        let worktree_tasks: Vec<(WorktreeId, TaskContext, Vec<TaskTemplate>)> = {
-            let project = project.read(cx);
-            let task_store = project.task_store();
-            let Some(inventory) = task_store.read(cx).task_inventory().cloned() else {
-                return;
-            };
-
-            let git_store = project.git_store().read(cx);
-
-            let mut worktree_tasks = Vec::new();
-            for worktree in worktrees {
-                let worktree = worktree.read(cx);
-                let worktree_id = worktree.id();
-                let worktree_abs_path = worktree.abs_path();
-
-                let templates: Vec<TaskTemplate> = inventory
-                    .read(cx)
-                    .templates_with_hooks(&hooks, worktree_id)
-                    .into_iter()
-                    .map(|(_, template)| template)
-                    .collect();
-
-                if templates.is_empty() {
-                    continue;
-                }
-
-                let mut task_variables = TaskVariables::default();
-                task_variables.insert(
-                    VariableName::WorktreeRoot,
-                    worktree_abs_path.to_string_lossy().into_owned(),
-                );
-
-                if let Some(path) = git_store.original_repo_path_for_worktree(worktree_id, cx) {
-                    task_variables.insert(
-                        VariableName::MainGitWorktree,
-                        path.to_string_lossy().into_owned(),
-                    );
-                }
-
-                let task_context = TaskContext {
-                    cwd: Some(worktree_abs_path.to_path_buf()),
-                    task_variables,
-                    project_env: Default::default(),
-                };
-
-                worktree_tasks.push((worktree_id, task_context, templates));
-            }
-            worktree_tasks
-        };
-
-        if worktree_tasks.is_empty() {
-            return;
-        }
-
-        let task = cx.spawn_in(window, async move |workspace, cx| {
-            let mut tasks = Vec::new();
-            for (worktree_id, task_context, templates) in worktree_tasks {
-                let id_base = format!("worktree_setup_{worktree_id}");
-
-                tasks.push(cx.spawn({
-                    let workspace = workspace.clone();
-                    async move |cx| {
-                        for task_template in templates {
-                            let Some(resolved) =
-                                task_template.resolve_task(&id_base, &task_context)
-                            else {
-                                continue;
-                            };
-
-                            let status = workspace.update_in(cx, |workspace, window, cx| {
-                                workspace.spawn_in_terminal(resolved.resolved, window, cx)
-                            })?;
-
-                            if let Some(result) = status.await {
-                                match result {
-                                    Ok(exit_status) if !exit_status.success() => {
-                                        log::error!(
-                                            "Git worktree setup task failed with status: {:?}",
-                                            exit_status.code()
-                                        );
-                                        break;
-                                    }
-                                    Err(error) => {
-                                        log::error!("Git worktree setup task error: {error:#}");
-                                        break;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        anyhow::Ok(())
-                    }
-                }));
-            }
-
-            futures::future::join_all(tasks).await;
-            anyhow::Ok(())
-        });
-        task.detach_and_log_err(cx);
     }
 }
 

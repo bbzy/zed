@@ -16,8 +16,8 @@ mod kk_revision_picker;
 mod kk_search;
 mod kk_settings;
 
-pub use git_ui_core::picker_prompt;
-pub(crate) use git_ui_core::revision_metadata as commit_metadata;
+pub use diff_ui::picker_prompt;
+pub(crate) use diff_ui::revision_metadata as commit_metadata;
 pub use kk_blame::KkBlameStatus;
 pub use kk_diff_controls::{KkDiffActionsToolbar, KkDiffStyleToolbar};
 

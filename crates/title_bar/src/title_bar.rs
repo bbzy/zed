@@ -451,25 +451,12 @@ impl TitleBar {
         cx.notify();
     }
 
-    /// Returns the worktree to display in the title bar.
-    /// - Prefer the worktree owning the project's active repository
-    /// - Fall back to the first visible worktree
     pub fn effective_active_worktree(&self, cx: &App) -> Option<Entity<project::Worktree>> {
         let project = self.project.read(cx);
-
-        if let Some(repo) = project.active_repository(cx) {
-            let repo = repo.read(cx);
-            let repo_path = &repo.work_directory_abs_path;
-
-            for worktree in project.visible_worktrees(cx) {
-                let worktree_path = worktree.read(cx).abs_path();
-                if worktree_path == *repo_path || worktree_path.starts_with(repo_path.as_ref()) {
-                    return Some(worktree);
-                }
-            }
-        }
-
-        project.visible_worktrees(cx).next()
+        project
+            .active_entry()
+            .and_then(|entry| project.worktree_for_entry(entry, cx))
+            .or_else(|| project.visible_worktrees(cx).next())
     }
 
     fn render_remote_project_connection(&self, cx: &mut Context<Self>) -> Option<AnyElement> {

@@ -59,7 +59,6 @@ fs.workspace = true
 futures.workspace = true
 fuzzy.workspace = true
 fuzzy_nucleo.workspace = true
-git.workspace = true
 gpui.workspace = true
 gpui_tokio.workspace = true
 html_to_markdown.workspace = true
@@ -115,7 +114,6 @@ util.workspace = true
 uuid.workspace = true
 watch.workspace = true
 workspace.workspace = true
-git_ui_core.workspace = true
 zed_actions.workspace = true
 image.workspace = true
 reqwest_client = { workspace = true, optional = true }

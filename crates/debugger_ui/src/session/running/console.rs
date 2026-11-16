@@ -75,7 +75,7 @@ impl Console {
             editor.set_show_breakpoints(false, cx);
             editor.set_show_code_actions(false, cx);
             editor.set_show_line_numbers(false, cx);
-            editor.set_show_git_diff_gutter(false, cx);
+            editor.set_show_diff_gutter(false, cx);
             editor.set_autoindent(false);
             editor.set_input_enabled(false);
             editor.set_use_autoclose(false);

@@ -194,7 +194,7 @@ mod test {
         let mut cx = VimTestContext::new(cx, true).await;
         cx.enable_helix();
         cx.set_state("ˇkept\n", Mode::HelixNormal);
-        cx.set_head_text("kept\ndeleted\n");
+        cx.set_diff_base("kept\ndeleted\n");
         cx.update_editor(|editor, window, cx| {
             editor.expand_all_diff_hunks(&editor::actions::ExpandAllDiffHunks, window, cx);
         });

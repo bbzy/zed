@@ -52,7 +52,6 @@ pub struct LanguageModelRegistry {
     /// authenticating all providers. It's only used when `default_model` is not set.
     available_fallback_model: Option<LanguageModel>,
     inline_assistant_model: Option<LanguageModel>,
-    commit_message_model: Option<LanguageModel>,
     thread_summary_model: Option<LanguageModel>,
     compaction_model: Option<LanguageModel>,
     providers: BTreeMap<LanguageModelProviderId, Arc<dyn LanguageModelProvider>>,
@@ -109,7 +108,6 @@ impl LanguageModel {
 pub enum Event {
     DefaultModelChanged,
     InlineAssistantModelChanged,
-    CommitMessageModelChanged,
     CompactionModelChanged,
     ThreadSummaryModelChanged,
     ProviderStateChanged(LanguageModelProviderId),
@@ -328,16 +326,6 @@ impl LanguageModelRegistry {
         let configured_model = model.and_then(|model| self.select_model(model, cx));
         self.set_inline_assistant_model(configured_model, cx);
     }
-
-    pub fn select_commit_message_model(
-        &mut self,
-        model: Option<&SelectedModel>,
-        cx: &mut Context<Self>,
-    ) {
-        let configured_model = model.and_then(|model| self.select_model(model, cx));
-        self.set_commit_message_model(configured_model, cx);
-    }
-
     pub fn select_thread_summary_model(
         &mut self,
         model: Option<&SelectedModel>,
@@ -431,20 +419,6 @@ impl LanguageModelRegistry {
         }
         self.inline_assistant_model = model;
     }
-
-    pub fn set_commit_message_model(
-        &mut self,
-        model: Option<LanguageModel>,
-        cx: &mut Context<Self>,
-    ) {
-        match (self.commit_message_model.as_ref(), model.as_ref()) {
-            (Some(old), Some(new)) if old.is_same_as(new) => {}
-            (None, None) => {}
-            _ => cx.emit(Event::CommitMessageModelChanged),
-        }
-        self.commit_message_model = model;
-    }
-
     pub fn set_thread_summary_model(
         &mut self,
         model: Option<LanguageModel>,
@@ -498,19 +472,6 @@ impl LanguageModelRegistry {
             .clone()
             .or_else(|| self.default_model())
     }
-
-    pub fn commit_message_model(&self, cx: &App) -> Option<LanguageModel> {
-        #[cfg(debug_assertions)]
-        if std::env::var("ZED_SIMULATE_NO_LLM_PROVIDER").is_ok() {
-            return None;
-        }
-
-        self.commit_message_model
-            .clone()
-            .or_else(|| self.default_fast_model(cx))
-            .or_else(|| self.default_model())
-    }
-
     pub fn thread_summary_model(&self, cx: &App) -> Option<LanguageModel> {
         #[cfg(debug_assertions)]
         if std::env::var("ZED_SIMULATE_NO_LLM_PROVIDER").is_ok() {

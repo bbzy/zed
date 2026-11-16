@@ -295,16 +295,6 @@ pub struct AgentSettingsContent {
     ///
     /// Default: true
     pub inline_assistant_use_streaming_tools: Option<bool>,
-    /// Model to use for generating git commit messages. Defaults to default_model when not specified.
-    pub commit_message_model: Option<LanguageModelSelection>,
-    /// Whether to include project rules files (AGENTS.md, CLAUDE.md, .rules, etc.)
-    /// in the prompt when generating git commit messages.
-    ///
-    /// Default: true
-    pub commit_message_include_project_rules: Option<bool>,
-    /// Custom instructions to include in the prompt when generating git commit messages.
-    /// Applied in addition to any project rules files (such as `.rules` or `AGENTS.md`).
-    pub commit_message_instructions: Option<String>,
     /// Model to use for generating thread summaries. Defaults to default_model when not specified.
     pub thread_summary_model: Option<LanguageModelSelection>,
     /// Model to use for context compaction (`/compact` and auto-compaction).
