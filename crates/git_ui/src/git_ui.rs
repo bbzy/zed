@@ -39,7 +39,7 @@ use crate::{
 pub mod branch_diff;
 pub mod branch_picker;
 mod commit_context_menu;
-mod commit_metadata;
+pub(crate) use git_ui_core::revision_metadata as commit_metadata;
 mod commit_modal;
 pub mod commit_tooltip;
 pub mod commit_view;
@@ -50,21 +50,8 @@ pub mod git_panel;
 mod git_panel_settings;
 pub mod git_picker;
 mod git_runtime_diagnostics;
-mod kk_blame;
-mod kk_classification;
-mod kk_comparison;
-mod kk_conflict;
-mod kk_diff;
-mod kk_diff_controls;
-mod kk_file_order;
-mod kk_multi_diff;
-mod kk_output;
-pub mod kk_panel;
-mod kk_revision_picker;
-mod kk_search;
-mod kk_settings;
 pub mod multi_diff_view;
-pub mod picker_prompt;
+pub use git_ui_core::picker_prompt;
 pub mod project_diff;
 pub(crate) mod remote_output;
 pub mod repository_selector;
@@ -76,15 +63,8 @@ pub mod unstaged_diff;
 
 pub use blame_ui::GitBlameStatus;
 pub use conflict_view::MergeConflictIndicator;
-pub use kk_blame::KkBlameStatus;
-pub use kk_diff_controls::{KkDiffActionsToolbar, KkDiffStyleToolbar};
 
 pub fn init(cx: &mut App) {
-    kk_blame::init(cx);
-    kk_panel::init(cx);
-    kk_conflict::init(cx);
-    kk_diff::init(cx);
-    kk_search::init(cx);
     editor::set_blame_renderer(blame_ui::GitBlameRenderer, cx);
     commit_view::init(cx);
     git_graph::init(cx);
@@ -1363,31 +1343,7 @@ impl GitStatusIcon {
 
 impl RenderOnce for GitStatusIcon {
     fn render(self, _window: &mut ui::Window, cx: &mut App) -> impl IntoElement {
-        let status = self.status;
-
-        let (icon_name, color) = if status.is_conflicted() {
-            (
-                IconName::Warning,
-                cx.theme().colors().version_control_conflict,
-            )
-        } else if status.is_deleted() {
-            (
-                IconName::SquareMinus,
-                cx.theme().colors().version_control_deleted,
-            )
-        } else if status.is_modified() {
-            (
-                IconName::SquareDot,
-                cx.theme().colors().version_control_modified,
-            )
-        } else {
-            (
-                IconName::SquarePlus,
-                cx.theme().colors().version_control_added,
-            )
-        };
-
-        Icon::new(icon_name).color(Color::Custom(color))
+        git_ui_core::file_diff_view::file_status_icon(self.status, cx)
     }
 }
 

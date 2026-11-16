@@ -463,6 +463,20 @@ impl Render for FileDiffStyleToolbar {
     }
 }
 
+pub fn file_status_icon(status: git::status::FileStatus, cx: &App) -> Icon {
+    let colors = cx.theme().colors();
+    let (icon, color) = if status.is_conflicted() {
+        (IconName::Warning, colors.version_control_conflict)
+    } else if status.is_deleted() {
+        (IconName::SquareMinus, colors.version_control_deleted)
+    } else if status.is_modified() {
+        (IconName::SquareDot, colors.version_control_modified)
+    } else {
+        (IconName::SquarePlus, colors.version_control_added)
+    };
+    Icon::new(icon).color(Color::Custom(color))
+}
+
 pub fn diff_style_controls(
     editor: Entity<SplittableEditor>,
     showing_full_file: bool,

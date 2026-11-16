@@ -1,0 +1,115 @@
+[package]
+name = "kk_ui"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+name = "kk_ui"
+path = "src/kk_ui.rs"
+doctest = false
+
+[features]
+test-support = ["multi_buffer/test-support", "remote_connection/test-support"]
+
+[dependencies]
+agent_settings.workspace = true
+anyhow.workspace = true
+askpass.workspace = true
+async-channel.workspace = true
+buffer_diff.workspace = true
+client.workspace = true
+clock.workspace = true
+collections.workspace = true
+component.workspace = true
+db.workspace = true
+editor.workspace = true
+file_icons.workspace = true
+futures-lite.workspace = true
+futures.workspace = true
+fuzzy.workspace = true
+fuzzy_nucleo.workspace = true
+git.workspace = true
+gpui.workspace = true
+icu_collator.workspace = true
+icu_locale_core.workspace = true
+image_viewer.workspace = true
+itertools.workspace = true
+kk_workbench.workspace = true
+language.workspace = true
+language_model.workspace = true
+log.workspace = true
+markdown.workspace = true
+menu.workspace = true
+multi_buffer.workspace = true
+notifications.workspace = true
+picker.workspace = true
+project.workspace = true
+prompt_store.workspace = true
+rand.workspace = true
+release_channel.workspace = true
+remote_connection.workspace = true
+schemars.workspace = true
+search.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+settings.workspace = true
+smallvec.workspace = true
+strum.workspace = true
+sys-locale.workspace = true
+sysinfo.workspace = true
+task.workspace = true
+telemetry.workspace = true
+terminal.workspace = true
+theme.workspace = true
+theme_settings.workspace = true
+time.workspace = true
+time_format.workspace = true
+tracing.workspace = true
+ui.workspace = true
+ui_input.workspace = true
+util.workspace = true
+uuid.workspace = true
+watch.workspace = true
+workspace.workspace = true
+git_ui_core.workspace = true
+zed_actions.workspace = true
+ztracing.workspace = true
+
+[dev-dependencies]
+client = { workspace = true, features = ["test-support"] }
+clock = { workspace = true, features = ["test-support"] }
+ctor.workspace = true
+db = { workspace = true, features = ["test-support"] }
+editor = { workspace = true, features = ["test-support"] }
+extension.workspace = true
+extension_host.workspace = true
+extensions_ui.workspace = true
+fs = { workspace = true, features = ["test-support"] }
+git = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
+http_client = { workspace = true, features = ["test-support"] }
+indoc.workspace = true
+language = { workspace = true, features = ["test-support"] }
+lsp.workspace = true
+node_runtime.workspace = true
+pretty_assertions.workspace = true
+project = { workspace = true, features = ["test-support"] }
+rand.workspace = true
+remote = { workspace = true, features = ["test-support"] }
+remote_connection = { workspace = true, features = ["test-support"] }
+remote_server.workspace = true
+settings = { workspace = true, features = ["test-support"] }
+task.workspace = true
+tempfile.workspace = true
+tree-sitter-md.workspace = true
+unindent.workspace = true
+workspace = { workspace = true, features = ["test-support"] }
+zlog.workspace = true
+
+[package.metadata.cargo-shear]
+ignored = ["component", "remote_connection", "tracing"]

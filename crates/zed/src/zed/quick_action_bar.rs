@@ -166,7 +166,7 @@ impl Render for QuickActionBar {
         });
 
         let kk_blame_button = self.kk_blame_available.then(|| {
-            let (enabled, loading) = git_ui::KkBlameStatus::toolbar_state(&editor, cx);
+            let (enabled, loading) = kk_ui::KkBlameStatus::toolbar_state(&editor, cx);
             let workspace = self.workspace.clone();
             let editor = editor.clone();
             IconButton::new("toggle-kk-blame", IconName::GitCommit)
@@ -185,7 +185,7 @@ impl Render for QuickActionBar {
                             .read(cx)
                             .status_bar()
                             .read(cx)
-                            .item_of_type::<git_ui::KkBlameStatus>()
+                            .item_of_type::<kk_ui::KkBlameStatus>()
                     {
                         status.update(cx, |status, cx| {
                             status.toggle_editor(editor.clone(), window, cx);
@@ -821,7 +821,7 @@ impl ToolbarItemView for QuickActionBar {
         {
             self.kk_blame_probe = cx.spawn(async move |this, cx| {
                 let available = workspace.read_with(cx, |workspace, cx| {
-                    git_ui::KkBlameStatus::toolbar_available(&editor, workspace, cx)
+                    kk_ui::KkBlameStatus::toolbar_available(&editor, workspace, cx)
                 });
                 let available = available.await;
                 this.update(cx, |this, cx| {
@@ -846,7 +846,7 @@ impl ToolbarItemView for QuickActionBar {
                         editor.supports_semantic_tokens(cx),
                     )
                 });
-                let mut blame_state = git_ui::KkBlameStatus::toolbar_state(&editor, cx);
+                let mut blame_state = kk_ui::KkBlameStatus::toolbar_state(&editor, cx);
                 self._inlay_hints_enabled_subscription =
                     Some(cx.observe(&editor, move |_, editor, cx| {
                         let (
@@ -860,7 +860,7 @@ impl ToolbarItemView for QuickActionBar {
                                 editor.supports_semantic_tokens(cx),
                             )
                         });
-                        let new_blame_state = git_ui::KkBlameStatus::toolbar_state(&editor, cx);
+                        let new_blame_state = kk_ui::KkBlameStatus::toolbar_state(&editor, cx);
                         let should_notify = blame_state != new_blame_state
                             || inlay_hints_enabled != new_inlay_hints_enabled
                             || supports_inlay_hints != new_supports_inlay_hints

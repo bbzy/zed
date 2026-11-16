@@ -251,6 +251,7 @@ impl DiffDisplayPreference {
 
 #[derive(Clone, Debug, PartialEq, RegisterSetting)]
 pub struct KkWorkbenchSettings {
+    pub status_style: settings::StatusStyle,
     pub dock: workspace::dock::DockPosition,
     pub executable_path: PathBuf,
     pub blame: BlameSettings,
@@ -266,9 +267,15 @@ pub struct BlameSettings {
 
 impl Settings for KkWorkbenchSettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
+        let status_style = content
+            .git_panel
+            .as_ref()
+            .and_then(|panel| panel.status_style)
+            .unwrap_or_default();
         let content = content.kk_workbench.clone().unwrap_or_default();
         let blame = content.blame.unwrap_or_default();
         Self {
+            status_style,
             dock: match content.dock {
                 Some(settings::DockPosition::Left) => workspace::dock::DockPosition::Left,
                 _ => workspace::dock::DockPosition::Right,

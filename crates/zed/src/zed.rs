@@ -630,7 +630,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         let line_ending_indicator =
             cx.new(|_| line_ending_selector::LineEndingIndicator::default());
         let git_blame_status = cx.new(|_| git_ui::GitBlameStatus::default());
-        let kk_blame_status = cx.new(|cx| git_ui::KkBlameStatus::new(workspace, cx));
+        let kk_blame_status = cx.new(|cx| kk_ui::KkBlameStatus::new(workspace, cx));
         let merge_conflict_indicator =
             cx.new(|cx| git_ui::MergeConflictIndicator::new(workspace, cx));
         workspace.status_bar().update(cx, |status_bar, cx| {
@@ -783,7 +783,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
         let terminal_panel = TerminalPanel::load(workspace_handle.clone(), cx.clone());
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
-        let kk_panel = git_ui::kk_panel::KkPanel::load(workspace_handle.clone(), cx.clone());
+        let kk_panel = kk_ui::kk_panel::KkPanel::load(workspace_handle.clone(), cx.clone());
         let channels_panel =
             collab_ui::collab_panel::CollabPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
@@ -1472,7 +1472,7 @@ fn initialize_pane(
             toolbar.add_item(multibuffer_hint, window, cx);
             let solo_diff_style_toolbar = cx.new(SoloDiffStyleToolbar::new);
             toolbar.add_item(solo_diff_style_toolbar, window, cx);
-            let kk_style_toolbar = cx.new(git_ui::KkDiffStyleToolbar::new);
+            let kk_style_toolbar = cx.new(kk_ui::KkDiffStyleToolbar::new);
             toolbar.add_item(kk_style_toolbar, window, cx);
             let file_diff_style_toolbar = cx.new(FileDiffStyleToolbar::new);
             toolbar.add_item(file_diff_style_toolbar, window, cx);
@@ -1518,7 +1518,7 @@ fn initialize_pane(
             toolbar.add_item(unstaged_diff_toolbar, window, cx);
             let branch_diff_toolbar = cx.new(BranchDiffToolbar::new);
             toolbar.add_item(branch_diff_toolbar, window, cx);
-            let kk_actions_toolbar = cx.new(git_ui::KkDiffActionsToolbar::new);
+            let kk_actions_toolbar = cx.new(kk_ui::KkDiffActionsToolbar::new);
             toolbar.add_item(kk_actions_toolbar, window, cx);
             let solo_diff_git_toolbar = cx.new(SoloDiffGitToolbar::new);
             toolbar.add_item(solo_diff_git_toolbar, window, cx);
@@ -6493,6 +6493,7 @@ mod tests {
             editor::init(cx);
             collab_ui::init(&app_state, cx);
             git_ui::init(cx);
+            kk_ui::init(cx);
             project_panel::init(cx);
             outline_panel::init(cx);
             terminal_view::init(cx);

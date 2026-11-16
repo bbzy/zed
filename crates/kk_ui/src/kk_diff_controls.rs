@@ -1,4 +1,4 @@
-use super::{git_panel_settings::GitPanelSettings, git_status_icon};
+use super::kk_settings::KkWorkbenchSettings;
 use buffer_diff::BufferDiff;
 use editor::display_map::ToDisplayPoint as _;
 use editor::{
@@ -986,6 +986,30 @@ impl DiffHunkRenderer for KkDiffHunkRenderer {
     }
 }
 
+pub(super) fn file_breadcrumbs(
+    text: gpui::SharedString,
+    status: Option<git::status::FileStatus>,
+    cx: &App,
+) -> (Vec<language::HighlightedText>, Option<gpui::Font>) {
+    let mut highlights = Vec::new();
+    if KkWorkbenchSettings::get_global(cx).status_style == StatusStyle::LabelColor
+        && let Some(status) = status
+    {
+        highlights.push((
+            0..text.len(),
+            gpui::HighlightStyle::color(editor::file_status_label_color(Some(status)).color(cx)),
+        ));
+    }
+    (
+        vec![language::HighlightedText { text, highlights }],
+        Some(
+            theme_settings::ThemeSettings::get_global(cx)
+                .buffer_font
+                .clone(),
+        ),
+    )
+}
+
 pub struct KkDiffStyleToolbar {
     kk_diff: Option<Entity<KkDiffControls>>,
     _subscription: Option<Subscription>,
@@ -1066,7 +1090,7 @@ impl Render for KkDiffStyleToolbar {
             let status = controls.read(cx).status;
             let generic_style_controls = controls.read(cx).generic_style_controls;
             let show_status_icon =
-                GitPanelSettings::get_global(cx).status_style != StatusStyle::LabelColor;
+                KkWorkbenchSettings::get_global(cx).status_style != StatusStyle::LabelColor;
             let controls = controls.downgrade();
             let on_toggle = move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
                 controls
@@ -1084,7 +1108,9 @@ impl Render for KkDiffStyleToolbar {
             return controls
                 .when_some(
                     show_status_icon.then_some(status).flatten(),
-                    |this, status| this.child(git_status_icon(status)),
+                    |this, status| {
+                        this.child(git_ui_core::file_diff_view::file_status_icon(status, cx))
+                    },
                 )
                 .into_any_element();
         }

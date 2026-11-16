@@ -3,14 +3,11 @@ use gpui::{AnyElement, AnyView, App, ClipboardItem, Entity, ScrollHandle, Window
 use markdown::{Markdown, MarkdownElement, MarkdownStyle};
 use ui::{Disclosure, HighlightedLabel, Tooltip, WithScrollbar, prelude::*};
 
-pub(crate) fn identifier(value: impl Into<gpui::SharedString>) -> Label {
+pub fn identifier(value: impl Into<gpui::SharedString>) -> Label {
     Label::new(value).color(Color::Accent)
 }
 
-pub(crate) fn change_identifier(
-    value: impl Into<gpui::SharedString>,
-    prefix: &str,
-) -> HighlightedLabel {
+pub fn change_identifier(value: impl Into<gpui::SharedString>, prefix: &str) -> HighlightedLabel {
     let value = value.into();
     let length = if !prefix.is_empty() && value.starts_with(prefix) {
         prefix.len()
@@ -20,21 +17,19 @@ pub(crate) fn change_identifier(
     HighlightedLabel::new(value, (0..length).collect()).color(Color::Muted)
 }
 
-pub(crate) fn person(value: impl Into<gpui::SharedString>) -> Label {
+pub fn person(value: impl Into<gpui::SharedString>) -> Label {
     Label::new(value).color(Color::Info)
 }
 
-pub(crate) fn description(value: impl Into<gpui::SharedString>) -> Label {
+pub fn description(value: impl Into<gpui::SharedString>) -> Label {
     Label::new(value).color(Color::Default)
 }
 
-pub(crate) fn tooltip(
-    fields: Vec<(String, String, Color)>,
-) -> impl Fn(&mut Window, &mut App) -> AnyView {
+pub fn tooltip(fields: Vec<(String, String, Color)>) -> impl Fn(&mut Window, &mut App) -> AnyView {
     tooltip_with_prefix(fields, None)
 }
 
-pub(crate) fn tooltip_with_prefix(
+pub fn tooltip_with_prefix(
     fields: Vec<(String, String, Color)>,
     change_id_prefix: Option<String>,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView {
@@ -65,9 +60,9 @@ pub(crate) fn tooltip_with_prefix(
     })
 }
 
-pub(crate) const AVATAR_BORDER_WIDTH: Pixels = px(1.);
+pub const AVATAR_BORDER_WIDTH: Pixels = px(1.);
 
-pub(crate) fn avatar_placeholder(
+pub fn avatar_placeholder(
     size: Option<gpui::AbsoluteLength>,
     window: &Window,
     cx: &App,
@@ -89,7 +84,7 @@ pub(crate) fn avatar_placeholder(
         .into_any_element()
 }
 
-pub(super) struct CommitHeader {
+pub struct CommitHeader {
     pub author_name: gpui::SharedString,
     pub author_email: gpui::SharedString,
     pub timestamp: Option<i64>,

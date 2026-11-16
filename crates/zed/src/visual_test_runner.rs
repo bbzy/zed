@@ -210,6 +210,7 @@ fn run_visual_tests(project_path: PathBuf, update_baseline: bool) -> Result<()> 
         );
         language_models::init(app_state.user_store.clone(), app_state.client.clone(), cx);
         git_ui::init(cx);
+        kk_ui::init(cx);
         project::AgentRegistryStore::init_global(
             cx,
             app_state.fs.clone(),
