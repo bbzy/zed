@@ -4,6 +4,11 @@ package zed.messages;
 import "buffer.proto";
 import "core.proto";
 
+message CancelSyntaxSymbols {
+  uint64 project_id = 1;
+  string trace_id = 2;
+}
+
 message GetSyntaxSymbols {
   uint64 project_id = 1;
   uint64 buffer_id = 2;

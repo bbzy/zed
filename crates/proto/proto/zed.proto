@@ -439,7 +439,8 @@ message Envelope {
     KkWorkbenchRequest kk_workbench_request = 496;
     KkWorkbenchResponse kk_workbench_response = 497;
     GetSyntaxSymbols get_syntax_symbols = 498;
-    GetSyntaxSymbolsResponse get_syntax_symbols_response = 499; // current max
+    GetSyntaxSymbolsResponse get_syntax_symbols_response = 499;
+    CancelSyntaxSymbols cancel_syntax_symbols = 500; // current max
   }
 
   reserved 87 to 88;

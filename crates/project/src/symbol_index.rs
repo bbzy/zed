@@ -8,17 +8,22 @@ use crate::{
 use anyhow::{Context as _, Result};
 use client::TypedEnvelope;
 use collections::{HashMap, HashSet};
+use futures::{
+    FutureExt as _,
+    future::{AbortHandle, Abortable, Shared, WeakShared},
+};
 use gpui::{App, AppContext as _, Context, Entity, Task};
 use language::{
     Buffer, BufferSnapshot, CodeLabel, Language, Location, ToOffset, ToPointUtf16,
     symbol_index::{Document, Index, SymbolLanguage, SymbolLocation},
 };
 use parking_lot::Mutex;
-use rpc::proto;
+use rpc::{AnyProtoClient, proto};
 use std::{
+    collections::VecDeque,
     fmt,
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::Instant,
@@ -88,15 +93,158 @@ impl Drop for QueryTraceState {
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const CACHE_BYTES: usize = 64 * 1024 * 1024;
 
+type IndexTask = Task<Result<Arc<ProjectIndex>, Arc<anyhow::Error>>>;
+type SharedIndex = Shared<IndexTask>;
+
 #[derive(Default)]
 pub(super) struct SymbolIndexStore {
-    cache: Arc<Mutex<HashMap<ProjectPath, CachedDocument>>>,
-    warm_task: Option<Task<()>>,
+    cache: Arc<Mutex<DocumentCache>>,
+    pub(super) jobs: Arc<Mutex<IndexJobs>>,
+    build_lock: Arc<futures::lock::Mutex<()>>,
+    remote_queries: Arc<Mutex<RemoteQueries>>,
+}
+
+#[derive(Default)]
+pub(super) struct IndexJobs {
+    pub(super) generation: usize,
+    pending: HashMap<String, IndexJob>,
+}
+
+struct IndexJob {
+    task: WeakShared<IndexTask>,
+    ready: Weak<ProjectIndex>,
+    trace_id: String,
+}
+
+struct DocumentCache {
+    budget: usize,
+    entries: HashMap<ProjectPath, CachedDocument>,
+    bytes: usize,
+    evictions: usize,
+    admission_skipped: usize,
 }
 
 struct CachedDocument {
     stamp: String,
     document: Arc<Document>,
+    accessed_at: Instant,
+}
+
+impl Default for DocumentCache {
+    fn default() -> Self {
+        Self {
+            budget: CACHE_BYTES,
+            entries: HashMap::default(),
+            bytes: 0,
+            evictions: 0,
+            admission_skipped: 0,
+        }
+    }
+}
+
+impl DocumentCache {
+    fn get(&mut self, path: &ProjectPath, stamp: &str) -> Option<Arc<Document>> {
+        if self
+            .entries
+            .get(path)
+            .is_some_and(|entry| entry.stamp != stamp)
+        {
+            self.remove(path);
+        }
+        let entry = self.entries.get_mut(path)?;
+        entry.accessed_at = Instant::now();
+        Some(entry.document.clone())
+    }
+
+    fn remove(&mut self, path: &ProjectPath) {
+        if let Some(entry) = self.entries.remove(path) {
+            self.bytes -= entry.document.memory_cost();
+        }
+    }
+
+    fn insert(&mut self, path: ProjectPath, stamp: String, document: Arc<Document>, hot: bool) {
+        self.remove(&path);
+        let cost = document.memory_cost();
+        if cost > self.budget {
+            self.admission_skipped += 1;
+            return;
+        }
+        // Full scans must not evict the working set before reaching its cached files.
+        if hot {
+            while self.bytes + cost > self.budget {
+                let Some(oldest) = self
+                    .entries
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.accessed_at)
+                    .map(|(path, _)| path.clone())
+                else {
+                    break;
+                };
+                self.remove(&oldest);
+                self.evictions += 1;
+            }
+        }
+        if self.bytes + cost > self.budget {
+            self.admission_skipped += 1;
+            return;
+        }
+        self.bytes += cost;
+        self.entries.insert(
+            path,
+            CachedDocument {
+                stamp,
+                document,
+                accessed_at: Instant::now(),
+            },
+        );
+    }
+
+    fn retain(&mut self, paths: &HashSet<ProjectPath>) {
+        self.entries.retain(|path, _| paths.contains(path));
+        self.bytes = self
+            .entries
+            .values()
+            .map(|entry| entry.document.memory_cost())
+            .sum();
+    }
+}
+
+#[derive(Default)]
+struct RemoteQueries {
+    active: HashMap<String, AbortHandle>,
+    cancelled: VecDeque<String>,
+}
+
+struct RemoteQueryRegistration {
+    queries: Arc<Mutex<RemoteQueries>>,
+    trace_id: String,
+}
+
+impl Drop for RemoteQueryRegistration {
+    fn drop(&mut self) {
+        self.queries.lock().active.remove(&self.trace_id);
+    }
+}
+
+struct RemoteQueryCancellation {
+    client: AnyProtoClient,
+    request: Option<proto::CancelSyntaxSymbols>,
+}
+
+impl RemoteQueryCancellation {
+    fn disarm(&mut self) {
+        self.request = None;
+    }
+}
+
+impl Drop for RemoteQueryCancellation {
+    fn drop(&mut self) {
+        if let Some(request) = self.request.take() {
+            if let Err(error) = self.client.send(request) {
+                log::warn!("Cancelling remote syntax query: {error:#}");
+            }
+        }
+    }
 }
 
 struct IndexedFile {
@@ -179,11 +327,19 @@ impl LspStore {
             kind: kind.into(),
             trace_id: trace.0.id.clone(),
         };
+        let mut cancellation = RemoteQueryCancellation {
+            client: client.clone(),
+            request: Some(proto::CancelSyntaxSymbols {
+                project_id,
+                trace_id: trace.0.id.clone(),
+            }),
+        };
         cx.background_spawn(async move {
             trace.record("remote_send", format_args!("project_id={project_id}"));
             let response = client.request(request).await.context(
                 "Remote symbol index request failed; the remote server must match this client",
             )?;
+            cancellation.disarm();
             trace.record(
                 "remote_received",
                 format_args!(
@@ -239,115 +395,191 @@ impl LspStore {
             "remote_request",
             format_args!("buffer_id={}", request.buffer_id),
         );
-        let result = async {
-            let buffer_id = text::BufferId::new(request.buffer_id)?;
-            let buffer = this.read_with(&cx, |store, cx| {
-                store.buffer_store().read(cx).get_existing(buffer_id)
-            })?;
-            let position = request
-                .position
-                .and_then(language::proto::deserialize_anchor)
-                .context("Invalid symbol query position")?;
-            let version = language::proto::deserialize_version(&request.version);
-            trace.record(
-                "buffer_sync",
-                format_args!(
-                    "file={:?}",
-                    buffer.read_with(&cx, |buffer, cx| buffer.file().map(|file| file
-                        .file_system_abs_path(cx)
-                        .unwrap_or_else(|| file.full_path(cx))))
-                ),
-            );
-            buffer
-                .update(&mut cx, |buffer, _| buffer.wait_for_version(version))
-                .await?;
-            let offset = buffer.read_with(&cx, |buffer, _| position.to_offset(&buffer.snapshot()));
-            let mut response = proto::GetSyntaxSymbolsResponse::default();
-            match kind {
-                Kind::Definition | Kind::Declaration => {
-                    let locations = this
-                        .update(&mut cx, |store, cx| {
-                            store.syntax_definitions(
-                                &buffer,
-                                offset,
-                                kind == Kind::Declaration,
-                                trace.clone(),
-                                cx,
-                            )
-                        })
-                        .await?
-                        .unwrap_or_default();
-                    this.update(&mut cx, |store, cx| {
-                        let version = buffer.read(cx).version();
-                        if kind == Kind::Definition {
-                            response.definitions = Some(GetDefinitions::response_to_proto(
-                                locations, store, peer_id, &version, cx,
-                            ));
-                        } else {
-                            response.declarations = Some(GetDeclarations::response_to_proto(
-                                locations, store, peer_id, &version, cx,
-                            ));
-                        }
-                    });
+        let (abort, registration) = AbortHandle::new_pair();
+        let query_registration = this.update(
+            &mut cx,
+            |store, _| -> Result<Option<RemoteQueryRegistration>> {
+                let queries = store.symbol_index.remote_queries.clone();
+                let mut pending = queries.lock();
+                if let Some(position) = pending
+                    .cancelled
+                    .iter()
+                    .position(|id| id == &request.trace_id)
+                {
+                    pending.cancelled.remove(position);
+                    return Ok(None);
                 }
-                Kind::References => {
-                    let locations = this
-                        .update(&mut cx, |store, cx| {
-                            store.syntax_references(&buffer, offset, trace.clone(), cx)
-                        })
-                        .await?
-                        .unwrap_or_default();
-                    response.references = Some(this.update(&mut cx, |store, cx| {
-                        GetReferences::response_to_proto(
-                            locations,
-                            store,
-                            peer_id,
-                            &buffer.read(cx).version(),
-                            cx,
-                        )
-                    }));
-                }
-                Kind::Completions => {
-                    let responses = this
-                        .update(&mut cx, |store, cx| {
-                            store.syntax_completions(&buffer, offset, trace.clone(), cx)
-                        })
-                        .await?;
-                    let mut completions = Vec::new();
-                    for completion in responses
-                        .into_iter()
-                        .flat_map(|response| response.completions)
-                    {
-                        response.completion_labels.push(completion.label.text);
-                        completions.push(CoreCompletion {
-                            replace_range: completion.replace_range,
-                            new_text: completion.new_text,
-                            source: completion.source,
+                anyhow::ensure!(
+                    !pending.active.contains_key(&request.trace_id),
+                    "Duplicate syntax query id"
+                );
+                pending.active.insert(request.trace_id.clone(), abort);
+                drop(pending);
+                Ok(Some(RemoteQueryRegistration {
+                    queries,
+                    trace_id: request.trace_id.clone(),
+                }))
+            },
+        )?;
+        let Some(query_registration) = query_registration else {
+            trace.finish("cancelled", format_args!("reason=cancelled_before_start"));
+            return Err(anyhow::anyhow!("Syntax query cancelled before start"));
+        };
+        let result = Abortable::new(
+            async {
+                let buffer_id = text::BufferId::new(request.buffer_id)?;
+                let buffer = this.read_with(&cx, |store, cx| {
+                    store.buffer_store().read(cx).get_existing(buffer_id)
+                })?;
+                let position = request
+                    .position
+                    .and_then(language::proto::deserialize_anchor)
+                    .context("Invalid symbol query position")?;
+                let version = language::proto::deserialize_version(&request.version);
+                trace.record(
+                    "buffer_sync",
+                    format_args!(
+                        "file={:?}",
+                        buffer.read_with(&cx, |buffer, cx| buffer.file().map(|file| file
+                            .file_system_abs_path(cx)
+                            .unwrap_or_else(|| file.full_path(cx))))
+                    ),
+                );
+                buffer
+                    .update(&mut cx, |buffer, _| buffer.wait_for_version(version))
+                    .await?;
+                let offset =
+                    buffer.read_with(&cx, |buffer, _| position.to_offset(&buffer.snapshot()));
+                let mut response = proto::GetSyntaxSymbolsResponse::default();
+                match kind {
+                    Kind::Definition | Kind::Declaration => {
+                        let locations = this
+                            .update(&mut cx, |store, cx| {
+                                store.syntax_definitions(
+                                    &buffer,
+                                    offset,
+                                    kind == Kind::Declaration,
+                                    trace.clone(),
+                                    cx,
+                                )
+                            })
+                            .await?
+                            .unwrap_or_default();
+                        this.update(&mut cx, |store, cx| {
+                            let version = buffer.read(cx).version();
+                            if kind == Kind::Definition {
+                                response.definitions = Some(GetDefinitions::response_to_proto(
+                                    locations, store, peer_id, &version, cx,
+                                ));
+                            } else {
+                                response.declarations = Some(GetDeclarations::response_to_proto(
+                                    locations, store, peer_id, &version, cx,
+                                ));
+                            }
                         });
                     }
-                    let core = CoreCompletionResponse {
-                        completions,
-                        is_incomplete: true,
-                    };
-                    response.completions = Some(this.update(&mut cx, |store, cx| {
-                        GetCompletions::response_to_proto(
-                            core,
-                            store,
-                            peer_id,
-                            &buffer.read(cx).version(),
-                            cx,
-                        )
-                    }));
+                    Kind::References => {
+                        let locations = this
+                            .update(&mut cx, |store, cx| {
+                                store.syntax_references(&buffer, offset, trace.clone(), cx)
+                            })
+                            .await?
+                            .unwrap_or_default();
+                        response.references = Some(this.update(&mut cx, |store, cx| {
+                            GetReferences::response_to_proto(
+                                locations,
+                                store,
+                                peer_id,
+                                &buffer.read(cx).version(),
+                                cx,
+                            )
+                        }));
+                    }
+                    Kind::Completions => {
+                        let responses = this
+                            .update(&mut cx, |store, cx| {
+                                store.syntax_completions(&buffer, offset, trace.clone(), cx)
+                            })
+                            .await?;
+                        let mut completions = Vec::new();
+                        for completion in responses
+                            .into_iter()
+                            .flat_map(|response| response.completions)
+                        {
+                            response.completion_labels.push(completion.label.text);
+                            completions.push(CoreCompletion {
+                                replace_range: completion.replace_range,
+                                new_text: completion.new_text,
+                                source: completion.source,
+                            });
+                        }
+                        let core = CoreCompletionResponse {
+                            completions,
+                            is_incomplete: true,
+                        };
+                        response.completions = Some(this.update(&mut cx, |store, cx| {
+                            GetCompletions::response_to_proto(
+                                core,
+                                store,
+                                peer_id,
+                                &buffer.read(cx).version(),
+                                cx,
+                            )
+                        }));
+                    }
                 }
-            }
-            anyhow::Ok(response)
-        }
+                anyhow::Ok(response)
+            },
+            registration,
+        )
         .await;
+        drop(query_registration);
+        let result = match result {
+            Ok(result) => result,
+            Err(_) => {
+                trace.finish("cancelled", format_args!("reason=client_cancelled"));
+                return Err(anyhow::anyhow!("Syntax query cancelled"));
+            }
+        };
         match &result {
             Ok(_) => trace.finish("complete", format_args!("response_ready=true")),
             Err(error) => trace.finish("failed", format_args!("error={error:#}")),
         }
         result
+    }
+
+    pub(super) async fn handle_cancel_syntax_symbols(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::CancelSyntaxSymbols>,
+        mut cx: gpui::AsyncApp,
+    ) -> Result<()> {
+        let id = envelope.payload.trace_id;
+        anyhow::ensure!(
+            !id.is_empty()
+                && id.len() <= 64
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+            "Invalid syntax cancellation id"
+        );
+        let abort = this.update(&mut cx, |store, _| {
+            let mut queries = store.symbol_index.remote_queries.lock();
+            if let Some(abort) = queries.active.get(&id) {
+                return Some(abort.clone());
+            }
+            // Cancellation can overtake the queued background request.
+            if !queries.cancelled.contains(&id) {
+                if queries.cancelled.len() == 512 {
+                    queries.cancelled.pop_front();
+                }
+                queries.cancelled.push_back(id);
+            }
+            None
+        });
+        if let Some(abort) = abort {
+            abort.abort();
+        }
+        Ok(())
     }
 
     pub(super) fn syntax_language_supported(&self, buffer: &Entity<Buffer>, cx: &App) -> bool {
@@ -361,23 +593,67 @@ impl LspStore {
         self.as_local().is_some() && self.syntax_language_supported(buffer, cx)
     }
 
-    pub(super) fn warm_symbol_index(&mut self, cx: &mut Context<Self>) {
-        let Some(buffer) = self
-            .buffer_store()
-            .read(cx)
-            .buffers()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .find(|buffer| self.supports_syntax_symbols(buffer, cx))
-        else {
-            return;
-        };
-        let task = self.prepare_symbol_index(&buffer, None, cx);
-        self.symbol_index.warm_task = Some(cx.background_spawn(async move {
-            if let Err(error) = task.await {
-                log::warn!("Building syntax symbol index: {error:#}");
+    fn prepare_symbol_query(
+        &self,
+        buffer: &Entity<Buffer>,
+        offset: usize,
+        completion: bool,
+        trace: SymbolQueryTrace,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Option<Arc<ProjectIndex>>>> {
+        let snapshot = buffer.read(cx).snapshot();
+        let path = project_path(buffer, cx);
+        let cache = self.symbol_index.cache.clone();
+        let validation = cx.background_spawn({
+            let snapshot = snapshot.clone();
+            async move {
+                let language = snapshot
+                    .language()
+                    .context("No language for syntax index")?;
+                let stamp = format!(
+                    "buffer:{:?}:{:?}:{:?}",
+                    snapshot.remote_id(),
+                    snapshot.version(),
+                    language.id()
+                );
+                let document = path
+                    .as_ref()
+                    .and_then(|path| cache.lock().get(path, &stamp));
+                let document = match document {
+                    Some(document) => document,
+                    None => {
+                        let document = index_snapshot(&snapshot, language, path.as_ref())?;
+                        if let Some(path) = path {
+                            cache.lock().insert(path, stamp, document.clone(), true);
+                        }
+                        document
+                    }
+                };
+                anyhow::Ok(if completion {
+                    document.completion_context(offset).is_some()
+                } else {
+                    document.occurrence_at(offset).is_some()
+                })
             }
-        }));
+        });
+        let buffer = buffer.clone();
+        cx.spawn(async move |store, cx| {
+            if !validation.await? {
+                trace.record(
+                    "skipped",
+                    format_args!("reason=no_identifier_at_position offset={offset}"),
+                );
+                return Ok(None);
+            }
+            let task = store.update(cx, |store, cx| {
+                if buffer.read(cx).version() != *snapshot.version() {
+                    return Task::ready(Ok(None));
+                }
+                let task = store.prepare_symbol_index(&buffer, Some(trace.clone()), cx);
+                cx.background_spawn(async move { task.await.map(Some) })
+            })?;
+            task.await
+        })
     }
 
     fn prepare_symbol_index(
@@ -385,7 +661,7 @@ impl LspStore {
         source: &Entity<Buffer>,
         trace: Option<SymbolQueryTrace>,
         cx: &mut Context<Self>,
-    ) -> Task<Result<ProjectIndex>> {
+    ) -> Task<Result<Arc<ProjectIndex>>> {
         let source_snapshot = source.read(cx).snapshot();
         let source_path = project_path(source, cx);
         let overlays: HashMap<_, _> = self
@@ -410,287 +686,320 @@ impl LspStore {
             )));
         };
         let cache = self.symbol_index.cache.clone();
-        cx.background_spawn(async move {
-            let mut statistics = IndexStatistics::default();
-            let mut last_progress = Instant::now();
-            if let Some(trace) = &trace {
-                trace.record(
-                    "index_start",
-                    format_args!("worktrees={} overlays={}", worktrees.len(), overlays.len()),
-                );
-            }
-            let mut files = Vec::new();
-            let mut seen = HashSet::default();
-            let mut active_languages: HashMap<_, Arc<Language>> = HashMap::default();
-            for snapshot in std::iter::once(&source_snapshot).chain(overlays.values()) {
-                if let Some(language) = snapshot.language().filter(|language| {
-                    SymbolLanguage::for_name(language.name().as_ref()).is_some()
-                        && language.grammar().is_some()
-                }) {
-                    active_languages.insert(language.id(), language.clone());
-                }
-            }
-            for name in ["C++", "Java", "Kotlin"] {
-                if languages.available_language_for_name(name).is_none() {
-                    continue;
-                }
-                match languages.language_for_name(name).await {
-                    Ok(language) => {
-                        if language.grammar().is_some() {
-                            active_languages.insert(language.id(), language);
-                        }
-                    }
-                    Err(error) => {
-                        log::warn!("Loading {name} grammar for syntax index: {error:#}");
-                    }
-                }
-            }
-            let source_language = source_snapshot
-                .language()
-                .context("No language for syntax index")?;
-            let source_stamp = format!(
-                "buffer:{:?}:{:?}:{:?}",
-                source_snapshot.remote_id(),
-                source_snapshot.version(),
-                source_language.id()
-            );
-            let source_document = source_path.as_ref().and_then(|path| {
-                cache
-                    .lock()
-                    .get(path)
-                    .filter(|cached| cached.stamp == source_stamp)
-                    .map(|cached| cached.document.clone())
-            });
-            statistics.cache_hits += usize::from(source_document.is_some());
-            let source_document = match source_document {
-                Some(document) => document,
-                None => {
-                    let document =
-                        index_snapshot(&source_snapshot, source_language, source_path.as_ref())?;
-                    if let Some(path) = &source_path {
-                        cache.lock().insert(
-                            path.clone(),
-                            CachedDocument {
-                                stamp: source_stamp,
-                                document: document.clone(),
-                            },
-                        );
-                    }
-                    document
-                }
-            };
-            files.push(IndexedFile {
-                path: source_path.clone(),
-                document: source_document,
-            });
-            if let Some(trace) = &trace {
-                trace.record(
-                    "source_ready",
-                    format_args!(
-                        "file={:?} symbols={} occurrences={} bytes={}",
-                        source_path,
-                        files[0].document.symbols.len(),
-                        files[0].document.occurrences.len(),
-                        files[0].document.text.len()
-                    ),
-                );
-            }
-            if let Some(path) = &source_path {
-                seen.insert(path.clone());
-            }
-
-            // Open buffers take precedence even when their disk entry is missing or ignored.
-            for (path, snapshot) in &overlays {
-                if seen.contains(path) {
-                    continue;
-                }
-                seen.insert(path.clone());
-                let Some(language) = snapshot.language().filter(|language| {
-                    SymbolLanguage::for_name(language.name().as_ref()).is_some()
-                        && language.grammar().is_some()
-                }) else {
-                    continue;
-                };
-                let stamp = format!(
-                    "buffer:{:?}:{:?}:{:?}",
-                    snapshot.remote_id(),
+        let jobs = self.symbol_index.jobs.clone();
+        let mut overlay_keys: Vec<_> = overlays
+            .iter()
+            .map(|(path, snapshot)| {
+                format!(
+                    "{path:?}:{:?}:{:?}",
                     snapshot.version(),
-                    language.id()
-                );
-                let document = cache
-                    .lock()
-                    .get(path)
-                    .filter(|cached| cached.stamp == stamp)
-                    .map(|cached| cached.document.clone());
-                statistics.cache_hits += usize::from(document.is_some());
-                let document = match document {
-                    Some(document) => document,
-                    None => {
-                        let document = match index_snapshot(snapshot, language, Some(path)) {
-                            Ok(document) => document,
-                            Err(error) => {
-                                log::warn!("Indexing open buffer {:?}: {error:#}", path.path);
-                                continue;
-                            }
-                        };
-                        cache.lock().insert(
-                            path.clone(),
-                            CachedDocument {
-                                stamp,
-                                document: document.clone(),
-                            },
-                        );
-                        document
-                    }
-                };
-                files.push(IndexedFile {
-                    path: Some(path.clone()),
-                    document,
-                });
-                seen.insert(path.clone());
+                    snapshot.language().map(|language| language.id())
+                )
+            })
+            .collect();
+        overlay_keys.sort();
+        let mut state = jobs.lock();
+        let key = format!(
+            "{}:{source_path:?}:{:?}:{:?}:{:?}:{overlay_keys:?}",
+            state.generation,
+            source_snapshot.remote_id(),
+            source_snapshot.version(),
+            source_snapshot.language().map(|language| language.id())
+        );
+        state
+            .pending
+            .retain(|_, job| job.task.upgrade().is_some() || job.ready.upgrade().is_some());
+        if let Some(job) = state.pending.get(&key) {
+            if let Some(trace) = &trace {
+                trace.record("index_join", format_args!("scan_request={}", job.trace_id));
             }
-
-            let mut live_paths = seen.clone();
-            for worktree in worktrees {
-                for entry in worktree.files(false, 0) {
-                    statistics.scanned += 1;
-                    if statistics.scanned.is_multiple_of(256)
-                        && last_progress.elapsed().as_secs() >= 1
-                    {
-                        if let Some(trace) = &trace {
-                            trace.record(
-                                "index_progress",
-                                format_args!(
-                                    "scanned={} indexed={} disk_reads={} cache_hits={}",
-                                    statistics.scanned,
-                                    files.len(),
-                                    statistics.disk_reads,
-                                    statistics.cache_hits
-                                ),
-                            );
+            if let Some(ready) = job.ready.upgrade() {
+                return Task::ready(Ok(ready));
+            }
+            if let Some(task) = job.task.upgrade() {
+                return cx.background_spawn(async move {
+                    task.await.map_err(|error| anyhow::anyhow!("{error:#}"))
+                });
+            }
+        }
+        let scan_trace_id = trace
+            .as_ref()
+            .map_or_else(String::new, |trace| trace.0.id.clone());
+        let build_lock = self.symbol_index.build_lock.clone();
+        let task: SharedIndex = cx.background_spawn({
+            let jobs = jobs.clone();
+            let key = key.clone();
+            async move {
+                let _build_guard = build_lock.lock().await;
+                let result: Result<ProjectIndex> = async move {
+                    let mut statistics = IndexStatistics::default();
+                    let mut last_progress = Instant::now();
+                    if let Some(trace) = &trace {
+                        trace.record(
+                            "index_start",
+                            format_args!("worktrees={} overlays={}", worktrees.len(), overlays.len()),
+                        );
+                    }
+                    let mut files = Vec::new();
+                    let mut seen = HashSet::default();
+                    let mut active_languages: HashMap<_, Arc<Language>> = HashMap::default();
+                    for snapshot in std::iter::once(&source_snapshot).chain(overlays.values()) {
+                        if let Some(language) = snapshot.language().filter(|language| {
+                            SymbolLanguage::for_name(language.name().as_ref()).is_some()
+                                && language.grammar().is_some()
+                        }) {
+                            active_languages.insert(language.id(), language.clone());
                         }
-                        last_progress = Instant::now();
                     }
-                    if entry.is_external || entry.is_private || entry.is_fifo {
-                        statistics.skipped_external_or_private += 1;
-                        continue;
+                    for name in ["C++", "Java", "Kotlin"] {
+                        if languages.available_language_for_name(name).is_none() {
+                            continue;
+                        }
+                        match languages.language_for_name(name).await {
+                            Ok(language) => {
+                                if language.grammar().is_some() {
+                                    active_languages.insert(language.id(), language);
+                                }
+                            }
+                            Err(error) => {
+                                log::warn!("Loading {name} grammar for syntax index: {error:#}");
+                            }
+                        }
                     }
-                    if entry.size > MAX_FILE_BYTES {
-                        statistics.skipped_size += 1;
-                        continue;
-                    }
-                    let path = ProjectPath {
-                        worktree_id: worktree.id(),
-                        path: entry.path.clone(),
-                    };
-                    live_paths.insert(path.clone());
-                    if seen.contains(&path) {
-                        continue;
-                    }
-                    let absolute_path = worktree.abs_path().join(entry.path.as_std_path());
-                    let Some(language_id) = languages.language_for_file_path(&absolute_path) else {
-                        continue;
-                    };
-                    let Some(language) = active_languages.get(&language_id) else {
-                        continue;
-                    };
-                    let stamp = format!(
-                        "disk:{:?}:{}:{}:{:?}",
-                        entry.mtime,
-                        entry.size,
-                        entry.inode,
-                        language.id()
+                    let source_language = source_snapshot
+                        .language()
+                        .context("No language for syntax index")?;
+                    let source_stamp = format!(
+                        "buffer:{:?}:{:?}:{:?}",
+                        source_snapshot.remote_id(),
+                        source_snapshot.version(),
+                        source_language.id()
                     );
-                    let document = cache
-                        .lock()
-                        .get(&path)
-                        .filter(|cached| cached.stamp == stamp && entry.mtime.is_some())
-                        .map(|cached| cached.document.clone());
-                    statistics.cache_hits += usize::from(document.is_some());
-                    let document = match document {
+                    let source_document = source_path.as_ref().and_then(|path| {
+                        cache.lock().get(path, &source_stamp)
+                    });
+                    statistics.cache_hits += usize::from(source_document.is_some());
+                    let source_document = match source_document {
                         Some(document) => document,
                         None => {
-                            statistics.disk_reads += 1;
-                            let bytes = match fs.load_bytes(&absolute_path).await {
-                                Ok(bytes) => bytes,
-                                Err(error) => {
-                                    statistics.read_errors += 1;
-                                    log::warn!(
-                                        "Reading syntax index file {}: {error:#}",
-                                        absolute_path.display()
-                                    );
-                                    continue;
-                                }
-                            };
-                            if bytes.len() as u64 > MAX_FILE_BYTES {
-                                statistics.skipped_size += 1;
-                                continue;
+                            let document =
+                                index_snapshot(&source_snapshot, source_language, source_path.as_ref())?;
+                            if let Some(path) = &source_path {
+                                cache.lock().insert(path.clone(), source_stamp, document.clone(), true);
                             }
-                            let mut text = match file_content::decode_text(bytes) {
-                                Ok(decoded) => decoded.text,
-                                Err(error) => {
-                                    statistics.decode_errors += 1;
-                                    log::warn!(
-                                        "Decoding syntax index file {}: {error:#}",
-                                        absolute_path.display()
-                                    );
-                                    continue;
-                                }
-                            };
-                            language::LineEnding::normalize(&mut text);
-                            let document = match index_text(&text, language, Some(&path)) {
-                                Ok(document) => document,
-                                Err(error) => {
-                                    statistics.analysis_errors += 1;
-                                    log::warn!("Indexing {}: {error:#}", absolute_path.display());
-                                    continue;
-                                }
-                            };
-                            cache.lock().insert(
-                                path.clone(),
-                                CachedDocument {
-                                    stamp,
-                                    document: document.clone(),
-                                },
-                            );
                             document
                         }
                     };
                     files.push(IndexedFile {
-                        path: Some(path.clone()),
-                        document,
+                        path: source_path.clone(),
+                        document: source_document,
                     });
-                    seen.insert(path);
+                    if let Some(trace) = &trace {
+                        trace.record(
+                            "source_ready",
+                            format_args!(
+                                "file={:?} symbols={} occurrences={} bytes={}",
+                                source_path,
+                                files[0].document.symbols.len(),
+                                files[0].document.occurrences.len(),
+                                files[0].document.text.len()
+                            ),
+                        );
+                    }
+                    if let Some(path) = &source_path {
+                        seen.insert(path.clone());
+                    }
+
+                    // Open buffers take precedence even when their disk entry is missing or ignored.
+                    for (path, snapshot) in &overlays {
+                        if seen.contains(path) {
+                            continue;
+                        }
+                        seen.insert(path.clone());
+                        let Some(language) = snapshot.language().filter(|language| {
+                            SymbolLanguage::for_name(language.name().as_ref()).is_some()
+                                && language.grammar().is_some()
+                        }) else {
+                            continue;
+                        };
+                        let stamp = format!(
+                            "buffer:{:?}:{:?}:{:?}",
+                            snapshot.remote_id(),
+                            snapshot.version(),
+                            language.id()
+                        );
+                        let document = cache.lock().get(path, &stamp);
+                        statistics.cache_hits += usize::from(document.is_some());
+                        let document = match document {
+                            Some(document) => document,
+                            None => {
+                                let document = match index_snapshot(snapshot, language, Some(path)) {
+                                    Ok(document) => document,
+                                    Err(error) => {
+                                        log::warn!("Indexing open buffer {:?}: {error:#}", path.path);
+                                        continue;
+                                    }
+                                };
+                                cache.lock().insert(path.clone(), stamp, document.clone(), true);
+                                document
+                            }
+                        };
+                        files.push(IndexedFile {
+                            path: Some(path.clone()),
+                            document,
+                        });
+                        seen.insert(path.clone());
+                    }
+
+                    let mut live_paths = seen.clone();
+                    for worktree in worktrees {
+                        for entry in worktree.files(false, 0) {
+                            statistics.scanned += 1;
+                            if statistics.scanned.is_multiple_of(64) {
+                                smol::future::yield_now().await;
+                            }
+                            if statistics.scanned.is_multiple_of(256)
+                                && last_progress.elapsed().as_secs() >= 1
+                            {
+                                if let Some(trace) = &trace {
+                                    trace.record(
+                                        "index_progress",
+                                        format_args!(
+                                            "scanned={} indexed={} disk_reads={} cache_hits={}",
+                                            statistics.scanned,
+                                            files.len(),
+                                            statistics.disk_reads,
+                                            statistics.cache_hits
+                                        ),
+                                    );
+                                }
+                                last_progress = Instant::now();
+                            }
+                            if entry.is_external || entry.is_private || entry.is_fifo {
+                                statistics.skipped_external_or_private += 1;
+                                continue;
+                            }
+                            if entry.size > MAX_FILE_BYTES {
+                                statistics.skipped_size += 1;
+                                continue;
+                            }
+                            let path = ProjectPath {
+                                worktree_id: worktree.id(),
+                                path: entry.path.clone(),
+                            };
+                            live_paths.insert(path.clone());
+                            if seen.contains(&path) {
+                                continue;
+                            }
+                            let absolute_path = worktree.abs_path().join(entry.path.as_std_path());
+                            let Some(language_id) = languages.language_for_file_path(&absolute_path) else {
+                                continue;
+                            };
+                            let Some(language) = active_languages.get(&language_id) else {
+                                continue;
+                            };
+                            let stamp = format!(
+                                "disk:{:?}:{}:{}:{:?}",
+                                entry.mtime,
+                                entry.size,
+                                entry.inode,
+                                language.id()
+                            );
+                            let document = entry.mtime.and_then(|_| cache.lock().get(&path, &stamp));
+                            statistics.cache_hits += usize::from(document.is_some());
+                            let document = match document {
+                                Some(document) => document,
+                                None => {
+                                    statistics.disk_reads += 1;
+                                    let bytes = match fs.load_bytes(&absolute_path).await {
+                                        Ok(bytes) => bytes,
+                                        Err(error) => {
+                                            statistics.read_errors += 1;
+                                            log::warn!(
+                                                "Reading syntax index file {}: {error:#}",
+                                                absolute_path.display()
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    if bytes.len() as u64 > MAX_FILE_BYTES {
+                                        statistics.skipped_size += 1;
+                                        continue;
+                                    }
+                                    let mut text = match file_content::decode_text(bytes) {
+                                        Ok(decoded) => decoded.text,
+                                        Err(error) => {
+                                            statistics.decode_errors += 1;
+                                            log::warn!(
+                                                "Decoding syntax index file {}: {error:#}",
+                                                absolute_path.display()
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    language::LineEnding::normalize(&mut text);
+                                    let document = match index_text(&text, language, Some(&path)) {
+                                        Ok(document) => document,
+                                        Err(error) => {
+                                            statistics.analysis_errors += 1;
+                                            log::warn!("Indexing {}: {error:#}", absolute_path.display());
+                                            continue;
+                                        }
+                                    };
+                                    cache.lock().insert(path.clone(), stamp, document.clone(), false);
+                                    document
+                                }
+                            };
+                            files.push(IndexedFile {
+                                path: Some(path.clone()),
+                                document,
+                            });
+                            seen.insert(path);
+                        }
+                    }
+                    files[1..].sort_by(|left, right| left.path.cmp(&right.path));
+                    let mut cache = cache.lock();
+                    cache.retain(&live_paths);
+                    let cache_bytes = cache.bytes;
+                    statistics.indexed = files.len();
+                    if let Some(trace) = &trace {
+                        trace.record(
+                            "index_ready",
+                            format_args!(
+                                "statistics={statistics:?} cache_bytes={} cache_evictions={} cache_admission_skipped={}",
+                                cache_bytes,
+                                cache.evictions,
+                                cache.admission_skipped
+                            ),
+                        );
+                    }
+                    Ok(ProjectIndex {
+                        files,
+                        source: 0,
+                        source_snapshot,
+                    })
+                }.await;
+                let result = result.map(Arc::new).map_err(Arc::new);
+                if let Ok(index) = &result {
+                    if let Some(job) = jobs.lock().pending.get_mut(&key) {
+                        job.ready = Arc::downgrade(index);
+                    }
                 }
+                result
             }
-            files[1..].sort_by(|left, right| left.path.cmp(&right.path));
-            let mut cache = cache.lock();
-            cache.retain(|path, _| live_paths.contains(path));
-            let cache_bytes = cache
-                .values()
-                .map(|cached| cached.document.memory_cost())
-                .sum::<usize>();
-            if cache_bytes > CACHE_BYTES {
-                // Query snapshots own their documents independently of the reusable cache.
-                cache.clear();
-            }
-            statistics.indexed = files.len();
-            if let Some(trace) = &trace {
-                trace.record(
-                    "index_ready",
-                    format_args!(
-                        "statistics={statistics:?} cache_bytes={} cache_evicted={}",
-                        cache_bytes,
-                        cache_bytes > CACHE_BYTES
-                    ),
-                );
-            }
-            Ok(ProjectIndex {
-                files,
-                source: 0,
-                source_snapshot,
-            })
-        })
+        }).shared();
+        if let Some(weak_task) = task.downgrade() {
+            state.pending.insert(
+                key,
+                IndexJob {
+                    task: weak_task,
+                    ready: Weak::new(),
+                    trace_id: scan_trace_id,
+                },
+            );
+        }
+        drop(state);
+        cx.background_spawn(async move { task.await.map_err(|error| anyhow::anyhow!("{error:#}")) })
     }
 
     pub(super) fn syntax_definitions(
@@ -752,10 +1061,12 @@ impl LspStore {
             );
             return Task::ready(Ok(None));
         }
-        let task = self.prepare_symbol_index(buffer, Some(trace.clone()), cx);
+        let task = self.prepare_symbol_query(buffer, offset, false, trace.clone(), cx);
         let buffer = buffer.clone();
         cx.spawn(async move |project, cx| {
-            let prepared = task.await?;
+            let Some(prepared) = task.await? else {
+                return Ok(None);
+            };
             let snapshot = prepared.source_snapshot.clone();
             let resolution_trace = trace.clone();
             let resolved = cx
@@ -912,10 +1223,12 @@ impl LspStore {
             );
             return Task::ready(Ok(None));
         }
-        let task = self.prepare_symbol_index(buffer, Some(trace.clone()), cx);
+        let task = self.prepare_symbol_query(buffer, offset, false, trace.clone(), cx);
         let buffer = buffer.clone();
         cx.spawn(async move |project, cx| {
-            let prepared = task.await?;
+            let Some(prepared) = task.await? else {
+                return Ok(None);
+            };
             let source_snapshot = prepared.source_snapshot.clone();
             let resolution_trace = trace.clone();
             let (prepared, references) = cx
@@ -1110,10 +1423,12 @@ impl LspStore {
             );
             return Task::ready(Ok(Vec::new()));
         }
-        let task = self.prepare_symbol_index(buffer, Some(trace.clone()), cx);
+        let task = self.prepare_symbol_query(buffer, offset, true, trace.clone(), cx);
         let buffer = buffer.clone();
         cx.spawn(async move |_, cx| {
-            let prepared = task.await?;
+            let Some(prepared) = task.await? else {
+                return Ok(Vec::new());
+            };
             let source_snapshot = prepared.source_snapshot.clone();
             let resolution_trace = trace.clone();
             let completions = cx
@@ -1233,3 +1548,6 @@ fn index_path(path: Option<&ProjectPath>) -> Option<String> {
 fn bounded_name(name: &str) -> String {
     name.chars().take(128).collect()
 }
+
+#[cfg(test)]
+mod tests;

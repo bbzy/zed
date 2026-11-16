@@ -4846,6 +4846,7 @@ impl LspStore {
     pub fn init(client: &AnyProtoClient) {
         client.add_entity_request_handler(Self::handle_lsp_query);
         client.add_entity_request_handler(Self::handle_get_syntax_symbols);
+        client.add_entity_message_handler(Self::handle_cancel_syntax_symbols);
         client.add_entity_message_handler(Self::handle_lsp_query_response);
         client.add_entity_request_handler(Self::handle_restart_language_servers);
         client.add_entity_request_handler(Self::handle_stop_language_servers);
@@ -5130,7 +5131,6 @@ impl LspStore {
         match event {
             BufferStoreEvent::BufferAdded(buffer) => {
                 self.on_buffer_added(buffer, cx).log_err();
-                self.warm_symbol_index(cx);
             }
             BufferStoreEvent::BufferChangedFilePath { buffer, old_file } => {
                 let buffer_id = buffer.read(cx).remote_id();
@@ -5167,7 +5167,17 @@ impl LspStore {
         event: &WorktreeStoreEvent,
         cx: &mut Context<Self>,
     ) {
-        self.warm_symbol_index(cx);
+        if matches!(
+            event,
+            WorktreeStoreEvent::WorktreeAdded(..)
+                | WorktreeStoreEvent::WorktreeRemoved(..)
+                | WorktreeStoreEvent::WorktreeReleased(..)
+                | WorktreeStoreEvent::WorktreeUpdatedEntries(..)
+                | WorktreeStoreEvent::WorktreeDeletedEntry(..)
+        ) {
+            let mut jobs = self.symbol_index.jobs.lock();
+            jobs.generation = jobs.generation.wrapping_add(1);
+        }
         match event {
             WorktreeStoreEvent::WorktreeAdded(worktree) => {
                 if !worktree.read(cx).is_local() {
@@ -5815,7 +5825,6 @@ impl LspStore {
             }
         }
 
-        self.warm_symbol_index(cx);
         cx.emit(LspStoreEvent::LanguageDetected {
             buffer: buffer_entity.clone(),
             new_language: Some(new_language),

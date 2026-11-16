@@ -10,7 +10,11 @@ use util::rel_path::rel_path;
 async fn setup(
     cx: &mut TestAppContext,
     server_cx: &mut TestAppContext,
-) -> (Entity<Project>, Entity<Buffer>) {
+) -> (
+    Entity<Project>,
+    Entity<Buffer>,
+    Entity<crate::HeadlessProject>,
+) {
     let fs = FakeFs::new(server_cx.executor());
     fs.insert_tree(
         "/remote-symbols",
@@ -63,7 +67,7 @@ async fn setup(
         .await
         .unwrap();
     cx.run_until_parked();
-    (project, buffer)
+    (project, buffer, headless)
 }
 
 #[gpui::test(iterations = 10)]
@@ -71,7 +75,7 @@ async fn syntax_symbols_remote_navigation_references_and_completions(
     cx: &mut TestAppContext,
     server_cx: &mut TestAppContext,
 ) {
-    let (project, buffer) = setup(cx, server_cx).await;
+    let (project, buffer, _) = setup(cx, server_cx).await;
     let offset = buffer.read_with(cx, |buffer, _| buffer.text().rfind("reset").unwrap());
     let definitions = project
         .update(cx, |project, cx| project.definitions(&buffer, offset, cx))
@@ -136,7 +140,7 @@ async fn syntax_symbols_remote_unsaved_overlays_and_missing_symbols(
     cx: &mut TestAppContext,
     server_cx: &mut TestAppContext,
 ) {
-    let (project, buffer) = setup(cx, server_cx).await;
+    let (project, buffer, _) = setup(cx, server_cx).await;
     let header = project
         .update(cx, |project, cx| {
             project.open_local_buffer("/remote-symbols/include/widget.hpp", cx)
@@ -172,4 +176,110 @@ async fn syntax_symbols_remote_unsaved_overlays_and_missing_symbols(
                 .is_none()
         );
     }
+}
+
+#[gpui::test(iterations = 10)]
+async fn syntax_symbols_remote_duplicate_registration_preserves_live_buffer(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let (project, buffer, headless) = setup(cx, server_cx).await;
+    let buffers = project.read_with(cx, |project, _| project.buffer_store().clone());
+    let replica = project.read_with(cx, |project, _| project.replica_id());
+    let buffer_id = buffer.read_with(cx, |buffer, _| buffer.remote_id());
+    assert_eq!(
+        headless.read_with(server_cx, |project, cx| project
+            .buffer_store
+            .read(cx)
+            .buffers()
+            .count()),
+        1
+    );
+    let state = buffer.update(cx, |buffer, cx| buffer.to_proto(cx));
+    for variant in [
+        rpc::proto::create_buffer_for_peer::Variant::State(state),
+        rpc::proto::create_buffer_for_peer::Variant::Chunk(rpc::proto::BufferChunk {
+            buffer_id: buffer_id.into(),
+            operations: Vec::new(),
+            is_last: true,
+        }),
+    ] {
+        buffers
+            .update(cx, |store, cx| {
+                store.handle_create_buffer_for_peer(
+                    client::TypedEnvelope {
+                        sender_id: rpc::proto::PeerId::default(),
+                        original_sender_id: None,
+                        message_id: 1,
+                        payload: rpc::proto::CreateBufferForPeer {
+                            project_id: 0,
+                            peer_id: None,
+                            variant: Some(variant),
+                        },
+                        received_at: std::time::Instant::now(),
+                    },
+                    replica,
+                    language::Capability::ReadWrite,
+                    cx,
+                )
+            })
+            .unwrap();
+    }
+    cx.run_until_parked();
+    assert_eq!(
+        buffers.read_with(cx, |store, _| store.get(buffer_id)),
+        Some(buffer.clone())
+    );
+    assert!(headless.read_with(server_cx, |project, cx| {
+        project.buffer_store.read(cx).has_shared_buffers()
+    }));
+    let offset = buffer.read_with(cx, |buffer, _| buffer.text().rfind("reset").unwrap());
+    assert!(
+        project
+            .update(cx, |project, cx| project.definitions(&buffer, offset, cx))
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[gpui::test]
+async fn syntax_symbols_remote_cancellation_reaches_server(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let (project, buffer, _) = setup(cx, server_cx).await;
+    let remote = project.read_with(cx, |project, _| project.remote_client().unwrap());
+    let client = remote.read_with(cx, |remote, _| remote.proto_client());
+    let request = buffer.read_with(cx, |buffer, _| rpc::proto::GetSyntaxSymbols {
+        project_id: 0,
+        buffer_id: buffer.remote_id().into(),
+        position: Some(language::proto::serialize_anchor(&buffer.anchor_before(0))),
+        version: vec![rpc::proto::VectorClockEntry {
+            replica_id: 42,
+            timestamp: 1,
+        }],
+        kind: rpc::proto::get_syntax_symbols::Kind::Definition.into(),
+        trace_id: "wire-cancel".into(),
+    });
+    let task = cx.executor().spawn({
+        let client = client.clone();
+        async move { client.request(request).await }
+    });
+    cx.run_until_parked();
+    client
+        .send(rpc::proto::CancelSyntaxSymbols {
+            project_id: 0,
+            trace_id: "wire-cancel".into(),
+        })
+        .unwrap();
+    assert!(task.await.is_err());
+    let offset = buffer.read_with(cx, |buffer, _| buffer.text().rfind("reset").unwrap());
+    assert!(
+        project
+            .update(cx, |project, cx| project.definitions(&buffer, offset, cx))
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
