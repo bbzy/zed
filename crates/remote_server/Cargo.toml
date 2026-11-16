@@ -46,7 +46,7 @@ json_schema_store.workspace = true
 kk_workbench.workspace = true
 language.workspace = true
 language_extension.workspace = true
-languages.workspace = true
+languages = { workspace = true, features = ["load-grammars"] }
 log.workspace = true
 lsp.workspace = true
 net.workspace = true
@@ -104,6 +104,7 @@ serde_json.workspace = true
 tempfile.workspace = true
 theme = { workspace = true, features = ["test-support"] }
 theme_settings.workspace = true
+tree-sitter-cpp.workspace = true
 unindent.workspace = true
 workspace = { workspace = true, features = ["test-support"] }
 zlog.workspace = true

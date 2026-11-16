@@ -2,6 +2,8 @@ mod headless_project;
 
 #[cfg(test)]
 mod remote_editing_tests;
+#[cfg(test)]
+mod symbol_index_tests;
 
 pub use headless_project::{HeadlessAppState, HeadlessProject};
 

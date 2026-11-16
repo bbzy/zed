@@ -81,6 +81,34 @@ fn completion_names(documents: &[Arc<Document>], source: usize, needle: &str) ->
 }
 
 #[test]
+fn cpp_resolution_diagnostics_explain_missing_targets() {
+    let documents = vec![document(
+        SymbolLanguage::Cpp,
+        "struct Widget { void reset(); }; struct Other {}; void run(Other other) { other.reset(); unknown.reset(); missing(); }",
+    )];
+    let index = Index::new(&documents);
+    for (needle, reason) in [
+        ("other.reset", "receiver_owner_mismatch"),
+        ("unknown.reset", "receiver_type_unresolved"),
+    ] {
+        let offset = documents[0].text.find(needle).unwrap() + needle.find('.').unwrap() + 1;
+        let occurrence = documents[0].occurrence_at(offset).unwrap();
+        let (locations, diagnostics) = index.resolve_with_diagnostics(0, &occurrence);
+        assert!(locations.is_empty());
+        assert_eq!(diagnostics.declarations_named, 1);
+        assert_eq!(diagnostics.rejected.get(reason), Some(&1));
+        assert_eq!(locations, index.resolve(0, &occurrence));
+    }
+    let occurrence = documents[0]
+        .occurrence_at(documents[0].text.find("missing").unwrap())
+        .unwrap();
+    let (locations, diagnostics) = index.resolve_with_diagnostics(0, &occurrence);
+    assert!(locations.is_empty());
+    assert_eq!(diagnostics.declarations_named, 0);
+    assert!(diagnostics.rejected.is_empty());
+}
+
+#[test]
 fn cpp_symbols_members_and_shadowing() {
     let documents = vec![document(
         SymbolLanguage::Cpp,

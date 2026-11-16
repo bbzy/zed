@@ -4613,6 +4613,7 @@ impl LspStoreMode {
 }
 
 pub struct LspStore {
+    pub(super) symbol_index: crate::symbol_index::SymbolIndexStore,
     mode: LspStoreMode,
     last_formatting_failure: Option<String>,
     downstream_client: Option<(AnyProtoClient, u64)>,
@@ -4844,6 +4845,7 @@ fn lsp_pull_cancelled_with_retrigger(error: &anyhow::Error) -> bool {
 impl LspStore {
     pub fn init(client: &AnyProtoClient) {
         client.add_entity_request_handler(Self::handle_lsp_query);
+        client.add_entity_request_handler(Self::handle_get_syntax_symbols);
         client.add_entity_message_handler(Self::handle_lsp_query_response);
         client.add_entity_request_handler(Self::handle_restart_language_servers);
         client.add_entity_request_handler(Self::handle_stop_language_servers);
@@ -4915,6 +4917,10 @@ impl LspStore {
         }
     }
 
+    pub(super) fn symbol_index_fs(&self) -> Option<Arc<dyn Fs>> {
+        self.as_local().map(|local| local.fs.clone())
+    }
+
     pub fn as_local(&self) -> Option<&LocalLspStore> {
         match &self.mode {
             LspStoreMode::Local(local_lsp_store) => Some(local_lsp_store),
@@ -4976,6 +4982,7 @@ impl LspStore {
         };
 
         Self {
+            symbol_index: Default::default(),
             mode: LspStoreMode::Local(LocalLspStore {
                 weak: cx.weak_entity(),
                 worktree_store: worktree_store.clone(),
@@ -5087,6 +5094,7 @@ impl LspStore {
             (Self::maintain_workspace_config(receiver, cx), sender)
         };
         Self {
+            symbol_index: Default::default(),
             mode: LspStoreMode::Remote(RemoteLspStore {
                 upstream_client: Some(upstream_client),
                 upstream_project_id: project_id,
@@ -5122,6 +5130,7 @@ impl LspStore {
         match event {
             BufferStoreEvent::BufferAdded(buffer) => {
                 self.on_buffer_added(buffer, cx).log_err();
+                self.warm_symbol_index(cx);
             }
             BufferStoreEvent::BufferChangedFilePath { buffer, old_file } => {
                 let buffer_id = buffer.read(cx).remote_id();
@@ -5158,6 +5167,7 @@ impl LspStore {
         event: &WorktreeStoreEvent,
         cx: &mut Context<Self>,
     ) {
+        self.warm_symbol_index(cx);
         match event {
             WorktreeStoreEvent::WorktreeAdded(worktree) => {
                 if !worktree.read(cx).is_local() {
@@ -5805,6 +5815,7 @@ impl LspStore {
             }
         }
 
+        self.warm_symbol_index(cx);
         cx.emit(LspStoreEvent::LanguageDetected {
             buffer: buffer_entity.clone(),
             new_language: Some(new_language),
@@ -5841,7 +5852,7 @@ impl LspStore {
         }
     }
 
-    fn is_capable_for_proto_request<R>(
+    pub(super) fn is_capable_for_proto_request<R>(
         &self,
         buffer: &Entity<Buffer>,
         request: &R,
@@ -16272,7 +16283,7 @@ fn deduplicate_hovers(hovers: Vec<Hover>) -> Vec<Hover> {
     unique_hovers
 }
 
-async fn populate_labels_for_completions(
+pub(super) async fn populate_labels_for_completions(
     new_completions: Vec<CoreCompletion>,
     language: Option<Arc<Language>>,
     lsp_adapter: Option<Arc<CachedLspAdapter>>,

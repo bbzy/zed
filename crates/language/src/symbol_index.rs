@@ -878,6 +878,13 @@ pub struct Index<'a> {
     dependency_sets: Vec<OnceCell<BTreeSet<usize>>>,
 }
 
+#[derive(Debug, Default)]
+pub struct ResolutionDiagnostics {
+    pub declarations_named: usize,
+    pub receiver_type: Option<String>,
+    pub rejected: BTreeMap<&'static str, usize>,
+}
+
 impl<'a> Index<'a> {
     pub fn new(documents: &'a [Arc<Document>]) -> Self {
         let mut symbols_by_name: BTreeMap<&str, Vec<SymbolLocation>> = BTreeMap::new();
@@ -944,7 +951,23 @@ impl<'a> Index<'a> {
     }
 
     pub fn resolve(&self, source: usize, occurrence: &Occurrence) -> Vec<SymbolLocation> {
-        let mut candidates = self.candidates(source, occurrence, false);
+        self.resolve_candidates(self.candidates(source, occurrence, false, None))
+    }
+
+    pub fn resolve_with_diagnostics(
+        &self,
+        source: usize,
+        occurrence: &Occurrence,
+    ) -> (Vec<SymbolLocation>, ResolutionDiagnostics) {
+        let mut diagnostics = ResolutionDiagnostics::default();
+        let candidates = self.candidates(source, occurrence, false, Some(&mut diagnostics));
+        (self.resolve_candidates(candidates), diagnostics)
+    }
+
+    fn resolve_candidates(
+        &self,
+        mut candidates: Vec<(usize, SymbolLocation)>,
+    ) -> Vec<SymbolLocation> {
         candidates.sort_by_key(|(rank, location)| (*rank, *location));
         let Some((best_rank, _)) = candidates.first() else {
             return Vec::new();
@@ -975,7 +998,7 @@ impl<'a> Index<'a> {
     }
 
     pub fn complete(&self, source: usize, occurrence: &Occurrence) -> Vec<SymbolLocation> {
-        let mut candidates = self.candidates(source, occurrence, true);
+        let mut candidates = self.candidates(source, occurrence, true, None);
         candidates.sort_by_key(|(rank, location)| (*rank, *location));
         let mut seen = BTreeSet::new();
         candidates
@@ -1032,6 +1055,7 @@ impl<'a> Index<'a> {
         source: usize,
         occurrence: &Occurrence,
         completion: bool,
+        mut diagnostics: Option<&mut ResolutionDiagnostics>,
     ) -> Vec<(usize, SymbolLocation)> {
         let Some(document) = self.documents.get(source) else {
             return Vec::new();
@@ -1081,7 +1105,20 @@ impl<'a> Index<'a> {
             }
             receiver.contains("::").then(|| receiver.clone())
         });
+        if let Some(diagnostics) = diagnostics.as_deref_mut() {
+            diagnostics.receiver_type = receiver.clone();
+            diagnostics.declarations_named = self
+                .symbols_by_name
+                .get(occurrence.name.as_str())
+                .map_or(0, Vec::len);
+        }
         if occurrence.receiver.is_some() && receiver.is_none() {
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                *diagnostics
+                    .rejected
+                    .entry("receiver_type_unresolved")
+                    .or_default() += 1;
+            }
             return Vec::new();
         }
         let mut matching = Vec::new();
@@ -1107,6 +1144,14 @@ impl<'a> Index<'a> {
         }
         matching.sort_unstable();
         matching.dedup();
+        if let Some(diagnostics) = diagnostics.as_deref_mut() {
+            diagnostics.declarations_named = matching.len();
+        }
+        let mut reject = |reason| {
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                *diagnostics.rejected.entry(reason).or_default() += 1;
+            }
+        };
         let mut candidates = Vec::new();
         for location in matching {
             let document_index = location.document;
@@ -1114,6 +1159,7 @@ impl<'a> Index<'a> {
             let candidate_document = &self.documents[document_index];
             let symbol = &candidate_document.symbols[symbol_index];
             if candidate_document.language != document.language {
+                reject("different_language");
                 continue;
             }
             let import_alias = document
@@ -1132,18 +1178,31 @@ impl<'a> Index<'a> {
                                 == qualify(&normalize(&candidate_document.package), &symbol.owner))
                 });
             let name = import_alias.unwrap_or(&symbol.name);
-            if (completion && !name.starts_with(&occurrence.name))
+            let reason = if (completion && !name.starts_with(&occurrence.name))
                 || (!completion && name != occurrence.name && symbol.name != occurrence.name)
-                || (occurrence.type_position && !symbol.kind.is_type())
-                || (occurrence.arity.is_some()
-                    && symbol.arity.is_some()
-                    && occurrence.arity != symbol.arity)
-                || (symbol.file_local
-                    && document_index != source
-                    && !self.dependencies_of(source).contains(&document_index))
-                || (symbol.private
-                    && (symbol.owner != *owner || document.package != candidate_document.package))
             {
+                Some("name_mismatch")
+            } else if occurrence.type_position && !symbol.kind.is_type() {
+                Some("not_a_type")
+            } else if occurrence.arity.is_some()
+                && symbol.arity.is_some()
+                && occurrence.arity != symbol.arity
+            {
+                Some("argument_count_mismatch")
+            } else if symbol.file_local
+                && document_index != source
+                && !self.dependencies_of(source).contains(&document_index)
+            {
+                Some("file_local_outside_dependencies")
+            } else if symbol.private
+                && (symbol.owner != *owner || document.package != candidate_document.package)
+            {
+                Some("private_outside_owner")
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                reject(reason);
                 continue;
             }
             if document.language == SymbolLanguage::Kotlin
@@ -1155,21 +1214,26 @@ impl<'a> Index<'a> {
                             && import.path == normalize(&candidate_document.package))
                 })
             {
+                reject("extension_not_imported");
                 continue;
             }
             let rank = if symbol.local {
                 if document_index != source || symbol.range.start > occurrence.range.start {
+                    reject("local_outside_file_or_before_declaration");
                     continue;
                 }
                 let Some(distance) = document.scope_distance(occurrence.scope, symbol.scope) else {
+                    reject("outside_lexical_scope");
                     continue;
                 };
                 if receiver.is_some() {
+                    reject("local_is_not_member");
                     continue;
                 }
                 distance
             } else if let Some(receiver) = &receiver {
                 if !self.owner_matches(source, receiver, document_index, &symbol.owner) {
+                    reject("receiver_owner_mismatch");
                     continue;
                 }
                 if qualify(&normalize(&candidate_document.package), &symbol.owner) == *receiver {
@@ -1187,6 +1251,7 @@ impl<'a> Index<'a> {
                 )
                 && !owner.starts_with(&format!("{}::", symbol.owner))
             {
+                reject("not_in_visible_owner");
                 continue;
             } else if !symbol.owner.is_empty() {
                 100
@@ -1205,6 +1270,7 @@ impl<'a> Index<'a> {
             {
                 300
             } else {
+                reject("not_imported");
                 continue;
             };
             candidates.push((

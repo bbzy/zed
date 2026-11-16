@@ -15022,6 +15022,7 @@ dependencies = [
  "theme_settings",
  "thiserror 2.0.17",
  "toml_edit 0.22.27",
+ "tree-sitter-cpp",
  "unindent",
  "util",
  "uuid",

@@ -4,6 +4,30 @@ package zed.messages;
 import "buffer.proto";
 import "core.proto";
 
+message GetSyntaxSymbols {
+  uint64 project_id = 1;
+  uint64 buffer_id = 2;
+  Anchor position = 3;
+  repeated VectorClockEntry version = 4;
+  Kind kind = 5;
+  string trace_id = 6;
+
+  enum Kind {
+    Definition = 0;
+    Declaration = 1;
+    References = 2;
+    Completions = 3;
+  }
+}
+
+message GetSyntaxSymbolsResponse {
+  GetDefinitionResponse definitions = 1;
+  GetDeclarationResponse declarations = 2;
+  GetReferencesResponse references = 3;
+  GetCompletionsResponse completions = 4;
+  repeated string completion_labels = 5;
+}
+
 message GetDefinition {
   uint64 project_id = 1;
   uint64 buffer_id = 2;
