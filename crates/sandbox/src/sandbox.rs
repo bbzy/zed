@@ -637,6 +637,9 @@ impl Sandbox {
     )]
     pub async fn execute(&mut self, command: &CommandAndArgs) -> Result<Output, SandboxError> {
         let wrapped = self.wrap(command).await?;
+        #[cfg(target_os = "macos")]
+        let mut process = gpui_util::new_std_command(&wrapped.program);
+        #[cfg(not(target_os = "macos"))]
         let mut process = std::process::Command::new(&wrapped.program);
         process.args(&wrapped.args).envs(&wrapped.env);
         if let Some(cwd) = &wrapped.cwd {

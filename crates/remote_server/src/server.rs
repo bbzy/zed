@@ -239,7 +239,7 @@ fn exec_command(
     program: impl AsRef<OsStr>,
     args: impl IntoIterator<Item = impl AsRef<OsStr>>,
 ) -> std::process::Command {
-    let mut command = std::process::Command::new(program);
+    let mut command = util::command::new_std_command(program);
     command.args(args);
     if let Some(working_dir) = working_dir {
         command.env("PWD", working_dir);

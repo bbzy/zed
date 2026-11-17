@@ -1109,6 +1109,9 @@ impl HeadlessProject {
 
         // Spawn kernel
         let spawn_kernel = |binary: &str, args: &[String]| {
+            #[cfg(target_os = "macos")]
+            let mut command = smol::process::Command::from(util::command::new_std_command(binary));
+            #[cfg(not(target_os = "macos"))]
             let mut command = smol::process::Command::new(binary);
 
             if !args.is_empty() {

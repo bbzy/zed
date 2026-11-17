@@ -2,17 +2,20 @@ use crate::history::{HISTORY_PAGE_SIZE, HistoryMode, HistoryPage, Revision};
 use crate::{Diagnostics, PerformanceContext};
 use anyhow::{Context as _, Result, bail, ensure};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use smol::process::Command;
+#[cfg(not(target_os = "macos"))]
+use smol::process::{Command, Stdio};
 use std::{
     collections::HashMap,
     path::{Component, Path, PathBuf},
-    process::{Output, Stdio},
+    process::Output,
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::Instant,
 };
+#[cfg(target_os = "macos")]
+use util::command::{Command, Stdio};
 
 const FILE_TEMPLATE: &str = r#""{\"path\":" ++ json(path) ++ ",\"changeType\":" ++ json(status_char) ++ ",\"renamedFrom\":" ++ if(status_char == "R" || status_char == "C", json(source.path()), "null") ++ "}\n""#;
 

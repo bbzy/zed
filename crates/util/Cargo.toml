@@ -75,3 +75,6 @@ path = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 which.workspace = true
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+tokio = { workspace = true, features = ["process", "rt", "time"] }

@@ -399,8 +399,7 @@ fn spawn_posix_spawn(
         // The Rust runtime sets SIGPIPE to SIG_IGN before `main`, and ignored
         // dispositions survive exec, so without this children would never die
         // from writing to a closed pipe. Reset it to SIG_DFL, like std does
-        // (rust-lang/rust#101077). Like std, we don't touch the signal mask,
-        // so deliberately blocked signals (e.g. via `nohup`) stay blocked.
+        // (rust-lang/rust#101077).
         let mut default_set: libc::sigset_t = std::mem::zeroed();
         if libc::sigemptyset(&mut default_set) == -1 {
             return Err(io::Error::last_os_error());
@@ -410,9 +409,19 @@ fn spawn_posix_spawn(
         }
         cvt_nz(libc::posix_spawnattr_setsigdefault(&mut attr, &default_set))?;
 
+        // GCD workers block SIGCHLD and other signals. Keep that mask out of
+        // external programs so they can wait for their own child processes.
+        let mut signal_mask: libc::sigset_t = std::mem::zeroed();
+        if libc::sigemptyset(&mut signal_mask) == -1 {
+            return Err(io::Error::last_os_error());
+        }
+
+        cvt_nz(libc::posix_spawnattr_setsigmask(&mut attr, &signal_mask))?;
         cvt_nz(libc::posix_spawnattr_setflags(
             &mut attr,
-            (libc::POSIX_SPAWN_CLOEXEC_DEFAULT | libc::POSIX_SPAWN_SETSIGDEF) as libc::c_short,
+            (libc::POSIX_SPAWN_CLOEXEC_DEFAULT
+                | libc::POSIX_SPAWN_SETSIGDEF
+                | libc::POSIX_SPAWN_SETSIGMASK) as libc::c_short,
         ))?;
 
         cvt_nz(posix_spawnattr_setexceptionports_np(

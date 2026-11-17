@@ -46,7 +46,7 @@ async fn install_script(cx: &AsyncApp) -> Result<Option<PathBuf>> {
 
     // The symlink could not be created without escalating, so use osascript
     // with admin privileges to create it.
-    let output = smol::process::Command::new("/usr/bin/osascript")
+    let output = smol::process::Command::from(util::command::new_std_command("/usr/bin/osascript"))
         .args([
             "-e",
             &format!(

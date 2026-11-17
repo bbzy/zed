@@ -4079,6 +4079,7 @@ version = "0.1.0"
 dependencies = [
  "async-process",
  "crash-handler",
+ "gpui_util",
  "libc",
  "log",
  "mach2",
@@ -7496,6 +7497,7 @@ name = "gpui_util"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "log",
  "which",
 ]
@@ -9351,6 +9353,7 @@ dependencies = [
  "smol",
  "tempfile",
  "time",
+ "util",
  "uuid",
 ]
 
@@ -15722,6 +15725,7 @@ dependencies = [
  "anyhow",
  "futures 0.3.34",
  "gpui",
+ "gpui_util",
  "http_proxy",
  "libc",
  "log",
@@ -19471,6 +19475,7 @@ dependencies = [
  "shlex 2.0.1",
  "smol",
  "tempfile",
+ "tokio",
  "unicase",
  "url",
  "util_macros",

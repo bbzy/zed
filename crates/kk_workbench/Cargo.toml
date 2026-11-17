@@ -28,3 +28,6 @@ smol.workspace = true
 tempfile.workspace = true
 time.workspace = true
 uuid = { workspace = true, features = ["v4"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+util.workspace = true

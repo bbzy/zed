@@ -643,7 +643,7 @@ mod macos {
 }
 #[cfg(not(target_os = "windows"))]
 fn spawn_crash_handler(exe: &Path, socket_name: &Path) -> async_process::Child {
-    async_process::Command::new(exe)
+    async_process::Command::from(gpui_util::new_std_command(exe))
         .arg("--crash-handler")
         .arg(&socket_name)
         .spawn()

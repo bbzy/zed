@@ -27,7 +27,33 @@ pub fn new_std_command(program: impl AsRef<OsStr>) -> std::process::Command {
     command
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+pub fn new_std_command(program: impl AsRef<OsStr>) -> std::process::Command {
+    use std::os::unix::process::CommandExt as _;
+
+    let mut command = std::process::Command::new(program);
+    // GCD workers block signals, including SIGCHLD. External programs must not
+    // inherit that mask or their own asynchronous child waits can hang.
+    unsafe {
+        command.pre_exec(|| {
+            let mut signals = std::mem::zeroed();
+            if libc::sigemptyset(&mut signals) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            let result = libc::pthread_sigmask(libc::SIG_SETMASK, &signals, std::ptr::null_mut());
+            if result != 0 {
+                return Err(std::io::Error::from_raw_os_error(result));
+            }
+
+            Ok(())
+        });
+    }
+
+    command
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn new_std_command(program: impl AsRef<OsStr>) -> std::process::Command {
     std::process::Command::new(program)
 }
