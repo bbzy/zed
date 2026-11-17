@@ -74,6 +74,14 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+enum TerminalZoomMode {
+    #[default]
+    None,
+    Vertical,
+    Full,
+}
+
 pub struct TerminalPanel {
     pub(crate) active_pane: Entity<Pane>,
     pub(crate) center: PaneGroup,
@@ -87,6 +95,7 @@ pub struct TerminalPanel {
     deferred_tasks: HashMap<TaskId, Task<()>>,
     assistant_enabled: bool,
     active: bool,
+    zoom_mode: TerminalZoomMode,
 }
 
 impl TerminalPanel {
@@ -107,6 +116,7 @@ impl TerminalPanel {
             deferred_tasks: HashMap::default(),
             assistant_enabled: false,
             active: false,
+            zoom_mode: TerminalZoomMode::None,
         };
         terminal_panel.apply_tab_bar_buttons(&terminal_panel.active_pane, cx);
         terminal_panel
@@ -125,6 +135,7 @@ impl TerminalPanel {
         cx: &mut Context<Self>,
     ) {
         let assistant_enabled = self.assistant_enabled;
+        let terminal_panel = cx.weak_entity();
         terminal_pane.update(cx, |pane, cx| {
             pane.set_render_tab_bar_buttons(cx, move |pane, window, cx| {
                 let split_context = pane
@@ -203,26 +214,58 @@ impl TerminalPanel {
                             }),
                     )
                     .child({
-                        let zoomed = pane.is_zoomed();
-                        IconButton::new("toggle_zoom", IconName::Maximize)
+                        let zoom_mode = terminal_panel
+                            .read_with(cx, |panel, _| panel.zoom_mode)
+                            .unwrap_or_default();
+                        let bottom_dock =
+                            TerminalSettings::get_global(cx).dock == TerminalDockPosition::Bottom;
+                        let (icon, tooltip) = match (bottom_dock, zoom_mode) {
+                            (true, TerminalZoomMode::None) => {
+                                (IconName::ArrowUp, "Expand Terminal Vertically")
+                            }
+                            (true, TerminalZoomMode::Vertical) => (IconName::Maximize, "Zoom In"),
+                            (_, TerminalZoomMode::Full) => (IconName::Minimize, "Zoom Out"),
+                            _ => (IconName::Maximize, "Zoom In"),
+                        };
+                        let terminal_panel = terminal_panel.clone();
+                        IconButton::new("toggle_zoom", icon)
                             .icon_size(IconSize::Small)
-                            .toggle_state(zoomed)
-                            .selected_icon(IconName::Minimize)
-                            .on_click(cx.listener(|pane, _, window, cx| {
-                                pane.toggle_zoom(&workspace::ToggleZoom, window, cx);
-                            }))
+                            .toggle_state(zoom_mode != TerminalZoomMode::None)
+                            .on_click(move |_, window, cx| {
+                                terminal_panel
+                                    .update(cx, |panel, cx| {
+                                        panel.toggle_zoom(&ToggleZoom, window, cx);
+                                    })
+                                    .log_err();
+                            })
                             .tooltip(move |_window, cx| {
-                                Tooltip::for_action(
-                                    if zoomed { "Zoom Out" } else { "Zoom In" },
-                                    &ToggleZoom,
-                                    cx,
-                                )
+                                Tooltip::for_action(tooltip, &ToggleZoom, cx)
                             })
                     })
                     .into_any_element()
                     .into();
                 (None, right_children)
             });
+        });
+    }
+
+    fn toggle_zoom(&mut self, _: &ToggleZoom, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_pane.read(cx).items_len() == 0 {
+            return;
+        }
+
+        let zoom_mode = match (self.position(window, cx), self.zoom_mode) {
+            (DockPosition::Bottom, TerminalZoomMode::None) => TerminalZoomMode::Vertical,
+            (DockPosition::Bottom, TerminalZoomMode::Vertical) => TerminalZoomMode::Full,
+            (_, TerminalZoomMode::None) => TerminalZoomMode::Full,
+            _ => TerminalZoomMode::None,
+        };
+        self.zoom_mode = zoom_mode;
+        self.set_zoomed(zoom_mode != TerminalZoomMode::None, window, cx);
+        cx.emit(if zoom_mode == TerminalZoomMode::None {
+            PanelEvent::ZoomOut
+        } else {
+            PanelEvent::ZoomIn
         });
     }
 
@@ -439,9 +482,7 @@ impl TerminalPanel {
                 let pane_count_before_removal = self.center.panes().len();
                 let _removal_result = self.center.remove(pane, cx);
                 if pane_count_before_removal == 1 {
-                    self.center.first_pane().update(cx, |pane, cx| {
-                        pane.set_zoomed(false, cx);
-                    });
+                    self.set_zoomed(false, window, cx);
                     cx.emit(PanelEvent::Close);
                 } else if let Some(focus_on_pane) =
                     focus_on_pane.as_ref().or_else(|| self.center.panes().pop())
@@ -450,20 +491,14 @@ impl TerminalPanel {
                 }
             }
             pane::Event::ZoomIn => {
-                for pane in self.center.panes() {
-                    pane.update(cx, |pane, cx| {
-                        pane.set_zoomed(true, cx);
-                    })
-                }
+                self.zoom_mode = TerminalZoomMode::Full;
+                self.set_zoomed(true, window, cx);
                 cx.emit(PanelEvent::ZoomIn);
                 cx.notify();
             }
             pane::Event::ZoomOut => {
-                for pane in self.center.panes() {
-                    pane.update(cx, |pane, cx| {
-                        pane.set_zoomed(false, cx);
-                    })
-                }
+                self.zoom_mode = TerminalZoomMode::None;
+                self.set_zoomed(false, window, cx);
                 cx.emit(PanelEvent::ZoomOut);
                 cx.notify();
             }
@@ -1472,12 +1507,25 @@ impl EventEmitter<PanelEvent> for TerminalPanel {}
 
 impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let registrar = cx
-            .try_global::<workspace::PaneSearchBarCallbacks>()
-            .map(|callbacks| {
-                (callbacks.wrap_div_with_search_actions)(div(), self.active_pane.clone())
-            })
-            .unwrap_or_else(div);
+        let registrar = div()
+            .capture_action(cx.listener(|panel, action: &ToggleZoom, window, cx| {
+                panel.toggle_zoom(action, window, cx);
+                cx.stop_propagation();
+            }))
+            .capture_action(cx.listener(|panel, _: &workspace::ZoomIn, window, cx| {
+                if panel.zoom_mode == TerminalZoomMode::Vertical {
+                    panel.toggle_zoom(&ToggleZoom, window, cx);
+                    cx.stop_propagation();
+                } else {
+                    cx.propagate();
+                }
+            }));
+        let registrar =
+            if let Some(callbacks) = cx.try_global::<workspace::PaneSearchBarCallbacks>() {
+                (callbacks.wrap_div_with_search_actions)(registrar, self.active_pane.clone())
+            } else {
+                registrar
+            };
         let no_items_in_panes = self
             .center
             .panes()
@@ -1509,6 +1557,7 @@ impl Render for TerminalPanel {
                     .track_focus(&self.focus_handle)
                     .size_full()
                     .relative()
+                    .debug_selector(|| "terminal-panel".into())
                     .child(self.center.render(
                         workspace.zoomed_item(),
                         None,
@@ -1694,9 +1743,14 @@ impl Panel for TerminalPanel {
     fn set_position(
         &mut self,
         position: DockPosition,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.zoom_mode == TerminalZoomMode::Vertical && position != DockPosition::Bottom {
+            self.set_zoomed(false, window, cx);
+            cx.emit(PanelEvent::ZoomOut);
+        }
+
         settings::update_settings_file(self.fs.clone(), cx, move |settings, _| {
             let dock = match position {
                 DockPosition::Left => TerminalDockPosition::Left,
@@ -1733,7 +1787,17 @@ impl Panel for TerminalPanel {
         self.active_pane.read(cx).is_zoomed()
     }
 
+    fn zoomed_full_width(&self) -> bool {
+        self.zoom_mode != TerminalZoomMode::Vertical
+    }
+
     fn set_zoomed(&mut self, zoomed: bool, _: &mut Window, cx: &mut Context<Self>) {
+        if !zoomed {
+            self.zoom_mode = TerminalZoomMode::None;
+        } else if self.zoom_mode == TerminalZoomMode::None {
+            self.zoom_mode = TerminalZoomMode::Full;
+        }
+
         for pane in self.center.panes() {
             pane.update(cx, |pane, cx| {
                 pane.set_zoomed(zoomed, cx);
@@ -2903,6 +2967,280 @@ mod tests {
             .expect("Failed to initialize workspace with terminal panel");
 
         (window_handle, terminal_panel)
+    }
+
+    #[gpui::test]
+    async fn terminal_zoom_cycles_with_button_and_action(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test(cx);
+        let (window_handle, panel) = init_workspace_with_panel(cx).await;
+        let workspace = window_handle
+            .read_with(cx, |window, _| window.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+        cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        workspace.update_in(cx, |workspace, window, cx| {
+            for position in [DockPosition::Left, DockPosition::Right] {
+                let side_panel =
+                    cx.new(|cx| workspace::dock::test::TestPanel::new(position, 100, cx));
+                workspace.add_panel(side_panel, window, cx);
+                workspace.toggle_dock(position, window, cx);
+            }
+        });
+        panel
+            .update_in(cx, |panel, window, cx| {
+                panel.add_terminal_shell(false, None, RevealStrategy::Always, window, cx)
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        for layout in [
+            settings::BottomDockLayout::Contained,
+            settings::BottomDockLayout::LeftAligned,
+            settings::BottomDockLayout::RightAligned,
+            settings::BottomDockLayout::Full,
+        ] {
+            cx.update(|_, cx| {
+                SettingsStore::update_global(cx, |store, cx| {
+                    store.update_user_settings(cx, |settings| {
+                        settings.workspace.bottom_dock_layout = Some(layout);
+                    });
+                });
+            });
+            cx.run_until_parked();
+            let normal = cx.debug_bounds("terminal-panel").unwrap();
+            let button = cx.debug_bounds("ICON-ArrowUp").unwrap();
+            cx.simulate_click(button.center(), Modifiers::default());
+            cx.run_until_parked();
+            assert_eq!(
+                panel.read_with(cx, |panel, _| panel.zoom_mode),
+                TerminalZoomMode::Vertical
+            );
+            let vertical = cx.debug_bounds("terminal-panel").unwrap();
+            assert_eq!(vertical.left(), normal.left(), "{layout:?}");
+            assert_eq!(vertical.right(), normal.right(), "{layout:?}");
+            assert!(vertical.size.height > normal.size.height, "{layout:?}");
+            workspace.update_in(cx, |workspace, window, cx| {
+                assert!(!workspace.capture_dock_state(window, cx).bottom.zoom);
+            });
+
+            cx.dispatch_action(ToggleZoom);
+            cx.run_until_parked();
+            assert_eq!(
+                panel.read_with(cx, |panel, _| panel.zoom_mode),
+                TerminalZoomMode::Full
+            );
+            let full = cx.debug_bounds("terminal-panel").unwrap();
+            workspace.update_in(cx, |workspace, window, cx| {
+                assert!(workspace.capture_dock_state(window, cx).bottom.zoom);
+            });
+            assert_eq!(vertical.top(), full.top(), "{layout:?}");
+            assert_eq!(vertical.bottom(), full.bottom(), "{layout:?}");
+            assert!(full.size.width >= vertical.size.width, "{layout:?}");
+            if layout == settings::BottomDockLayout::Contained {
+                assert!(full.size.width > vertical.size.width);
+            }
+
+            cx.dispatch_action(ToggleZoom);
+            cx.run_until_parked();
+            assert_eq!(
+                panel.read_with(cx, |panel, _| panel.zoom_mode),
+                TerminalZoomMode::None
+            );
+            assert_eq!(cx.debug_bounds("terminal-panel").unwrap(), normal);
+        }
+    }
+
+    #[gpui::test]
+    async fn terminal_zoom_tracks_sidebar_and_window_changes(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test(cx);
+        let (window_handle, panel) = init_workspace_with_panel(cx).await;
+        let workspace = window_handle
+            .read_with(cx, |window, _| window.workspace().clone())
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+        cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        let side_panel = workspace.update_in(cx, |workspace, window, cx| {
+            let side_panel =
+                cx.new(|cx| workspace::dock::test::TestPanel::new(DockPosition::Left, 100, cx));
+            workspace.add_panel(side_panel.clone(), window, cx);
+            workspace.toggle_dock(DockPosition::Left, window, cx);
+            side_panel
+        });
+        panel
+            .update_in(cx, |panel, window, cx| {
+                panel.add_terminal_shell(false, None, RevealStrategy::Always, window, cx)
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
+        let pane = panel.read_with(cx, |panel, _| panel.active_pane.clone());
+        let item = pane.read_with(cx, |pane, _| pane.active_item().unwrap().item_id());
+        let normal = cx.debug_bounds("terminal-panel").unwrap();
+        cx.dispatch_action(ToggleZoom);
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.close_panel::<TerminalPanel>(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("terminal-panel").is_none());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.focus_panel::<TerminalPanel>(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("terminal-panel").is_some());
+        side_panel.update_in(cx, |panel, window, cx| panel.focus_handle.focus(window, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.zoom_mode),
+            TerminalZoomMode::Vertical
+        );
+        assert!(workspace.read_with(cx, |workspace, cx| {
+            workspace.bottom_dock().read(cx).is_open()
+        }));
+        for layout in [
+            settings::BottomDockLayout::Full,
+            settings::BottomDockLayout::Contained,
+        ] {
+            cx.update(|_, cx| {
+                SettingsStore::update_global(cx, |store, cx| {
+                    store.update_user_settings(cx, |settings| {
+                        settings.workspace.bottom_dock_layout = Some(layout);
+                    });
+                });
+            });
+            cx.run_until_parked();
+            assert_eq!(
+                cx.debug_bounds("left-dock-resize-handle").is_some(),
+                layout == settings::BottomDockLayout::Contained
+            );
+        }
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.resize_panel_sizes(Some(px(200.)), None, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let resized = cx.debug_bounds("terminal-panel").unwrap();
+        assert!(resized.left() < normal.left());
+        assert_eq!(resized.right(), normal.right());
+        cx.simulate_resize(gpui::size(px(1400.), px(900.)));
+        cx.run_until_parked();
+        let larger = cx.debug_bounds("terminal-panel").unwrap();
+        assert!(larger.size.width > resized.size.width);
+        assert!(larger.size.height > resized.size.height);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_dock(DockPosition::Left, window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.zoom_mode),
+            TerminalZoomMode::Vertical
+        );
+        assert!(cx.debug_bounds("terminal-panel").unwrap().left() < larger.left());
+        cx.dispatch_action(workspace::ZoomOut);
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("terminal-panel").unwrap().size.height,
+            normal.size.height
+        );
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.active_item().unwrap().item_id()),
+            item
+        );
+    }
+
+    #[gpui::test]
+    async fn terminal_zoom_preserves_splits_and_explicit_zoom_actions(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test(cx);
+        let (window_handle, panel) = init_workspace_with_panel(cx).await;
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+        panel
+            .update_in(cx, |panel, window, cx| {
+                panel.add_terminal_shell(false, None, RevealStrategy::Always, window, cx)
+            })
+            .await
+            .unwrap();
+        cx.run_until_parked();
+        cx.dispatch_action(SplitRight::default());
+        cx.run_until_parked();
+        let panes = panel.read_with(cx, |panel, _| {
+            panel
+                .center
+                .panes()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(panes.len(), 2);
+        let items = panes
+            .iter()
+            .map(|pane| pane.read_with(cx, |pane, _| pane.active_item().unwrap().item_id()))
+            .collect::<Vec<_>>();
+        for expected in [
+            TerminalZoomMode::Vertical,
+            TerminalZoomMode::Full,
+            TerminalZoomMode::None,
+        ] {
+            cx.dispatch_action(ToggleZoom);
+            cx.run_until_parked();
+            panel.read_with(cx, |panel, cx| {
+                assert_eq!(panel.zoom_mode, expected);
+                assert_eq!(panel.center.panes().len(), 2);
+                for (pane, item) in panes.iter().zip(&items) {
+                    assert_eq!(
+                        pane.read(cx).is_zoomed(),
+                        expected != TerminalZoomMode::None
+                    );
+                    assert_eq!(pane.read(cx).active_item().unwrap().item_id(), *item);
+                }
+            });
+        }
+        cx.dispatch_action(ToggleZoom);
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.zoom_mode),
+            TerminalZoomMode::Vertical
+        );
+        cx.dispatch_action(workspace::ZoomIn);
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.zoom_mode),
+            TerminalZoomMode::Full
+        );
+        cx.dispatch_action(workspace::ZoomOut);
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.zoom_mode),
+            TerminalZoomMode::None
+        );
+        cx.dispatch_action(ToggleZoom);
+        cx.run_until_parked();
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_position(DockPosition::Left, window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.zoom_mode),
+            TerminalZoomMode::None
+        );
+        cx.update(|_, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.terminal.get_or_insert_default().dock =
+                        Some(TerminalDockPosition::Left);
+                });
+            });
+        });
+        cx.run_until_parked();
+        for expected in [TerminalZoomMode::Full, TerminalZoomMode::None] {
+            cx.dispatch_action(ToggleZoom);
+            cx.run_until_parked();
+            assert_eq!(panel.read_with(cx, |panel, _| panel.zoom_mode), expected);
+        }
     }
 
     #[gpui::test]

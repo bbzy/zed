@@ -77,6 +77,9 @@ pub trait Panel: Focusable + EventEmitter<PanelEvent> + Render + Sized {
     fn is_zoomed(&self, _window: &Window, _cx: &App) -> bool {
         false
     }
+    fn zoomed_full_width(&self) -> bool {
+        true
+    }
     fn starts_open(&self, _window: &Window, _cx: &App) -> bool {
         false
     }
@@ -111,6 +114,7 @@ pub trait PanelHandle: Send + Sync {
     fn position_is_valid(&self, position: DockPosition, cx: &App) -> bool;
     fn set_position(&self, position: DockPosition, window: &mut Window, cx: &mut App);
     fn is_zoomed(&self, window: &Window, cx: &App) -> bool;
+    fn zoomed_full_width(&self, cx: &App) -> bool;
     fn set_zoomed(&self, zoomed: bool, window: &mut Window, cx: &mut App);
     fn set_active(&self, active: bool, window: &mut Window, cx: &mut App);
     fn remote_id(&self) -> Option<proto::PanelId>;
@@ -181,6 +185,10 @@ where
 
     fn is_zoomed(&self, window: &Window, cx: &App) -> bool {
         self.read(cx).is_zoomed(window, cx)
+    }
+
+    fn zoomed_full_width(&self, cx: &App) -> bool {
+        self.read(cx).zoomed_full_width()
     }
 
     fn set_zoomed(&self, zoomed: bool, window: &mut Window, cx: &mut App) {
@@ -442,7 +450,7 @@ impl Dock {
                 });
             let zoom_subscription = cx.subscribe(&workspace, |dock, workspace, e: &Event, cx| {
                 if matches!(e, Event::ZoomChanged) {
-                    let is_zoomed = workspace.read(cx).zoomed.is_some();
+                    let is_zoomed = workspace.read(cx).zoomed_dock_covers(dock.position, cx);
                     dock.zoom_layer_open = is_zoomed;
                 }
             });
@@ -472,7 +480,8 @@ impl Dock {
                 if panel.is_zoomed(window, cx) {
                     workspace.zoomed = Some(panel.to_any().downgrade());
                     workspace.zoomed_position = Some(position);
-                } else {
+                    workspace.zoomed_full_width = panel.zoomed_full_width(cx);
+                } else if workspace.zoomed_dock_covers(position, cx) {
                     workspace.zoomed = None;
                     workspace.zoomed_position = None;
                 }
@@ -490,6 +499,7 @@ impl Dock {
             {
                 workspace.zoomed = Some(panel.to_any().downgrade());
                 workspace.zoomed_position = Some(position);
+                workspace.zoomed_full_width = panel.zoomed_full_width(cx);
                 cx.emit(Event::ZoomChanged);
                 return;
             }
@@ -638,14 +648,27 @@ impl Dock {
                 let panel = panel.clone();
 
                 move |this, window, cx| {
+                    if let Ok(zoom_layer_open) = workspace.read_with(cx, |workspace, cx| {
+                        workspace.zoomed_dock_covers(this.position, cx)
+                    }) && this.zoom_layer_open != zoom_layer_open
+                    {
+                        this.zoom_layer_open = zoom_layer_open;
+                        cx.notify();
+                    }
+
                     let new_position = panel.read(cx).position(window, cx);
                     if new_position == this.position {
                         return;
                     }
 
+                    if new_position != DockPosition::Bottom && !panel.zoomed_full_width(cx) {
+                        panel.set_zoomed(false, window, cx);
+                    }
+
                     let Ok(new_dock) = workspace.update(cx, |workspace, cx| {
                         if panel.is_zoomed(window, cx) {
                             workspace.zoomed_position = Some(new_position);
+                            workspace.zoomed_full_width = panel.zoomed_full_width(cx);
                         }
                         match new_position {
                             DockPosition::Left => &workspace.left_dock,
@@ -739,6 +762,7 @@ impl Dock {
                                 workspace.zoomed = Some(panel.downgrade().into());
                                 workspace.zoomed_position =
                                     Some(panel.read(cx).position(window, cx));
+                                workspace.zoomed_full_width = panel.read(cx).zoomed_full_width();
                                 cx.emit(Event::ZoomChanged);
                             })
                             .ok();
@@ -1281,6 +1305,11 @@ impl Render for Dock {
             let create_resize_handle = || {
                 let handle = div()
                     .id("resize-handle")
+                    .debug_selector(move || match position {
+                        DockPosition::Left => "left-dock-resize-handle".into(),
+                        DockPosition::Right => "right-dock-resize-handle".into(),
+                        DockPosition::Bottom => "bottom-dock-resize-handle".into(),
+                    })
                     .on_drag(DraggedDock(position), |dock, _, _, cx| {
                         cx.stop_propagation();
                         cx.new(|_| dock.clone())

@@ -1510,6 +1510,7 @@ pub struct Workspace {
     zoomed: Option<AnyWeakView>,
     previous_dock_drag_coordinates: Option<Point<Pixels>>,
     zoomed_position: Option<DockPosition>,
+    zoomed_full_width: bool,
     maximized_pane: Option<WeakEntity<Pane>>,
     center: PaneGroup,
     left_dock: Entity<Dock>,
@@ -2001,6 +2002,7 @@ impl Workspace {
             weak_self: weak_handle.clone(),
             zoomed: None,
             zoomed_position: None,
+            zoomed_full_width: true,
             maximized_pane: None,
             previous_dock_drag_coordinates: None,
             center,
@@ -2427,7 +2429,8 @@ impl Workspace {
         let bottom_active_panel = bottom_dock
             .active_panel()
             .map(|panel| panel.persistent_name().to_string());
-        let bottom_dock_zoom = self.zoomed_position == Some(DockPosition::Bottom);
+        let bottom_dock_zoom = self.zoomed_position == Some(DockPosition::Bottom)
+            && !self.bottom_dock_zoomed_vertically();
 
         DockStructure {
             left: DockData {
@@ -4554,7 +4557,8 @@ impl Workspace {
         let mut focus_center = false;
         let mut reveal_dock = false;
 
-        let other_is_zoomed = self.zoomed.is_some() && self.zoomed_position != Some(dock_side);
+        let other_is_zoomed =
+            self.zoomed_dock_covers(dock_side, cx) && self.zoomed_position != Some(dock_side);
         let was_visible = self.is_dock_at_position_open(dock_side, cx) && !other_is_zoomed;
 
         if let Some(panel) = self.dock_at_position(dock_side).read(cx).active_panel() {
@@ -4603,8 +4607,7 @@ impl Workspace {
         }
 
         if focus_center {
-            self.active_pane
-                .update(cx, |pane, cx| window.focus(&pane.focus_handle(cx), cx))
+            window.focus(&self.fallback_focus_handle(window, cx), cx);
         }
 
         cx.notify();
@@ -4880,6 +4883,31 @@ impl Workspace {
             .unwrap_or_else(|| self.active_pane.read(cx).focus_handle(cx))
     }
 
+    fn bottom_dock_zoomed_vertically(&self) -> bool {
+        self.zoomed_position == Some(DockPosition::Bottom) && !self.zoomed_full_width
+    }
+
+    fn zoomed_dock_covers(&self, position: DockPosition, cx: &App) -> bool {
+        if self.zoomed.is_none() {
+            return false;
+        }
+
+        if !self.bottom_dock_zoomed_vertically() {
+            return true;
+        }
+
+        match (
+            WorkspaceSettings::get_global(cx).bottom_dock_layout,
+            position,
+        ) {
+            (_, DockPosition::Bottom) => true,
+            (BottomDockLayout::Full, _) => true,
+            (BottomDockLayout::LeftAligned, DockPosition::Left) => true,
+            (BottomDockLayout::RightAligned, DockPosition::Right) => true,
+            _ => false,
+        }
+    }
+
     fn dismiss_zoomed_items_to_reveal(
         &mut self,
         dock_to_reveal: Option<DockPosition>,
@@ -4891,6 +4919,13 @@ impl Workspace {
             if pane != &self.active_pane || dock_to_reveal.is_some() {
                 pane.update(cx, |pane, cx| pane.set_zoomed(false, cx));
             }
+        }
+
+        if self.bottom_dock_zoomed_vertically()
+            && dock_to_reveal.is_some_and(|position| !self.zoomed_dock_covers(position, cx))
+        {
+            cx.notify();
+            return;
         }
 
         // If another dock is zoomed, hide it.
@@ -9733,6 +9768,55 @@ impl Render for Workspace {
             workspace: &self.weak_self,
         };
 
+        let vertical_zoom = self.bottom_dock_zoomed_vertically();
+        let mut zoomed_overlay =
+            self.zoomed.as_ref().and_then(|view| {
+                let zoomed_view = view.upgrade()?;
+                let zoomed_element =
+                    match zoomed_paddings {
+                        (None, None) => zoomed_view.into_any_element(),
+                        (left, right) => h_flex()
+                            .size_full()
+                            .when_some(left, |this, padding| {
+                                this.child(padding.border_r_1().debug_selector(|| {
+                                    "zoomed_centered_layout_left_padding".into()
+                                }))
+                            })
+                            .child(
+                                div()
+                                    .size_full()
+                                    .debug_selector(|| "zoomed_centered_layout_content".into())
+                                    .child(zoomed_view),
+                            )
+                            .when_some(right, |this, padding| {
+                                this.child(padding.border_l_1().debug_selector(|| {
+                                    "zoomed_centered_layout_right_padding".into()
+                                }))
+                            })
+                            .into_any_element(),
+                    };
+                let overlay = div()
+                    .occlude()
+                    .absolute()
+                    .overflow_hidden()
+                    .border_color(colors.border)
+                    .bg(colors.background)
+                    .child(zoomed_element)
+                    .inset_0()
+                    .shadow_lg();
+
+                if !WorkspaceSettings::get_global(cx).zoomed_padding {
+                    return Some(overlay);
+                }
+
+                Some(match self.zoomed_position {
+                    Some(DockPosition::Left) => overlay.right_2().border_r_1(),
+                    Some(DockPosition::Right) => overlay.left_2().border_l_1(),
+                    Some(DockPosition::Bottom) => overlay.top_2().border_t_1(),
+                    None => overlay.top_2().bottom_2().left_2().right_2().border_1(),
+                })
+            });
+
         div()
             .relative()
             .size_full()
@@ -10004,7 +10088,13 @@ impl Render for Workspace {
                                                     &self.bottom_dock,
                                                     window,
                                                     cx,
-                                                ))),
+                                                )))
+                                                .relative()
+                                                .children(if vertical_zoom {
+                                                    zoomed_overlay.take()
+                                                } else {
+                                                    None
+                                                }),
                                         )
                                         .children(self.render_dock(
                                             DockPosition::Right,
@@ -10077,7 +10167,13 @@ impl Render for Workspace {
                                                     &self.bottom_dock,
                                                     window,
                                                     cx,
-                                                ))),
+                                                )))
+                                                .relative()
+                                                .children(if vertical_zoom {
+                                                    zoomed_overlay.take()
+                                                } else {
+                                                    None
+                                                }),
                                         ),
                                     BottomDockLayout::Contained => div()
                                         .flex()
@@ -10117,7 +10213,13 @@ impl Render for Workspace {
                                                     &self.bottom_dock,
                                                     window,
                                                     cx,
-                                                )),
+                                                ))
+                                                .relative()
+                                                .children(if vertical_zoom {
+                                                    zoomed_overlay.take()
+                                                } else {
+                                                    None
+                                                }),
                                         )
                                         .children(self.render_dock(
                                             DockPosition::Right,
@@ -10127,55 +10229,7 @@ impl Render for Workspace {
                                         )),
                                 }
                             })
-                            .children(self.zoomed.as_ref().and_then(|view| {
-                                let zoomed_view = view.upgrade()?;
-                                let zoomed_element = match zoomed_paddings {
-                                    (None, None) => zoomed_view.into_any_element(),
-                                    (left, right) => h_flex()
-                                        .size_full()
-                                        .when_some(left, |this, padding| {
-                                            this.child(padding.border_r_1().debug_selector(|| {
-                                                "zoomed_centered_layout_left_padding".into()
-                                            }))
-                                        })
-                                        .child(
-                                            div()
-                                                .size_full()
-                                                .debug_selector(|| {
-                                                    "zoomed_centered_layout_content".into()
-                                                })
-                                                .child(zoomed_view),
-                                        )
-                                        .when_some(right, |this, padding| {
-                                            this.child(padding.border_l_1().debug_selector(|| {
-                                                "zoomed_centered_layout_right_padding".into()
-                                            }))
-                                        })
-                                        .into_any_element(),
-                                };
-                                let overlay = div()
-                                    .occlude()
-                                    .absolute()
-                                    .overflow_hidden()
-                                    .border_color(colors.border)
-                                    .bg(colors.background)
-                                    .child(zoomed_element)
-                                    .inset_0()
-                                    .shadow_lg();
-
-                                if !WorkspaceSettings::get_global(cx).zoomed_padding {
-                                    return Some(overlay);
-                                }
-
-                                Some(match self.zoomed_position {
-                                    Some(DockPosition::Left) => overlay.right_2().border_r_1(),
-                                    Some(DockPosition::Right) => overlay.left_2().border_l_1(),
-                                    Some(DockPosition::Bottom) => overlay.top_2().border_t_1(),
-                                    None => {
-                                        overlay.top_2().bottom_2().left_2().right_2().border_1()
-                                    }
-                                })
-                            }))
+                            .children(zoomed_overlay)
                             .children(self.render_notifications(window, cx)),
                     )
                     .when(self.status_bar_visible(cx), |parent| {
