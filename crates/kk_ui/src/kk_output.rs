@@ -9,9 +9,93 @@ use kk_workbench::Diagnostics;
 use language::{Buffer, Capability};
 use multi_buffer::MultiBuffer;
 use search::{BufferSearchBar, buffer_search::DivRegistrar};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use ui::{IconButton, Tooltip, prelude::*};
 use workspace::ToolbarItemView as _;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
+
+#[derive(Clone, Copy)]
+enum OutputCategory {
+    Performance,
+    Command,
+    Error,
+    Other,
+}
+
+impl OutputCategory {
+    const ALL: [Self; 4] = [Self::Performance, Self::Command, Self::Error, Self::Other];
+    const ALL_MASK: u8 = 15;
+
+    fn mask(self) -> u8 {
+        1 << self as u8
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Performance => "PERF",
+            Self::Command => "COMMAND",
+            Self::Error => "ERROR",
+            Self::Other => "Other",
+        }
+    }
+}
+
+struct OutputStream {
+    pending_line: String,
+    record_categories: u8,
+}
+
+impl Default for OutputStream {
+    fn default() -> Self {
+        Self {
+            pending_line: String::new(),
+            record_categories: OutputCategory::Other.mask(),
+        }
+    }
+}
+
+impl OutputStream {
+    fn filter(&mut self, text: &str, selected: u8) -> String {
+        if selected == OutputCategory::ALL_MASK {
+            return text.to_owned();
+        }
+
+        let mut output = String::new();
+        for part in text.split_inclusive('\n') {
+            self.pending_line.push_str(part);
+            if !part.ends_with('\n') {
+                continue;
+            }
+
+            let line = std::mem::take(&mut self.pending_line);
+            if let Some((_, message)) = line
+                .strip_prefix('[')
+                .and_then(|line| line.split_once("] "))
+                .filter(|(timestamp, _)| OffsetDateTime::parse(timestamp, &Rfc3339).is_ok())
+            {
+                self.record_categories = if message.starts_with("[PERF] ") {
+                    OutputCategory::Performance.mask()
+                } else if message.starts_with("[COMMAND] ") || message.starts_with("[COMMAND END] ")
+                {
+                    OutputCategory::Command.mask()
+                } else if let Some(error) = message.strip_prefix("[ERROR] ") {
+                    OutputCategory::Error.mask()
+                        | if error.starts_with("[COMMAND ") {
+                            OutputCategory::Command.mask()
+                        } else {
+                            0
+                        }
+                } else {
+                    OutputCategory::Other.mask()
+                };
+            }
+            if self.record_categories & selected != 0 {
+                output.push_str(&line);
+            }
+        }
+        output
+    }
+}
 
 pub(super) struct KkOutput {
     diagnostics: Diagnostics,
@@ -22,6 +106,10 @@ pub(super) struct KkOutput {
     focus: FocusHandle,
     position: DockPosition,
     cursor: (usize, usize),
+    start_cursor: (usize, usize),
+    selected_categories: u8,
+    stream: OutputStream,
+    replay: Task<()>,
     remote: Option<kk_workbench::remote::Client>,
     configuration: Shared<Task<()>>,
     remote_updates: Task<()>,
@@ -51,6 +139,7 @@ impl KkOutput {
             search_bar
         });
         cx.observe(&search_bar, |_, _, cx| cx.notify()).detach();
+        cx.observe(&editor, |_, _, cx| cx.notify()).detach();
         Self {
             diagnostics,
             categories: categories.to_vec(),
@@ -60,6 +149,10 @@ impl KkOutput {
             focus: cx.focus_handle(),
             position: DockPosition::Bottom,
             cursor: (0, 0),
+            start_cursor: (0, 0),
+            selected_categories: OutputCategory::ALL_MASK,
+            stream: OutputStream::default(),
+            replay: Task::ready(()),
             remote: None,
             configuration: Task::ready(()).shared(),
             remote_updates: Task::ready(()),
@@ -162,6 +255,7 @@ impl KkOutput {
 
     fn synchronize(&mut self, cx: &mut App) -> bool {
         let (cursor, text, more) = self.diagnostics.read_batch(self.cursor, 64 * 1024);
+        let text = self.stream.filter(&text, self.selected_categories);
         if !text.is_empty() {
             self.buffer.update(cx, |buffer, cx| {
                 buffer.append(text, cx);
@@ -172,9 +266,31 @@ impl KkOutput {
         more
     }
 
+    fn set_filter(&mut self, selected: u8, cx: &mut Context<Self>) {
+        if self.selected_categories == selected {
+            return;
+        }
+
+        self.selected_categories = selected;
+        self.cursor = self.start_cursor;
+        self.stream = OutputStream::default();
+        self.buffer.update(cx, |buffer, cx| buffer.set_text("", cx));
+        self.replay = cx.spawn(async move |this, cx| {
+            loop {
+                match this.update(cx, |this, cx| this.synchronize(cx)) {
+                    Ok(true) => futures_lite::future::yield_now().await,
+                    Ok(false) | Err(_) => break,
+                }
+            }
+        });
+        cx.notify();
+    }
+
     fn clear(&mut self, cx: &mut Context<Self>) {
         // Advance past buffered batches as well, so pending updates cannot restore old output.
         self.cursor = self.diagnostics.end_cursor();
+        self.start_cursor = self.cursor;
+        self.stream = OutputStream::default();
         self.buffer.update(cx, |buffer, cx| {
             buffer.set_text("", cx);
         });
@@ -254,6 +370,23 @@ impl Render for KkOutput {
                     .child(
                         h_flex()
                             .child(
+                                IconButton::new("wrap-output", IconName::TextWrap)
+                                    .toggle_state(!matches!(
+                                        self.editor.read(cx).soft_wrap_mode(cx),
+                                        editor::SoftWrap::None
+                                    ))
+                                    .tooltip(Tooltip::text("Toggle Soft Wrap"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.editor.update(cx, |editor, cx| {
+                                            editor.toggle_soft_wrap(
+                                                &editor::actions::ToggleSoftWrap,
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    })),
+                            )
+                            .child(
                                 IconButton::new("search-output", IconName::MagnifyingGlass)
                                     .tooltip(Tooltip::text("Search Output"))
                                     .on_click(cx.listener(|this, _, window, cx| {
@@ -281,6 +414,29 @@ impl Render for KkOutput {
                             ),
                     ),
             )
+            .child(
+                h_flex()
+                    .px_2()
+                    .gap_1()
+                    .child(
+                        div().debug_selector(|| "output-filter-all".into()).child(
+                            ui::Button::new("output-filter-all", "All")
+                                .toggle_state(self.selected_categories == OutputCategory::ALL_MASK)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.set_filter(OutputCategory::ALL_MASK, cx);
+                                })),
+                        ),
+                    )
+                    .children(OutputCategory::ALL.into_iter().map(|category| {
+                        div().debug_selector(move || category.label().into()).child(
+                            ui::Button::new(category.label(), category.label())
+                                .toggle_state(self.selected_categories & category.mask() != 0)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.set_filter(this.selected_categories ^ category.mask(), cx);
+                                })),
+                        )
+                    })),
+            )
             .when(!self.search_bar.read(cx).is_dismissed(), |this| {
                 this.child(self.search_bar.clone())
             })
@@ -295,6 +451,183 @@ mod tests {
     use project::{FakeFs, Project};
     use settings::SettingsStore;
     use workspace::MultiWorkspace;
+
+    #[test]
+    fn output_filters_classify_record_headers_and_keep_continuations() {
+        assert_eq!(
+            OutputStream::default().filter("partial output", OutputCategory::ALL_MASK),
+            "partial output"
+        );
+        let diagnostics = Diagnostics::default();
+        diagnostics.log("[PERF] {\"message\":\"[COMMAND] needle 三🙂\"}");
+        diagnostics.log("[COMMAND] start");
+        diagnostics.log("[COMMAND END] done");
+        diagnostics.error("[COMMAND command-id] failed\ncontinuation\n[PERF] error detail");
+        diagnostics.error("unrelated error");
+        diagnostics.log("other [PERF] message\n[invalid] [COMMAND] still other");
+        let text = diagnostics.read_since(0).1;
+        for selected in 0..=OutputCategory::ALL_MASK {
+            let mut stream = OutputStream::default();
+            let mut filtered = String::new();
+            for character in text.chars() {
+                filtered.push_str(&stream.filter(&character.to_string(), selected));
+            }
+            assert_eq!(
+                filtered.contains("needle"),
+                selected & OutputCategory::Performance.mask() != 0
+            );
+            assert_eq!(
+                filtered.contains("start"),
+                selected & OutputCategory::Command.mask() != 0
+            );
+            assert_eq!(
+                filtered.contains("done"),
+                selected & OutputCategory::Command.mask() != 0
+            );
+            let command_error =
+                selected & (OutputCategory::Command.mask() | OutputCategory::Error.mask()) != 0;
+            assert_eq!(
+                filtered.matches("failed").count(),
+                usize::from(command_error)
+            );
+            assert_eq!(
+                filtered.contains("continuation\n[PERF] error detail"),
+                command_error
+            );
+            assert_eq!(
+                filtered.contains("unrelated error"),
+                selected & OutputCategory::Error.mask() != 0
+            );
+            assert_eq!(
+                filtered.contains("[invalid] [COMMAND] still other"),
+                selected & OutputCategory::Other.mask() != 0
+            );
+            if selected == OutputCategory::ALL_MASK {
+                assert_eq!(filtered, text);
+            }
+        }
+    }
+
+    #[gpui::test(iterations = 3)]
+    async fn output_filters_and_wrap_controls_preserve_log_text(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/project", serde_json::json!({})).await;
+        let project = Project::test(fs, ["/project".as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |view, _| view.workspace().clone());
+        let output = cx.update(|window, cx| cx.new(|cx| KkOutput::new(&[], window, cx)));
+        let (diagnostics, editor, buffer) = output.read_with(cx, |output, _| {
+            (
+                output.diagnostics.clone(),
+                output.editor.clone(),
+                output.buffer.clone(),
+            )
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(output.clone(), window, cx);
+            workspace.focus_panel::<KkOutput>(window, cx);
+        });
+        let long_line = "三🙂".repeat(20_000);
+        diagnostics.log(format!("[PERF] {long_line}"));
+        diagnostics.log("[COMMAND] command");
+        diagnostics.error("[COMMAND command-id] failure");
+        diagnostics.log("other");
+        cx.run_until_parked();
+        let original = buffer.read_with(cx, |buffer, _| buffer.text());
+        let initially_wrapped = editor.read_with(cx, |editor, cx| {
+            !matches!(editor.soft_wrap_mode(cx), editor::SoftWrap::None)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let wrap = cx.debug_bounds("ICON-TextWrap").expect("wrap button");
+        cx.simulate_click(wrap.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        editor.read_with(cx, |editor, cx| {
+            assert_ne!(
+                !matches!(editor.soft_wrap_mode(cx), editor::SoftWrap::None),
+                initially_wrapped
+            );
+        });
+        editor.update_in(cx, |editor, window, cx| {
+            editor.toggle_soft_wrap(&editor::actions::ToggleSoftWrap, window, cx);
+            editor.select_all(&editor::actions::SelectAll, window, cx);
+            editor.focus_handle(cx).focus(window, cx);
+        });
+        cx.dispatch_action(editor::actions::Copy);
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
+            Some(original)
+        );
+        for category in ["COMMAND", "ERROR", "Other"] {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let button = cx.debug_bounds(category).expect("category button");
+            cx.simulate_click(button.center(), gpui::Modifiers::none());
+            cx.run_until_parked();
+        }
+        let performance = buffer.read_with(cx, |buffer, _| buffer.text());
+        assert!(performance.contains(&long_line));
+        assert!(!performance.contains("command"));
+        output.update(cx, |output, cx| {
+            output.set_filter(
+                OutputCategory::Command.mask() | OutputCategory::Error.mask(),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let commands = buffer.read_with(cx, |buffer, _| buffer.text());
+        assert_eq!(commands.matches("failure").count(), 1);
+        assert!(!commands.contains(&long_line));
+        output.update(cx, |output, cx| output.set_filter(0, cx));
+        diagnostics.log("[COMMAND] hidden while disabled");
+        cx.run_until_parked();
+        assert!(buffer.read_with(cx, |buffer, _| buffer.text()).is_empty());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let all = cx
+            .debug_bounds("output-filter-all")
+            .expect("all categories button");
+        cx.simulate_click(all.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            buffer
+                .read_with(cx, |buffer, _| buffer.text())
+                .contains("hidden while disabled")
+        );
+        output.update(cx, |output, cx| {
+            output.set_filter(OutputCategory::Performance.mask(), cx);
+            assert!(output.synchronize(cx));
+            output.set_filter(OutputCategory::Command.mask(), cx);
+            output.clear(cx);
+            output.set_filter(OutputCategory::ALL_MASK, cx);
+        });
+        diagnostics.append_output("after clear\n");
+        cx.run_until_parked();
+        assert_eq!(
+            buffer.read_with(cx, |buffer, _| buffer.text()),
+            "after clear\n"
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.close_panel::<KkOutput>(window, cx);
+            workspace.reveal_panel::<KkOutput>(window, cx);
+        });
+        output.read_with(cx, |output, cx| {
+            assert_eq!(output.selected_categories, OutputCategory::ALL_MASK);
+            assert_eq!(
+                !matches!(
+                    output.editor.read(cx).soft_wrap_mode(cx),
+                    editor::SoftWrap::None
+                ),
+                initially_wrapped
+            );
+            assert!(output.editor.read(cx).read_only(cx));
+            assert!(!output.buffer.read(cx).is_dirty());
+        });
+    }
 
     #[gpui::test(iterations = 3)]
     async fn output_stream_preserves_focus_readonly_state_and_history_when_reopened(
@@ -482,6 +815,18 @@ mod tests {
             })
             .await
             .expect("search output");
+        cx.run_until_parked();
+        editor.update(cx, |editor, cx| {
+            assert_eq!(editor.search_background_highlights(cx).len(), 2)
+        });
+        output.update(cx, |output, cx| output.set_filter(0, cx));
+        cx.run_until_parked();
+        editor.update(cx, |editor, cx| {
+            assert!(editor.search_background_highlights(cx).is_empty())
+        });
+        output.update(cx, |output, cx| {
+            output.set_filter(OutputCategory::ALL_MASK, cx)
+        });
         cx.run_until_parked();
         editor.update(cx, |editor, cx| {
             assert_eq!(editor.search_background_highlights(cx).len(), 2)
