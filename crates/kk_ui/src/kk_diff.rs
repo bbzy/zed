@@ -4297,7 +4297,7 @@ mod tests {
             .expect("history diff");
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(cx.debug_bounds("commit-details").is_some());
+        assert!(cx.debug_bounds("commit-details").is_none());
         assert!(
             cx.debug_bounds("multibuffer-collapse-expand-empty")
                 .is_none()
@@ -4330,14 +4330,14 @@ mod tests {
             .expect("commit information toggle");
         cx.simulate_click(toggle.center(), gpui::Modifiers::none());
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(cx.debug_bounds("commit-details").is_none());
+        assert!(cx.debug_bounds("commit-details").is_some());
         assert!(cx.debug_bounds("ICON-Eye").is_some());
         let toggle = cx
             .debug_bounds("ICON-Eye")
             .expect("commit information toggle");
         cx.simulate_click(toggle.center(), gpui::Modifiers::none());
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(cx.debug_bounds("commit-details").is_some());
+        assert!(cx.debug_bounds("commit-details").is_none());
         assert!(cx.debug_bounds("ICON-MagnifyingGlass").is_some());
         assert!(cx.debug_bounds("ICON-GitGraph").is_some());
         view.read_with(cx, |view, cx| {
@@ -4405,8 +4405,8 @@ mod tests {
                 .update(cx, |controls, cx| controls.toggle_commit_details(cx));
         });
         view.read_with(cx, |view, cx| {
-            assert!(!view.controls.read(cx).showing_commit_details(cx));
-            assert!(!clone.read(cx).controls.read(cx).showing_commit_details(cx));
+            assert!(view.controls.read(cx).showing_commit_details(cx));
+            assert!(clone.read(cx).controls.read(cx).showing_commit_details(cx));
         });
         view.update(cx, |view, cx| {
             view.controls
@@ -4414,6 +4414,8 @@ mod tests {
         });
         view.read_with(cx, |view, cx| {
             let clone = clone.read(cx);
+            assert!(!view.controls.read(cx).showing_commit_details(cx));
+            assert!(!clone.controls.read(cx).showing_commit_details(cx));
             assert_eq!(
                 view.controls
                     .read(cx)

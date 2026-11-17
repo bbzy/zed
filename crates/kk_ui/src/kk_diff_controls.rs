@@ -234,7 +234,7 @@ impl KkDiffControls {
     pub(super) fn showing_commit_details(&self, cx: &App) -> bool {
         self.commit_information
             .as_ref()
-            .is_none_or(|preference| preference.read(cx).visible())
+            .is_some_and(|preference| preference.read(cx).visible())
     }
 
     fn review_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {

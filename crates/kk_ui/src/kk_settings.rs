@@ -90,7 +90,7 @@ impl CommitInformation {
             .map(|key| store.read_kvp(key))
             .transpose()?
             .flatten()
-            .is_none_or(|value| value != "hidden");
+            .is_some_and(|value| value == "visible");
         Ok(Self {
             visible,
             store,
@@ -431,23 +431,33 @@ mod tests {
         let preference =
             CommitInformation::load(store.clone(), Some("first".into())).expect("preference");
         let preference = cx.new(|_| preference);
-        assert!(preference.read_with(cx, |preference, _| preference.visible()));
+        assert!(!preference.read_with(cx, |preference, _| preference.visible()));
         let writes = preference.update(cx, |preference, cx| {
             preference.toggle(cx);
             preference.toggle(cx);
             preference.toggle(cx);
-            assert!(!preference.visible());
+            assert!(preference.visible());
             preference.writes.clone()
         });
         drop(preference);
         writes.await;
         let restored =
             CommitInformation::load(store.clone(), Some("first".into())).expect("restore");
+        assert!(restored.visible());
+        let restored = cx.new(|_| restored);
+        let writes = restored.update(cx, |preference, cx| {
+            preference.toggle(cx);
+            preference.writes.clone()
+        });
+        drop(restored);
+        writes.await;
+        let restored =
+            CommitInformation::load(store.clone(), Some("first".into())).expect("restore hidden");
         assert!(!restored.visible());
         let other =
             CommitInformation::load(store.clone(), Some("second".into())).expect("other project");
-        assert!(other.visible());
+        assert!(!other.visible());
         let transient = CommitInformation::load(store, None).expect("transient project");
-        assert!(transient.visible());
+        assert!(!transient.visible());
     }
 }
