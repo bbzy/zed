@@ -682,7 +682,7 @@ impl KkDiffControls {
             .gap_1p5()
             .flex_wrap()
             .child(
-                IconButton::new("ignore-trim-whitespace", IconName::Space)
+                IconButton::new("ignore-trim-whitespace", IconName::SpaceBold)
                     .aria_label("Toggle Trim Whitespace Changes")
                     .icon_size(IconSize::Small)
                     .toggle_state(!ignore_trim_whitespace)
