@@ -9,6 +9,7 @@ use kk_workbench::Diagnostics;
 use language::{Buffer, Capability};
 use multi_buffer::MultiBuffer;
 use search::{BufferSearchBar, buffer_search::DivRegistrar};
+use serde_json::Value;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use ui::{ContextMenu, IconButton, IconPosition, Indicator, PopoverMenu, Tooltip, prelude::*};
 use workspace::ToolbarItemView as _;
@@ -42,6 +43,7 @@ impl OutputCategory {
 
 struct OutputStream {
     pending_line: String,
+    streaming_plain_line: bool,
     record_categories: u8,
 }
 
@@ -49,52 +51,141 @@ impl Default for OutputStream {
     fn default() -> Self {
         Self {
             pending_line: String::new(),
+            streaming_plain_line: false,
             record_categories: OutputCategory::Other.mask(),
         }
     }
 }
 
 impl OutputStream {
-    fn filter(&mut self, text: &str, selected: u8) -> String {
-        if selected == OutputCategory::ALL_MASK {
-            return text.to_owned();
-        }
-
+    fn render(&mut self, text: &str, selected: u8) -> String {
         let mut output = String::new();
         for part in text.split_inclusive('\n') {
+            let complete = part.ends_with('\n');
+            if selected == OutputCategory::ALL_MASK
+                && self.pending_line.is_empty()
+                && (self.streaming_plain_line || !part.starts_with('['))
+            {
+                output.push_str(part);
+                self.streaming_plain_line = !complete;
+                continue;
+            }
+
             self.pending_line.push_str(part);
-            if !part.ends_with('\n') {
+            if !complete {
                 continue;
             }
 
             let line = std::mem::take(&mut self.pending_line);
-            if let Some((_, message)) = line
+            let mut structured = None;
+            if let Some((timestamp, message)) = line
                 .strip_prefix('[')
                 .and_then(|line| line.split_once("] "))
                 .filter(|(timestamp, _)| OffsetDateTime::parse(timestamp, &Rfc3339).is_ok())
             {
-                self.record_categories = if message.starts_with("[PERF] ") {
-                    OutputCategory::Performance.mask()
-                } else if message.starts_with("[COMMAND] ") || message.starts_with("[COMMAND END] ")
-                {
-                    OutputCategory::Command.mask()
-                } else if let Some(error) = message.strip_prefix("[ERROR] ") {
-                    OutputCategory::Error.mask()
-                        | if error.starts_with("[COMMAND ") {
-                            OutputCategory::Command.mask()
-                        } else {
-                            0
-                        }
-                } else {
-                    OutputCategory::Other.mask()
-                };
+                let (categories, record) = classify_output(message);
+                self.record_categories = categories;
+                structured = record.map(|(category, payload)| (timestamp, category, payload));
             }
+
             if self.record_categories & selected != 0 {
-                output.push_str(&line);
+                if let Some(rendered) = structured.and_then(|(timestamp, category, payload)| {
+                    render_logfmt(timestamp, category, payload)
+                }) {
+                    output.push_str(&rendered);
+                    output.push('\n');
+                } else {
+                    output.push_str(&line);
+                }
             }
         }
         output
     }
+}
+
+fn classify_output(message: &str) -> (u8, Option<(&str, &str)>) {
+    if let Some(payload) = message.strip_prefix("[PERF] ") {
+        (OutputCategory::Performance.mask(), Some(("perf", payload)))
+    } else if let Some(payload) = message.strip_prefix("[COMMAND] ") {
+        (OutputCategory::Command.mask(), Some(("command", payload)))
+    } else if let Some(payload) = message.strip_prefix("[COMMAND END] ") {
+        (
+            OutputCategory::Command.mask(),
+            Some(("command_end", payload)),
+        )
+    } else if let Some(error) = message.strip_prefix("[ERROR] ") {
+        let mut categories = OutputCategory::Error.mask();
+        if error.starts_with("[COMMAND ") {
+            categories |= OutputCategory::Command.mask();
+        }
+        (categories, None)
+    } else {
+        (OutputCategory::Other.mask(), None)
+    }
+}
+
+fn render_logfmt(timestamp: &str, category: &str, payload: &str) -> Option<String> {
+    let fields = serde_json::from_str::<serde_json::Map<String, Value>>(payload).ok()?;
+    let first_fields: &[&str] = match category {
+        "command" => &["executable", "commandId", "cwd", "argv"],
+        "command_end" => &["commandId", "exitCode", "elapsedMs"],
+        _ => &["name", "event", "outcome", "elapsedMs"],
+    };
+
+    let mut output = format!("ts={timestamp} category={category}");
+    for key in first_fields {
+        if let Some(value) = fields.get(*key) {
+            append_logfmt_field(&mut output, key, value)?;
+        }
+    }
+    for (key, value) in &fields {
+        if !first_fields.contains(&key.as_str()) {
+            append_logfmt_field(&mut output, key, value)?;
+        }
+    }
+    Some(output)
+}
+
+fn append_logfmt_field(output: &mut String, key: &str, value: &Value) -> Option<()> {
+    if key.is_empty()
+        || key.chars().any(|character| {
+            character.is_whitespace() || character.is_control() || matches!(character, '=' | '"')
+        })
+    {
+        return None;
+    }
+
+    match value {
+        Value::Object(fields) if !fields.is_empty() => {
+            for (name, value) in fields {
+                append_logfmt_field(output, &format!("{key}.{name}"), value)?;
+            }
+        }
+        Value::Array(values) if !values.is_empty() => {
+            for (index, value) in values.iter().enumerate() {
+                append_logfmt_field(output, &format!("{key}.{index}"), value)?;
+            }
+        }
+        value => {
+            output.push(' ');
+            output.push_str(key);
+            output.push('=');
+            if let Value::String(value) = value
+                && !value.is_empty()
+                && value != "null"
+                && !value.chars().any(|character| {
+                    character.is_whitespace()
+                        || character.is_control()
+                        || matches!(character, '=' | '"' | '\\')
+                })
+            {
+                output.push_str(value);
+            } else {
+                output.push_str(&value.to_string());
+            }
+        }
+    }
+    Some(())
 }
 
 pub(super) struct KkOutput {
@@ -255,7 +346,7 @@ impl KkOutput {
 
     fn synchronize(&mut self, cx: &mut App) -> bool {
         let (cursor, text, more) = self.diagnostics.read_batch(self.cursor, 64 * 1024);
-        let text = self.stream.filter(&text, self.selected_categories);
+        let text = self.stream.render(&text, self.selected_categories);
         if !text.is_empty() {
             self.buffer.update(cx, |buffer, cx| {
                 buffer.append(text, cx);
@@ -479,9 +570,41 @@ mod tests {
     use workspace::MultiWorkspace;
 
     #[test]
+    fn output_formats_command_and_performance_metadata_as_logfmt() {
+        let mut stream = OutputStream::default();
+        let timestamp = "2026-11-18T14:32:01+08:00";
+        let records = format!(
+            "[{timestamp}] [COMMAND] {}\n[{timestamp}] [COMMAND END] {}\n[{timestamp}] [PERF] {}\n",
+            serde_json::json!({
+                "executable": "/bin/kk",
+                "commandId": "8a91",
+                "cwd": "/work/三 🙂",
+                "argv": ["log", "a=b", "", "\"quoted\"\\path\nnext"],
+                "environment": {"COLUMNS": "80"},
+                "environmentOverrides": {"COLUMNS": null},
+            }),
+            serde_json::json!({"commandId": "8a91", "exitCode": 0, "elapsedMs": 12.4, "stdoutBytes": 480}),
+            serde_json::json!({"name": "history.refresh", "event": "end", "outcome": "completed", "elapsedMs": 13.8}),
+        );
+        assert_eq!(
+            stream.render(&records, OutputCategory::ALL_MASK),
+            format!(
+                concat!(
+                    "ts={0} category=command executable=/bin/kk commandId=8a91 cwd=\"/work/三 🙂\" ",
+                    "argv.0=log argv.1=\"a=b\" argv.2=\"\" argv.3=\"\\\"quoted\\\"\\\\path\\nnext\" ",
+                    "environment.COLUMNS=80 environmentOverrides.COLUMNS=null\n",
+                    "ts={0} category=command_end commandId=8a91 exitCode=0 elapsedMs=12.4 stdoutBytes=480\n",
+                    "ts={0} category=perf name=history.refresh event=end outcome=completed elapsedMs=13.8\n",
+                ),
+                timestamp,
+            )
+        );
+    }
+
+    #[test]
     fn output_filters_classify_record_headers_and_keep_continuations() {
         assert_eq!(
-            OutputStream::default().filter("partial output", OutputCategory::ALL_MASK),
+            OutputStream::default().render("partial output", OutputCategory::ALL_MASK),
             "partial output"
         );
         let diagnostics = Diagnostics::default();
@@ -496,7 +619,7 @@ mod tests {
             let mut stream = OutputStream::default();
             let mut filtered = String::new();
             for character in text.chars() {
-                filtered.push_str(&stream.filter(&character.to_string(), selected));
+                filtered.push_str(&stream.render(&character.to_string(), selected));
             }
             assert_eq!(
                 filtered.contains("needle"),
@@ -529,7 +652,8 @@ mod tests {
                 selected & OutputCategory::Other.mask() != 0
             );
             if selected == OutputCategory::ALL_MASK {
-                assert_eq!(filtered, text);
+                assert_eq!(filtered, OutputStream::default().render(&text, selected));
+                assert!(filtered.contains(r#"category=perf message="[COMMAND] needle 三🙂""#));
             }
         }
     }
@@ -562,12 +686,13 @@ mod tests {
             workspace.focus_panel::<KkOutput>(window, cx);
         });
         let long_line = "三🙂".repeat(20_000);
-        diagnostics.log(format!("[PERF] {long_line}"));
+        diagnostics.log(format!("[PERF] {}", serde_json::json!({"name": long_line})));
         diagnostics.log("[COMMAND] command");
         diagnostics.error("[COMMAND command-id] failure");
         diagnostics.log("other");
         cx.run_until_parked();
         let original = buffer.read_with(cx, |buffer, _| buffer.text());
+        assert!(original.contains(&format!("category=perf name={long_line}")));
         let initially_wrapped = editor.read_with(cx, |editor, cx| {
             !matches!(editor.soft_wrap_mode(cx), editor::SoftWrap::None)
         });
