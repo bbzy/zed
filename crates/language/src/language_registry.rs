@@ -33,7 +33,7 @@ use std::{
 use text::Rope;
 use theme::Theme;
 
-use util::{maybe, post_inc};
+use util::{maybe, paths::PathStyle, post_inc};
 
 pub struct LanguageRegistry {
     state: RwLock<LanguageRegistryState>,
@@ -705,28 +705,41 @@ impl LanguageRegistry {
             .file_name()
             .unwrap_or_else(|| file.file_name(cx));
         let paths = [Some(file.full_path(cx)), file.file_system_abs_path(cx)];
-        let path_style = file.path_style(cx);
-        let normalized_paths = paths.each_ref().map(|path| {
-            if path_style.is_windows()
-                && let Some(path) = path.as_deref().and_then(Path::to_str)
-                && path.contains('\\')
-            {
-                Some(PathBuf::from(path.replace('\\', "/")))
-            } else {
-                None
-            }
-        });
         let paths = paths
             .iter()
             .filter_map(Option::as_deref)
-            .chain(normalized_paths.iter().filter_map(Option::as_deref))
-            .collect::<SmallVec<[_; 4]>>();
-        self.language_for_file_internal(
+            .collect::<SmallVec<[_; 2]>>();
+        self.language_for_file_with_settings(
             Some(filename),
             &paths,
             content,
-            Some(&user_file_types.file_types),
+            file.path_style(cx),
+            user_file_types,
         )
+    }
+
+    pub fn language_for_file_with_settings(
+        self: &Arc<Self>,
+        filename: Option<&str>,
+        paths: &[&Path],
+        content: Option<&Rope>,
+        path_style: PathStyle,
+        settings: &crate::language_settings::AllLanguageSettings,
+    ) -> Option<LanguageId> {
+        let mut normalized = SmallVec::<[PathBuf; 2]>::new();
+        if path_style.is_windows() {
+            normalized.extend(paths.iter().filter_map(|path| {
+                let path = path.to_str()?;
+                path.contains('\\')
+                    .then(|| PathBuf::from(path.replace('\\', "/")))
+            }));
+        }
+        let paths = paths
+            .iter()
+            .copied()
+            .chain(normalized.iter().map(PathBuf::as_path))
+            .collect::<SmallVec<[_; 4]>>();
+        self.language_for_file_internal(filename, &paths, content, Some(&settings.file_types))
     }
 
     pub fn language_for_file_path(self: &Arc<Self>, path: &Path) -> Option<LanguageId> {

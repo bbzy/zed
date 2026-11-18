@@ -51,6 +51,15 @@ fn document(kind: SymbolLanguage, source: &str) -> Arc<Document> {
     Arc::new(Document::extract(kind, source.into(), tree.root_node()))
 }
 
+fn resolved_symbols(documents: &[Arc<Document>], source: usize, offset: usize) -> Vec<&Symbol> {
+    let occurrence = documents[source].occurrence_at(offset).unwrap();
+    Index::new(documents)
+        .resolve(source, &occurrence)
+        .iter()
+        .map(|location| &documents[location.document].symbols[location.symbol])
+        .collect()
+}
+
 fn resolved_names(documents: &[Arc<Document>], source: usize, needle: &str) -> Vec<String> {
     let document = &documents[source];
     let offset = document.text.rfind(needle).unwrap();
@@ -161,9 +170,11 @@ fn cpp_cross_file_overloads_and_aliases() {
             "void run(Widget widget) { widget.reset(); }",
         ),
     ];
+    let targets = resolved_symbols(&documents, 1, documents[1].text.rfind("reset()").unwrap());
+    assert_eq!(targets.len(), 1);
     assert_eq!(
-        resolved_names(&documents, 1, "reset()"),
-        ["Widget:reset:Method"]
+        targets[0].range.start,
+        documents[0].text.find("reset()").unwrap()
     );
     assert_eq!(
         completion_names(&documents, 1, "widget.re"),
@@ -201,7 +212,17 @@ fn cpp_references_do_not_merge_shadowed_locals() {
                     .all(|candidate| index.same_symbol(target, *candidate))
         })
         .collect();
-    assert_eq!(references.len(), 2);
+    let actual: Vec<_> = references
+        .iter()
+        .map(|reference| reference.range.start)
+        .collect();
+    let expected: Vec<_> = documents[0]
+        .text
+        .match_indices("value++")
+        .enumerate()
+        .filter_map(|(index, (offset, _))| (index != 1).then_some(offset))
+        .collect();
+    assert_eq!(actual, expected);
 }
 
 #[test]
@@ -324,10 +345,13 @@ fn cpp_static_header_dependencies_and_anonymous_namespaces() {
     Arc::get_mut(&mut other).unwrap().path = Some("project/include/other.hpp".into());
     let mut source = document(
         SymbolLanguage::Cpp,
-        "#include \"../include/helper.hpp\"\nvoid run() { helper(); nested(); }\n",
+        "#include \"../include/helper.hpp\"\nvoid run() { helper(); nested(); hidden(); }\n",
     );
     Arc::get_mut(&mut source).unwrap().path = Some("project/src/main.cpp".into());
-    let mut unrelated = document(SymbolLanguage::Cpp, "namespace { void hidden() {} }\n");
+    let mut unrelated = document(
+        SymbolLanguage::Cpp,
+        "namespace { void hidden() {} void use_hidden() { hidden(); } }\n",
+    );
     Arc::get_mut(&mut unrelated).unwrap().path = Some("project/other.cpp".into());
     let documents = vec![header, other, source, unrelated];
     let index = Index::new(&documents);
@@ -342,7 +366,17 @@ fn cpp_static_header_dependencies_and_anonymous_namespaces() {
         resolved_names(&documents, 2, "nested()"),
         [":nested:Function"]
     );
-    assert!(documents[3].symbols.iter().all(|symbol| symbol.file_local));
+    assert!(
+        documents[3]
+            .symbols
+            .iter()
+            .any(|symbol| symbol.name == "hidden" && symbol.file_local)
+    );
+    assert_eq!(
+        resolved_names(&documents, 3, "hidden();"),
+        [":hidden:Function"]
+    );
+    assert!(resolved_names(&documents, 2, "hidden();").is_empty());
     assert!(index.same_symbol(
         SymbolLocation {
             document: 0,
@@ -365,12 +399,14 @@ fn java_packages_imports_inheritance_and_overloads() {
         ),
         document(
             SymbolLanguage::Java,
-            "package other; import sample.Base; class Child extends Base { void run(Base widget) { int value = 1; widget.reset(); value++; } }",
+            "package other; import sample.Base; class Child extends Base { void run(Child widget) { int value = 1; widget.reset(); value++; } }",
         ),
     ];
+    let targets = resolved_symbols(&documents, 1, documents[1].text.rfind("reset()").unwrap());
+    assert_eq!(targets.len(), 1);
     assert_eq!(
-        resolved_names(&documents, 1, "reset()"),
-        ["Base:reset:Method"]
+        targets[0].range.start,
+        documents[0].text.find("reset()").unwrap()
     );
     let names = completion_names(&documents, 1, "widget.re");
     assert_eq!(names, ["reset", "reset"]);
@@ -492,4 +528,71 @@ fn kotlin_type_aliases_preserve_receiver_identity() {
         resolved_names(&documents, 1, "reset()"),
         ["Widget:reset:Method"]
     );
+}
+
+#[test]
+fn cpp_qualified_default_arguments_and_declaration_identity() {
+    let document = document(
+        SymbolLanguage::Cpp,
+        "void reset(); namespace tools { void reset(int value = 0); }
+         struct Widget { int value; void run() { int value = 1; ++value; } };
+         void choose(int value); void choose(int *value);
+         void use_tools() { tools::reset(); double fraction = 1.; }",
+    );
+    let documents = [document.clone()];
+    let offset = |needle| document.text.rfind(needle).unwrap();
+    let targets = resolved_symbols(&documents, 0, offset("reset();"));
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].owner, "tools");
+
+    let targets = resolved_symbols(&documents, 0, offset("value = 1"));
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].range.start, offset("value = 1"));
+    assert!(targets[0].local);
+
+    for (needle, signature) in [("choose(int value)", "int"), ("choose(int *value)", "int*")] {
+        let targets = resolved_symbols(&documents, 0, offset(needle));
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].signature.as_deref(), Some(signature));
+    }
+
+    assert!(document.completion_context(offset("1.;") + 2).is_none());
+}
+
+#[test]
+#[ignore = "Requires ZED_SYMBOL_GRAMMAR_DIR with the Kotlin extension grammar"]
+fn kotlin_top_level_private_functions_are_file_local() {
+    let documents = [
+        document(
+            SymbolLanguage::Kotlin,
+            "package sample
+private fun helper() {}
+fun first() { helper() }
+",
+        ),
+        document(
+            SymbolLanguage::Kotlin,
+            "package sample
+private fun helper() {}
+fun second() { helper() }
+",
+        ),
+        document(
+            SymbolLanguage::Kotlin,
+            "package sample
+fun third() { helper() }
+",
+        ),
+    ];
+    let index = Index::new(&documents);
+    for (source, document) in documents.iter().enumerate() {
+        let offset = document.text.rfind("helper()").unwrap();
+        let targets = index.resolve(source, &document.occurrence_at(offset).unwrap());
+        if source < 2 {
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].document, source);
+        } else {
+            assert!(targets.is_empty());
+        }
+    }
 }

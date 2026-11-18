@@ -63,6 +63,41 @@ pub fn parse_modeline(first_lines: &[&str], last_lines: &[&str]) -> Option<Model
     Some(settings).filter(|s| s.has_settings())
 }
 
+/// Parse the configured number of modelines from the bounded ends of a buffer.
+pub fn parse_modeline_from_rope(
+    content: &text::Rope,
+    line_count: usize,
+) -> Option<ModelineSettings> {
+    use text::Bias;
+
+    const MAX_MODELINE_BYTES: usize = 1024;
+    let first_end = content.clip_offset(content.len().min(MAX_MODELINE_BYTES), Bias::Left);
+    let first_lines =
+        collect_modeline_lines(content.chunks_in_range(0..first_end).lines(), line_count);
+    let last_start =
+        content.clip_offset(content.len().saturating_sub(MAX_MODELINE_BYTES), Bias::Left);
+    let last_lines = collect_modeline_lines(
+        content
+            .reversed_chunks_in_range(last_start..content.len())
+            .lines(),
+        line_count,
+    );
+    let first_lines: Vec<_> = first_lines.iter().map(String::as_str).collect();
+    let last_lines: Vec<_> = last_lines.iter().rev().map(String::as_str).collect();
+    parse_modeline(&first_lines, &last_lines)
+}
+
+fn collect_modeline_lines(mut lines: text::Lines<'_>, line_count: usize) -> Vec<String> {
+    let mut result = Vec::new();
+    for _ in 0..line_count {
+        let Some(line) = lines.next() else {
+            break;
+        };
+        result.push(line.to_string());
+    }
+    result
+}
+
 fn parse_modelines(modelines: &[&str], settings: &mut ModelineSettings) {
     for line in modelines {
         parse_emacs_modeline(line, settings);

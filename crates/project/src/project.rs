@@ -4259,36 +4259,7 @@ impl Project {
         cx: &mut Context<Self>,
     ) -> Task<Result<Option<Vec<LocationLink>>>> {
         let position = position.to_point_utf16(buffer.read(cx));
-        let trace = symbol_index::SymbolQueryTrace::new("definition");
-        trace.record(
-            "request",
-            format_args!(
-                "file={:?} position={:?} remote={} language={:?} grammar={} supported={}",
-                buffer.read(cx).file().map(|file| file
-                    .file_system_abs_path(cx)
-                    .unwrap_or_else(|| file.full_path(cx))),
-                position,
-                self.is_via_remote_server(),
-                buffer.read(cx).language().map(|language| language.name()),
-                buffer
-                    .read(cx)
-                    .language()
-                    .is_some_and(|language| language.grammar().is_some()),
-                self.supports_syntax_symbols(buffer, cx)
-            ),
-        );
         let guard = self.retain_remotely_created_models(cx);
-        trace.record(
-            "lsp_request",
-            format_args!(
-                "capable={}",
-                self.lsp_store.read(cx).is_capable_for_proto_request(
-                    buffer,
-                    &GetDefinitions { position },
-                    cx
-                )
-            ),
-        );
         let task = self.lsp_store.update(cx, |lsp_store, cx| {
             lsp_store.definitions(buffer, position, cx)
         });
@@ -4296,47 +4267,30 @@ impl Project {
         let snapshot = buffer.read(cx).snapshot();
         let offset = position.to_offset(&snapshot);
         cx.spawn(async move |project, cx| {
-            let result = match task.await {
-                Ok(result) => result,
-                Err(error) => {
-                    trace.finish("failed", format_args!("provider=lsp error={error:#}"));
-                    return Err(error);
-                }
-            };
+            let result = task.await?;
             if result
                 .as_ref()
                 .is_some_and(|locations| !locations.is_empty())
             {
-                trace.finish(
-                    "complete",
-                    format_args!(
-                        "provider=lsp targets={}",
-                        result.as_ref().map_or(0, Vec::len)
-                    ),
-                );
                 drop(guard);
                 return Ok(result);
             }
-            trace.record("lsp_empty", format_args!("provider=syntax"));
             let fallback = project.update(cx, |project, cx| {
-                if buffer.read(cx).version() != *snapshot.version() {
-                    trace.record(
-                        "discarded",
-                        format_args!("reason=source_changed_before_fallback"),
-                    );
-                    return Task::ready(Ok(None));
+                if buffer.read(cx).version() != *snapshot.version()
+                    || !project.supports_syntax_symbols(&buffer, cx)
+                {
+                    return None;
                 }
-                if !project.supports_syntax_symbols(&buffer, cx) {
-                    trace.record(
-                        "skipped",
-                        format_args!("reason=unsupported_session_language_or_grammar"),
-                    );
-                    return Task::ready(Ok(None));
-                }
-                project.lsp_store.update(cx, |store, cx| {
+                let trace = symbol_index::SymbolQueryTrace::new("definition");
+                trace.begin(&buffer, position, cx);
+                let fallback = project.lsp_store.update(cx, |store, cx| {
                     store.syntax_definitions(&buffer, offset, false, trace.clone(), cx)
-                })
+                });
+                Some((fallback, trace))
             })?;
+            let Some((fallback, trace)) = fallback else {
+                return Ok(result);
+            };
             let result = fallback.await;
             if buffer.read_with(cx, |buffer, _| buffer.version() != *snapshot.version()) {
                 trace.finish(
@@ -4382,36 +4336,7 @@ impl Project {
         cx: &mut Context<Self>,
     ) -> Task<Result<Option<Vec<LocationLink>>>> {
         let position = position.to_point_utf16(buffer.read(cx));
-        let trace = symbol_index::SymbolQueryTrace::new("declaration");
-        trace.record(
-            "request",
-            format_args!(
-                "file={:?} position={:?} remote={} language={:?} grammar={} supported={}",
-                buffer.read(cx).file().map(|file| file
-                    .file_system_abs_path(cx)
-                    .unwrap_or_else(|| file.full_path(cx))),
-                position,
-                self.is_via_remote_server(),
-                buffer.read(cx).language().map(|language| language.name()),
-                buffer
-                    .read(cx)
-                    .language()
-                    .is_some_and(|language| language.grammar().is_some()),
-                self.supports_syntax_symbols(buffer, cx)
-            ),
-        );
         let guard = self.retain_remotely_created_models(cx);
-        trace.record(
-            "lsp_request",
-            format_args!(
-                "capable={}",
-                self.lsp_store.read(cx).is_capable_for_proto_request(
-                    buffer,
-                    &GetDeclarations { position },
-                    cx
-                )
-            ),
-        );
         let task = self.lsp_store.update(cx, |lsp_store, cx| {
             lsp_store.declarations(buffer, position, cx)
         });
@@ -4419,47 +4344,30 @@ impl Project {
         let snapshot = buffer.read(cx).snapshot();
         let offset = position.to_offset(&snapshot);
         cx.spawn(async move |project, cx| {
-            let result = match task.await {
-                Ok(result) => result,
-                Err(error) => {
-                    trace.finish("failed", format_args!("provider=lsp error={error:#}"));
-                    return Err(error);
-                }
-            };
+            let result = task.await?;
             if result
                 .as_ref()
                 .is_some_and(|locations| !locations.is_empty())
             {
-                trace.finish(
-                    "complete",
-                    format_args!(
-                        "provider=lsp targets={}",
-                        result.as_ref().map_or(0, Vec::len)
-                    ),
-                );
                 drop(guard);
                 return Ok(result);
             }
-            trace.record("lsp_empty", format_args!("provider=syntax"));
             let fallback = project.update(cx, |project, cx| {
-                if buffer.read(cx).version() != *snapshot.version() {
-                    trace.record(
-                        "discarded",
-                        format_args!("reason=source_changed_before_fallback"),
-                    );
-                    return Task::ready(Ok(None));
+                if buffer.read(cx).version() != *snapshot.version()
+                    || !project.supports_syntax_symbols(&buffer, cx)
+                {
+                    return None;
                 }
-                if !project.supports_syntax_symbols(&buffer, cx) {
-                    trace.record(
-                        "skipped",
-                        format_args!("reason=unsupported_session_language_or_grammar"),
-                    );
-                    return Task::ready(Ok(None));
-                }
-                project.lsp_store.update(cx, |store, cx| {
+                let trace = symbol_index::SymbolQueryTrace::new("declaration");
+                trace.begin(&buffer, position, cx);
+                let fallback = project.lsp_store.update(cx, |store, cx| {
                     store.syntax_definitions(&buffer, offset, true, trace.clone(), cx)
-                })
+                });
+                Some((fallback, trace))
             })?;
+            let Some((fallback, trace)) = fallback else {
+                return Ok(result);
+            };
             let result = fallback.await;
             if buffer.read_with(cx, |buffer, _| buffer.version() != *snapshot.version()) {
                 trace.finish(
@@ -4528,36 +4436,7 @@ impl Project {
         cx: &mut Context<Self>,
     ) -> Task<Result<Option<Vec<Location>>>> {
         let position = position.to_point_utf16(buffer.read(cx));
-        let trace = symbol_index::SymbolQueryTrace::new("references");
-        trace.record(
-            "request",
-            format_args!(
-                "file={:?} position={:?} remote={} language={:?} grammar={} supported={}",
-                buffer.read(cx).file().map(|file| file
-                    .file_system_abs_path(cx)
-                    .unwrap_or_else(|| file.full_path(cx))),
-                position,
-                self.is_via_remote_server(),
-                buffer.read(cx).language().map(|language| language.name()),
-                buffer
-                    .read(cx)
-                    .language()
-                    .is_some_and(|language| language.grammar().is_some()),
-                self.supports_syntax_symbols(buffer, cx)
-            ),
-        );
         let guard = self.retain_remotely_created_models(cx);
-        trace.record(
-            "lsp_request",
-            format_args!(
-                "capable={}",
-                self.lsp_store.read(cx).is_capable_for_proto_request(
-                    buffer,
-                    &GetReferences { position },
-                    cx
-                )
-            ),
-        );
         let task = self.lsp_store.update(cx, |lsp_store, cx| {
             lsp_store.references(buffer, position, cx)
         });
@@ -4565,47 +4444,30 @@ impl Project {
         let snapshot = buffer.read(cx).snapshot();
         let offset = position.to_offset(&snapshot);
         cx.spawn(async move |project, cx| {
-            let result = match task.await {
-                Ok(result) => result,
-                Err(error) => {
-                    trace.finish("failed", format_args!("provider=lsp error={error:#}"));
-                    return Err(error);
-                }
-            };
+            let result = task.await?;
             if result
                 .as_ref()
                 .is_some_and(|locations| !locations.is_empty())
             {
-                trace.finish(
-                    "complete",
-                    format_args!(
-                        "provider=lsp targets={}",
-                        result.as_ref().map_or(0, Vec::len)
-                    ),
-                );
                 drop(guard);
                 return Ok(result);
             }
-            trace.record("lsp_empty", format_args!("provider=syntax"));
             let fallback = project.update(cx, |project, cx| {
-                if buffer.read(cx).version() != *snapshot.version() {
-                    trace.record(
-                        "discarded",
-                        format_args!("reason=source_changed_before_fallback"),
-                    );
-                    return Task::ready(Ok(None));
+                if buffer.read(cx).version() != *snapshot.version()
+                    || !project.supports_syntax_symbols(&buffer, cx)
+                {
+                    return None;
                 }
-                if !project.supports_syntax_symbols(&buffer, cx) {
-                    trace.record(
-                        "skipped",
-                        format_args!("reason=unsupported_session_language_or_grammar"),
-                    );
-                    return Task::ready(Ok(None));
-                }
-                project.lsp_store.update(cx, |store, cx| {
+                let trace = symbol_index::SymbolQueryTrace::new("references");
+                trace.begin(&buffer, position, cx);
+                let fallback = project.lsp_store.update(cx, |store, cx| {
                     store.syntax_references(&buffer, offset, trace.clone(), cx)
-                })
+                });
+                Some((fallback, trace))
             })?;
+            let Some((fallback, trace)) = fallback else {
+                return Ok(result);
+            };
             let result = fallback.await;
             if buffer.read_with(cx, |buffer, _| buffer.version() != *snapshot.version()) {
                 trace.finish(
@@ -4864,90 +4726,51 @@ impl Project {
         context: CompletionContext,
         cx: &mut Context<Self>,
     ) -> Task<Result<Vec<CompletionResponse>>> {
+        self.completions_with_provider(buffer, position, Some(context), cx)
+    }
+
+    fn completions_with_provider<T: ToPointUtf16>(
+        &self,
+        buffer: &Entity<Buffer>,
+        position: T,
+        context: Option<CompletionContext>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Vec<CompletionResponse>>> {
         let position = position.to_point_utf16(buffer.read(cx));
-        let trace = symbol_index::SymbolQueryTrace::new("completions");
-        trace.record(
-            "request",
-            format_args!(
-                "file={:?} position={:?} remote={} language={:?} grammar={} supported={}",
-                buffer.read(cx).file().map(|file| file
-                    .file_system_abs_path(cx)
-                    .unwrap_or_else(|| file.full_path(cx))),
-                position,
-                self.is_via_remote_server(),
-                buffer.read(cx).language().map(|language| language.name()),
-                buffer
-                    .read(cx)
-                    .language()
-                    .is_some_and(|language| language.grammar().is_some()),
-                self.supports_syntax_symbols(buffer, cx)
-            ),
-        );
-        trace.record(
-            "lsp_request",
-            format_args!(
-                "capable={}",
-                self.lsp_store.read(cx).is_capable_for_proto_request(
-                    buffer,
-                    &GetCompletions {
-                        position,
-                        context: context.clone(),
-                        server_id: None
-                    },
-                    cx
-                )
-            ),
-        );
-        let task = self.lsp_store.update(cx, |lsp_store, cx| {
-            lsp_store.completions(buffer, position, context, cx)
-        });
+        let task = if let Some(context) = context {
+            self.lsp_store.update(cx, |lsp_store, cx| {
+                lsp_store.completions(buffer, position, context, cx)
+            })
+        } else {
+            Task::ready(Ok(Vec::new()))
+        };
         let buffer = buffer.clone();
         let snapshot = buffer.read(cx).snapshot();
         let offset = position.to_offset(&snapshot);
         cx.spawn(async move |project, cx| {
-            let result = match task.await {
-                Ok(result) => result,
-                Err(error) => {
-                    trace.finish("failed", format_args!("provider=lsp error={error:#}"));
-                    return Err(error);
-                }
-            };
+            let result = task.await?;
             if result
                 .iter()
                 .any(|response| !response.completions.is_empty())
             {
-                trace.finish(
-                    "complete",
-                    format_args!(
-                        "provider=lsp candidates={}",
-                        result
-                            .iter()
-                            .map(|response| response.completions.len())
-                            .sum::<usize>()
-                    ),
-                );
                 return Ok(result);
             }
-            trace.record("lsp_empty", format_args!("provider=syntax"));
             let fallback = project.update(cx, |project, cx| {
-                if buffer.read(cx).version() != *snapshot.version() {
-                    trace.record(
-                        "discarded",
-                        format_args!("reason=source_changed_before_fallback"),
-                    );
-                    return Task::ready(Ok(Vec::new()));
+                if buffer.read(cx).version() != *snapshot.version()
+                    || !project.supports_syntax_symbols(&buffer, cx)
+                {
+                    return None;
                 }
-                if !project.supports_syntax_symbols(&buffer, cx) {
-                    trace.record(
-                        "skipped",
-                        format_args!("reason=unsupported_session_language_or_grammar"),
-                    );
-                    return Task::ready(Ok(Vec::new()));
-                }
-                project.lsp_store.update(cx, |store, cx| {
+                let trace = symbol_index::SymbolQueryTrace::new("completions");
+                trace.begin(&buffer, position, cx);
+                let fallback = project.lsp_store.update(cx, |store, cx| {
                     store.syntax_completions(&buffer, offset, trace.clone(), cx)
-                })
+                });
+                Some((fallback, trace))
             })?;
+            let Some((fallback, trace)) = fallback else {
+                return Ok(result);
+            };
             let result = fallback.await;
             if buffer.read_with(cx, |buffer, _| buffer.version() != *snapshot.version()) {
                 trace.finish(

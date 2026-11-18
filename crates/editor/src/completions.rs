@@ -514,7 +514,7 @@ impl Editor {
             .as_ref()
             .is_none_or(|query| !query.chars().any(|c| c.is_digit(10)));
 
-        let load_provider_completions = provider.as_ref().is_some_and(|provider| {
+        let load_standard_completions = provider.as_ref().is_some_and(|provider| {
             trigger.as_ref().is_none_or(|trigger| {
                 provider.is_completion_trigger(
                     &buffer,
@@ -526,8 +526,18 @@ impl Editor {
             })
         });
 
-        let provider_responses = if let Some(provider) = &provider
-            && load_provider_completions
+        let syntax_completions = if !load_standard_completions
+            && let Some((provider, trigger)) = provider.as_ref().zip(trigger.as_deref())
+        {
+            provider.completions_for_syntax_trigger(&buffer, buffer_position, trigger, cx)
+        } else {
+            None
+        };
+        let load_provider_completions = load_standard_completions || syntax_completions.is_some();
+        let provider_responses = if let Some(syntax_completions) = syntax_completions {
+            syntax_completions
+        } else if let Some(provider) = &provider
+            && load_standard_completions
         {
             let trigger_character = trigger
                 .as_ref()
@@ -1161,6 +1171,16 @@ pub trait CompletionProvider {
         cx: &mut Context<Editor>,
     ) -> Task<Result<Vec<CompletionResponse>>>;
 
+    fn completions_for_syntax_trigger(
+        &self,
+        _buffer: &Entity<Buffer>,
+        _position: text::Anchor,
+        _text: &str,
+        _cx: &mut Context<Editor>,
+    ) -> Option<Task<Result<Vec<CompletionResponse>>>> {
+        None
+    }
+
     fn resolve_completions(
         &self,
         _buffer: Entity<Buffer>,
@@ -1484,6 +1504,18 @@ impl CompletionProvider for Entity<Project> {
         })
     }
 
+    fn completions_for_syntax_trigger(
+        &self,
+        buffer: &Entity<Buffer>,
+        position: text::Anchor,
+        text: &str,
+        cx: &mut Context<Editor>,
+    ) -> Option<Task<Result<Vec<CompletionResponse>>>> {
+        self.update(cx, |project, cx| {
+            project.completions_for_syntax_trigger(buffer, position, text, cx)
+        })
+    }
+
     fn resolve_completions(
         &self,
         buffer: Entity<Buffer>,
@@ -1537,13 +1569,6 @@ impl CompletionProvider for Entity<Project> {
         };
         if chars.next().is_some() {
             return false;
-        }
-
-        if self
-            .read(cx)
-            .is_syntax_completion_trigger(buffer, position, text, cx)
-        {
-            return true;
         }
 
         let buffer = buffer.read(cx);

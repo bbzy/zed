@@ -2639,20 +2639,25 @@ impl Pane {
         window: &mut Window,
         cx: &mut Context<Pane>,
     ) -> Option<()> {
-        let item_id = self.items().find_map(|item| {
-            if item.buffer_kind(cx) == ItemBufferKind::Singleton
-                && item.project_entry_ids(cx).as_slice() == [entry_id]
-            {
-                Some(item.item_id())
-            } else {
-                None
-            }
-        })?;
+        let item_ids = self
+            .items()
+            .filter_map(|item| {
+                if item.buffer_kind(cx) == ItemBufferKind::Singleton
+                    && item.project_entry_ids(cx).as_slice() == [entry_id]
+                {
+                    Some(item.item_id())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
 
-        self.remove_item(item_id, false, true, window, cx);
-        self.nav_history.remove_item(item_id);
+        for item_id in &item_ids {
+            self.remove_item(*item_id, false, true, window, cx);
+            self.nav_history.remove_item(*item_id);
+        }
 
-        Some(())
+        (!item_ids.is_empty()).then_some(())
     }
 
     fn update_toolbar(&mut self, window: &mut Window, cx: &mut Context<Self>) {

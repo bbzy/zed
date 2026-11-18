@@ -519,7 +519,9 @@ message FlushBufferedMessages {}
 
 message FlushBufferedMessagesResponse {}
 
-message RemoteStarted {}
+message RemoteStarted {
+  bool supports_syntax_symbols = 1;
+}
 
 message SpawnKernel {
   string kernel_name = 1;

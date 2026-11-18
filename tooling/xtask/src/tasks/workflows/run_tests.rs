@@ -666,6 +666,27 @@ pub(crate) fn run_platform_tests_no_filter(platform: Platform) -> NamedJob {
     run_platform_tests_impl(platform, false, false)
 }
 
+fn test_symbol_index_extension_grammars() -> Step<Run> {
+    named::bash(indoc::indoc! {r#"
+        set -euo pipefail
+        export ZED_SYMBOL_GRAMMAR_DIR="$(mktemp -d "${RUNNER_TEMP}/zed-symbol-grammars.XXXXXX")"
+        trap 'rm -rf "$ZED_SYMBOL_GRAMMAR_DIR"' EXIT
+
+        fetch_grammar() {
+          local name="$1" version="$2" digest="$3"
+          local destination="$ZED_SYMBOL_GRAMMAR_DIR/$name.wasm"
+          curl --fail --silent --show-error --location --retry 3 --max-time 60 \
+            "https://api.zed.dev/extensions/$name/$version/download" |
+            tar -xzOf - "grammars/$name.wasm" > "$destination"
+          printf '%s  %s\n' "$digest" "$destination" | sha256sum --check --status
+        }
+
+        fetch_grammar java 6.8.30 366485d5b4f6fa97f3bc786828e1cfb253dc12f393cc80b1cc04c8c311dfdc19
+        fetch_grammar kotlin 0.3.4 6a29a5e9aed398bf2c98a032c5e8d22a0593461bd8588b821bf7e87624499746
+        cargo nextest run --workspace --run-ignored ignored-only -E 'package(language) & test(symbol_index::tests::)'
+    "#})
+}
+
 fn run_platform_tests_impl(platform: Platform, filter_packages: bool, harden: bool) -> NamedJob {
     let runner = match platform {
         Platform::Windows => runners::WINDOWS_DEFAULT,
@@ -725,6 +746,9 @@ fn run_platform_tests_impl(platform: Platform, filter_packages: bool, harden: bo
             })
             .when(!filter_packages, |job| {
                 job.add_step(steps::cargo_nextest(platform))
+            })
+            .when(filter_packages && platform == Platform::Linux, |job| {
+                job.add_step(test_symbol_index_extension_grammars())
             })
             .add_step(steps::show_sccache_stats(platform))
             .add_step(steps::cleanup_cargo_config(platform)),

@@ -96,15 +96,27 @@ async fn syntax_index_shares_scans_and_releases_cancelled_jobs(cx: &mut TestAppC
     assert!(Arc::ptr_eq(&first, &second));
     assert_eq!(first.files.len(), 2);
     drop((first, second));
+
+    let (build_lock, previous) = project.read_with(cx, |project, cx| {
+        let store = &project.lsp_store.read(cx).symbol_index;
+        let previous = store.jobs.lock().disk.clone().unwrap();
+        (store.build_lock.clone(), previous)
+    });
+    let guard = build_lock.lock().await;
     let task = project.update(cx, |project, cx| {
         project.lsp_store.update(cx, |store, cx| {
+            store.symbol_index.jobs.lock().generation += 1;
             store.prepare_symbol_index(&buffer, None, cx)
         })
     });
+    cx.run_until_parked();
     drop(task);
+    cx.run_until_parked();
+    drop(guard);
     cx.run_until_parked();
     project.read_with(cx, |project, cx| {
         let jobs = project.lsp_store.read(cx).symbol_index.jobs.lock();
+        assert!(Arc::ptr_eq(jobs.disk.as_ref().unwrap(), &previous));
         assert!(
             jobs.pending
                 .values()
@@ -114,7 +126,7 @@ async fn syntax_index_shares_scans_and_releases_cancelled_jobs(cx: &mut TestAppC
 }
 
 #[test]
-fn syntax_index_cache_retains_working_set_when_scan_exceeds_budget() {
+fn syntax_index_buffer_cache_evicts_least_recently_used_document() {
     let language = cpp_language();
     let document = index_text("struct Widget { void reset(); };", &language, None).unwrap();
     let path = |name| ProjectPath {
@@ -126,14 +138,13 @@ fn syntax_index_cache_retains_working_set_when_scan_exceeds_budget() {
         budget: cost * 2,
         ..Default::default()
     };
-    cache.insert(path("one.hpp"), "one".into(), document.clone(), false);
-    cache.insert(path("two.hpp"), "two".into(), document.clone(), false);
-    cache.insert(path("three.hpp"), "three".into(), document.clone(), false);
+    cache.insert(path("one.hpp"), "one".into(), document.clone());
+    cache.insert(path("two.hpp"), "two".into(), document.clone());
+    cache.entries.get_mut(&path("one.hpp")).unwrap().accessed_at -= Duration::from_secs(1);
+    cache.insert(path("hot.cpp"), "hot".into(), document);
     assert_eq!(cache.bytes, cost * 2);
-    assert!(cache.get(&path("one.hpp"), "one").is_some());
+    assert!(cache.get(&path("one.hpp"), "one").is_none());
     assert!(cache.get(&path("two.hpp"), "two").is_some());
-    assert_eq!(cache.admission_skipped, 1);
-    cache.insert(path("hot.cpp"), "hot".into(), document, true);
     assert_eq!(cache.entries.len(), 2);
     assert_eq!(cache.evictions, 1);
     assert!(cache.get(&path("hot.cpp"), "hot").is_some());
@@ -179,7 +190,8 @@ async fn syntax_index_stale_close_does_not_crash_or_close_other_peer(cx: &mut Te
         .unwrap();
         assert!(buffers.read_with(cx, |store, _| store.has_shared_buffers()));
     }
-    buffers.update(cx, |store, _| store.forget_shared_buffers());
+    buffers.update(cx, |store, _| store.forget_shared_buffers_for(&second));
+    assert!(!buffers.read_with(cx, |store, _| store.has_shared_buffers()));
     crate::buffer_store::BufferStore::handle_close_buffer(
         buffers.clone(),
         TypedEnvelope {
@@ -317,4 +329,161 @@ async fn syntax_index_cancellation_before_request_prevents_scan(cx: &mut TestApp
         assert!(store.symbol_index.jobs.lock().pending.is_empty());
         assert!(store.symbol_index.cache.lock().entries.is_empty());
     });
+}
+
+#[gpui::test]
+async fn syntax_index_reuses_disk_documents_and_refreshes_changed_files(cx: &mut TestAppContext) {
+    let (fs, project, buffer) = setup(cx).await;
+    let query = |cx: &mut TestAppContext| {
+        project.update(cx, |project, cx| {
+            let offset = buffer.read(cx).text().find("reset").unwrap();
+            project.definitions(&buffer, offset, cx)
+        })
+    };
+    assert!(query(cx).await.unwrap().is_some());
+    let disk = |cx: &mut TestAppContext| {
+        project.read_with(cx, |project, cx| {
+            project
+                .lsp_store
+                .read(cx)
+                .symbol_index
+                .jobs
+                .lock()
+                .disk
+                .clone()
+                .unwrap()
+        })
+    };
+    let first = disk(cx);
+    buffer.update(cx, |buffer, cx| buffer.edit([(0..0, " ")], None, cx));
+    assert!(query(cx).await.unwrap().is_some());
+    assert!(Arc::ptr_eq(&first, &disk(cx)));
+
+    fs.insert_file(
+        std::path::Path::new("/symbols/widget.hpp"),
+        "struct Widget { void refresh(); };".into(),
+    )
+    .await;
+    cx.run_until_parked();
+    assert!(query(cx).await.unwrap().is_none());
+    let next = disk(cx);
+    assert!(!Arc::ptr_eq(&first, &next));
+    let before = first
+        .entries
+        .iter()
+        .find(|(path, _)| path.path.as_unix_str() == "main.cpp")
+        .unwrap();
+    let after = next.entries.get(before.0).unwrap();
+    assert!(Arc::ptr_eq(
+        before.1.document.as_ref().unwrap(),
+        after.document.as_ref().unwrap()
+    ));
+}
+
+#[gpui::test]
+async fn syntax_index_rejects_an_anchor_from_another_buffer(cx: &mut TestAppContext) {
+    let (_, project, buffer) = setup(cx).await;
+    let other = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer("/symbols/widget.hpp", cx)
+        })
+        .await
+        .unwrap();
+    let store = project.read_with(cx, |project, _| project.lsp_store.clone());
+    let request = proto::GetSyntaxSymbols {
+        project_id: 0,
+        buffer_id: buffer.read_with(cx, |buffer, _| buffer.remote_id().into()),
+        position: Some(other.read_with(cx, |buffer, _| {
+            language::proto::serialize_anchor(&buffer.anchor_before(1))
+        })),
+        version: buffer.read_with(cx, |buffer, _| {
+            language::proto::serialize_version(&buffer.version())
+        }),
+        kind: proto::get_syntax_symbols::Kind::Definition.into(),
+        trace_id: "wrong-buffer".into(),
+    };
+    let error = LspStore::handle_get_syntax_symbols(
+        store,
+        TypedEnvelope {
+            sender_id: proto::PeerId::default(),
+            original_sender_id: None,
+            message_id: 1,
+            payload: request,
+            received_at: Instant::now(),
+        },
+        cx.to_async(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("does not resolve in the source buffer")
+    );
+}
+
+#[gpui::test]
+async fn syntax_index_dropping_remote_query_sends_cancel(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    #[derive(Default)]
+    struct PendingQuery {
+        request_id: Option<String>,
+        finish: Option<futures::channel::oneshot::Sender<()>>,
+        cancelled: bool,
+    }
+
+    for context in [&mut *cx, &mut *server_cx] {
+        context.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+    }
+    let (options, server, guard) = remote::RemoteClient::fake_server(cx, server_cx);
+    let pending_query = server_cx.new(|_| PendingQuery::default());
+    server.add_request_handler(
+        pending_query.downgrade(),
+        |_, _: TypedEnvelope<proto::Ping>, _| async { Ok(proto::Ack {}) },
+    );
+    server.add_entity_request_handler(
+        |query: Entity<PendingQuery>,
+         request: TypedEnvelope<proto::GetSyntaxSymbols>,
+         mut cx| async move {
+            let (finish, finished) = futures::channel::oneshot::channel();
+            query.update(&mut cx, |query, _| {
+                query.request_id = Some(request.payload.trace_id);
+                query.finish = Some(finish);
+            });
+            finished.await?;
+            anyhow::bail!("Cancelled test query");
+        },
+    );
+    server.add_entity_message_handler(
+        |query: Entity<PendingQuery>,
+         cancel: TypedEnvelope<proto::CancelSyntaxSymbols>,
+         mut cx| async move {
+            query.update(&mut cx, |query, _| {
+                assert_eq!(query.request_id.as_deref(), Some(cancel.payload.trace_id.as_str()));
+                query.cancelled = true;
+                query.finish.take().unwrap().send(()).unwrap();
+            });
+            Ok(())
+        },
+    );
+    server.subscribe_to_entity(0, &pending_query);
+    drop(guard);
+
+    let remote = remote::RemoteClient::connect_mock(options, cx).await;
+    let client = remote.read_with(cx, |remote, _| remote.proto_client());
+    assert!(client.supports_syntax_symbols());
+    let trace = SymbolQueryTrace::new("definition");
+    let request = proto::GetSyntaxSymbols {
+        trace_id: trace.0.id.clone(),
+        ..Default::default()
+    };
+    let task = cx.update(|cx| send_remote_symbol_query(client, request, trace, cx));
+    cx.run_until_parked();
+    assert!(pending_query.read_with(server_cx, |query, _| query.finish.is_some()));
+
+    drop(task);
+    cx.run_until_parked();
+    assert!(pending_query.read_with(server_cx, |query, _| query.cancelled));
 }

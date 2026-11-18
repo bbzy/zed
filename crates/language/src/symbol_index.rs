@@ -18,6 +18,14 @@ pub enum SymbolLanguage {
 }
 
 impl SymbolLanguage {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Cpp => "C++",
+            Self::Java => "Java",
+            Self::Kotlin => "Kotlin",
+        }
+    }
+
     pub fn for_name(name: &str) -> Option<Self> {
         match name {
             "C++" => Some(Self::Cpp),
@@ -77,7 +85,7 @@ pub struct Symbol {
     pub owner: String,
     pub type_name: String,
     pub signature: Option<String>,
-    pub arity: Option<usize>,
+    pub arity: Option<(usize, Option<usize>)>,
     pub definition: bool,
     pub local: bool,
     pub private: bool,
@@ -92,6 +100,7 @@ pub struct Occurrence {
     pub scope: usize,
     pub receiver: Option<String>,
     pub arity: Option<usize>,
+    declaration: Option<usize>,
     pub type_position: bool,
 }
 
@@ -173,6 +182,8 @@ impl Document {
                 .declaration_ranges
                 .contains(&(occurrence.range.start, occurrence.range.end))
         });
+        document.declaration_ranges.clear();
+        document.type_owners.clear();
         document
     }
 
@@ -198,7 +209,41 @@ impl Document {
                         + occurrence.receiver.as_ref().map_or(0, String::len)
                 })
                 .sum::<usize>()
-            + self.scopes.len() * std::mem::size_of::<Scope>()
+            + self.scopes.capacity() * std::mem::size_of::<Scope>()
+            + self
+                .scopes
+                .iter()
+                .map(|scope| scope.owner.capacity())
+                .sum::<usize>()
+            + self.symbols.capacity().saturating_sub(self.symbols.len())
+                * std::mem::size_of::<Symbol>()
+            + self
+                .occurrences
+                .capacity()
+                .saturating_sub(self.occurrences.len())
+                * std::mem::size_of::<Occurrence>()
+            + self.imports.capacity() * std::mem::size_of::<Import>()
+            + self
+                .imports
+                .iter()
+                .map(|import| import.path.capacity() + import.alias.capacity())
+                .sum::<usize>()
+            + self.includes.capacity() * std::mem::size_of::<String>()
+            + self.includes.iter().map(String::capacity).sum::<usize>()
+            + self.bases.capacity() * std::mem::size_of::<(String, String)>()
+            + self
+                .bases
+                .iter()
+                .map(|(derived, base)| derived.capacity() + base.capacity())
+                .sum::<usize>()
+            + self
+                .type_owners
+                .iter()
+                .map(|owner| 32 + owner.capacity())
+                .sum::<usize>()
+            + self.excluded.capacity() * std::mem::size_of::<Range<usize>>()
+            + self.package.capacity()
+            + self.path.as_ref().map_or(0, String::capacity)
             + self.declaration_ranges.len() * 32
     }
 
@@ -212,17 +257,19 @@ impl Document {
     }
 
     pub fn occurrence_at(&self, offset: usize) -> Option<Occurrence> {
-        if let Some(symbol) = self
+        if let Some((declaration, symbol)) = self
             .symbols
             .iter()
-            .find(|symbol| symbol.range.start <= offset && offset <= symbol.range.end)
+            .enumerate()
+            .find(|(_, symbol)| symbol.range.start <= offset && offset <= symbol.range.end)
         {
             return Some(Occurrence {
                 name: symbol.name.clone(),
                 range: symbol.range.clone(),
                 scope: symbol.scope,
-                receiver: (!symbol.owner.is_empty()).then(|| symbol.owner.clone()),
-                arity: symbol.arity,
+                receiver: (!symbol.local && !symbol.owner.is_empty()).then(|| symbol.owner.clone()),
+                arity: None,
+                declaration: Some(declaration),
                 type_position: symbol.kind.is_type(),
             });
         }
@@ -258,8 +305,11 @@ impl Document {
             .map_or(offset, |(index, character)| {
                 offset + index + character.len_utf8()
             });
-        let receiver = ["->", "::", "."].iter().find_map(|separator| {
-            let before = before.strip_suffix(separator)?.trim_end();
+        let receiver = if let Some(before) = ["->", "::", "."]
+            .iter()
+            .find_map(|separator| before.strip_suffix(separator))
+        {
+            let before = before.trim_end();
             let receiver = before
                 .char_indices()
                 .rev()
@@ -268,8 +318,19 @@ impl Document {
                 })
                 .last()
                 .map(|(index, _)| &before[index..])?;
-            Some(normalize(receiver))
-        });
+            let receiver = normalize(receiver);
+            if receiver
+                .chars()
+                .next()
+                .is_none_or(|character| !character.is_alphabetic() && character != '_')
+            {
+                return None;
+            }
+            Some(receiver)
+        } else {
+            None
+        };
+
         Some((
             start..end,
             Occurrence {
@@ -278,6 +339,7 @@ impl Document {
                 scope: self.scope_at(offset),
                 receiver,
                 arity: None,
+                declaration: None,
                 type_position: false,
             },
         ))
@@ -412,6 +474,8 @@ impl Document {
                             )
                         })
                     });
+                let mut minimum_arity = 0;
+                let mut variadic = false;
                 let parameter_types: Vec<_> = parameters
                     .into_iter()
                     .flat_map(named_children)
@@ -424,9 +488,28 @@ impl Document {
                                 | "spread_parameter"
                                 | "parameter"
                                 | "function_value_parameter"
+                                | "variadic_parameter"
+                                | "variadic_parameter_declaration"
+                                | "..."
                         )
                     })
-                    .map(|parameter| self.type_for(parameter))
+                    .map(|parameter| {
+                        let spread = matches!(
+                            parameter.kind(),
+                            "spread_parameter"
+                                | "variadic_parameter"
+                                | "variadic_parameter_declaration"
+                                | "..."
+                        );
+                        variadic |= spread;
+                        if !spread
+                            && parameter.kind() != "optional_parameter_declaration"
+                            && parameter.child_by_field_name("default_value").is_none()
+                        {
+                            minimum_arity += 1;
+                        }
+                        self.parameter_signature(parameter)
+                    })
                     .collect();
                 let body = node.child_by_field_name("body").or_else(|| {
                     named_children(node).find(|child| {
@@ -477,7 +560,13 @@ impl Document {
                     Some(owner.clone()),
                 );
                 if let Some(symbol) = self.symbols.last_mut() {
-                    symbol.arity = Some(parameter_types.len());
+                    let no_cpp_parameters = self.language == SymbolLanguage::Cpp
+                        && parameter_types.as_slice() == ["void"];
+                    symbol.arity = Some(if no_cpp_parameters {
+                        (0, Some(0))
+                    } else {
+                        (minimum_arity, (!variadic).then_some(parameter_types.len()))
+                    });
                 }
             }
         }
@@ -586,6 +675,16 @@ impl Document {
         {
             let parent = node.parent();
             let receiver = parent.and_then(|parent| {
+                if matches!(parent.kind(), "qualified_identifier" | "scoped_identifier")
+                    && parent
+                        .child_by_field_name("name")
+                        .is_some_and(|name| name.id() == node.id())
+                {
+                    return parent
+                        .child_by_field_name("scope")
+                        .map(|receiver| normalize(self.source(receiver)));
+                }
+
                 let field = parent
                     .child_by_field_name("field")
                     .or_else(|| parent.child_by_field_name("name"));
@@ -593,14 +692,6 @@ impl Document {
                     parent
                         .child_by_field_name("argument")
                         .or_else(|| parent.child_by_field_name("object"))
-                        .map(|receiver| normalize(self.source(receiver)))
-                } else if matches!(parent.kind(), "qualified_identifier" | "scoped_identifier")
-                    && parent
-                        .child_by_field_name("name")
-                        .is_some_and(|name| name.id() == node.id())
-                {
-                    parent
-                        .child_by_field_name("scope")
                         .map(|receiver| normalize(self.source(receiver)))
                 } else if parent.kind() == "navigation_suffix" {
                     parent
@@ -636,6 +727,7 @@ impl Document {
                 scope: next_scope,
                 receiver,
                 arity,
+                declaration: None,
                 type_position: node_kind == "type_identifier"
                     || parent.is_some_and(|parent| {
                         matches!(
@@ -722,6 +814,35 @@ impl Document {
             }
         }
         String::new()
+    }
+
+    fn parameter_signature(&self, parameter: Node<'_>) -> String {
+        if self.language != SymbolLanguage::Cpp {
+            return self.type_for(parameter);
+        }
+
+        let end = (0..parameter.child_count())
+            .filter_map(|index| parameter.child(index))
+            .find(|child| child.kind() == "=")
+            .map_or(parameter.end_byte(), |separator| separator.start_byte());
+        let declarator = parameter.child_by_field_name("declarator");
+        let name = declarator.and_then(declarator_name);
+        let mut signature = String::new();
+        if let Some(name) = name {
+            signature.push_str(&self.text[parameter.start_byte()..name.start_byte()]);
+            signature.push_str(&self.text[name.end_byte()..end]);
+        } else {
+            signature.push_str(&self.text[parameter.start_byte()..end]);
+        }
+        let mut normalized = String::new();
+        for word in signature.split_whitespace() {
+            if normalized.ends_with(identifier_character) && word.starts_with(identifier_character)
+            {
+                normalized.push(' ');
+            }
+            normalized.push_str(word);
+        }
+        normalized
     }
 
     fn add_symbol(
@@ -827,12 +948,16 @@ impl Document {
             is_static: declaration_text
                 .split_whitespace()
                 .any(|word| word == "static"),
-            file_local: self.language == SymbolLanguage::Cpp
-                && (anonymous_namespace
-                    || (!matches!(kind, Kind::Field | Kind::Method)
-                        && declaration_text
-                            .split_whitespace()
-                            .any(|word| word == "static"))),
+            file_local: (self.language == SymbolLanguage::Kotlin
+                && private
+                && self.scopes[scope].owner.is_empty()
+                && !self.scopes[scope].callable)
+                || (self.language == SymbolLanguage::Cpp
+                    && (anonymous_namespace
+                        || (!matches!(kind, Kind::Field | Kind::Method)
+                            && declaration_text
+                                .split_whitespace()
+                                .any(|word| word == "static")))),
         });
     }
 
@@ -1060,6 +1185,19 @@ impl<'a> Index<'a> {
         let Some(document) = self.documents.get(source) else {
             return Vec::new();
         };
+        if let Some(symbol) = occurrence.declaration {
+            if let Some(diagnostics) = diagnostics {
+                diagnostics.declarations_named = 1;
+            }
+            return vec![(
+                0,
+                SymbolLocation {
+                    document: source,
+                    symbol,
+                },
+            )];
+        }
+
         let owner = &document.scopes[occurrence.scope].owner;
         let receiver = occurrence.receiver.as_ref().and_then(|receiver| {
             if receiver == "this" || receiver == "self" {
@@ -1184,10 +1322,11 @@ impl<'a> Index<'a> {
                 Some("name_mismatch")
             } else if occurrence.type_position && !symbol.kind.is_type() {
                 Some("not_a_type")
-            } else if occurrence.arity.is_some()
-                && symbol.arity.is_some()
-                && occurrence.arity != symbol.arity
-            {
+            } else if occurrence.arity.zip(symbol.arity).is_some_and(
+                |(arity, (minimum, maximum))| {
+                    arity < minimum || maximum.is_some_and(|maximum| arity > maximum)
+                },
+            ) {
                 Some("argument_count_mismatch")
             } else if symbol.file_local
                 && document_index != source
@@ -1388,6 +1527,7 @@ impl<'a> Index<'a> {
                         scope: 0,
                         receiver: None,
                         arity: None,
+                        declaration: None,
                         type_position: true,
                     };
                     if let Some(base) = self.resolve_type(document_index, &occurrence, base) {

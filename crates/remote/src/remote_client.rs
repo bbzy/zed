@@ -44,7 +44,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Weak,
-        atomic::{AtomicU32, AtomicU64, Ordering::SeqCst},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::SeqCst},
     },
     time::{Duration, Instant},
 };
@@ -1529,7 +1529,8 @@ pub trait RemoteConnection: Send + Sync {
     fn simulate_disconnect(&self, _: &AsyncApp) {}
 }
 
-type ResponseChannels = Mutex<HashMap<MessageId, oneshot::Sender<(Envelope, oneshot::Sender<()>)>>>;
+type ResponseChannels =
+    Arc<Mutex<HashMap<MessageId, oneshot::Sender<(Envelope, oneshot::Sender<()>)>>>>;
 type StreamResponseChannels =
     Arc<Mutex<HashMap<MessageId, UnboundedSender<(Result<Envelope>, oneshot::Sender<()>)>>>>;
 
@@ -1575,6 +1576,7 @@ pub(crate) struct ChannelClient {
     name: &'static str,
     task: Mutex<Task<Result<()>>>,
     remote_started: Signal<()>,
+    peer_supports_syntax_symbols: AtomicBool,
     has_wsl_interop: bool,
     executor: BackgroundExecutor,
 }
@@ -1603,6 +1605,7 @@ impl ChannelClient {
                 &cx.to_async(),
             )),
             remote_started: Signal::new(cx),
+            peer_supports_syntax_symbols: AtomicBool::new(false),
             has_wsl_interop,
         })
     }
@@ -1613,7 +1616,10 @@ impl ChannelClient {
 
     fn send_handshake(&self) -> Result<u32> {
         let handshake_id = self.next_message_id.fetch_add(1, SeqCst);
-        let envelope = proto::RemoteStarted {}.into_envelope(handshake_id, None, None);
+        let envelope = proto::RemoteStarted {
+            supports_syntax_symbols: true,
+        }
+        .into_envelope(handshake_id, None, None);
         self.outgoing_tx.lock().unbounded_send(envelope)?;
         Ok(handshake_id)
     }
@@ -1683,7 +1689,9 @@ impl ChannelClient {
             return;
         }
 
-        if let Some(proto::envelope::Payload::RemoteStarted(_)) = &incoming.payload {
+        if let Some(proto::envelope::Payload::RemoteStarted(started)) = &incoming.payload {
+            this.peer_supports_syntax_symbols
+                .store(started.supports_syntax_symbols, SeqCst);
             this.remote_started.set(());
             let mut envelope = proto::Ack {}.into_envelope(0, Some(incoming.id), None);
             envelope.id = this.next_message_id.fetch_add(1, SeqCst);
@@ -1892,10 +1900,15 @@ impl ChannelClient {
         use_buffer: bool,
     ) -> impl 'static + Future<Output = Result<proto::Envelope>> {
         envelope.id = self.next_message_id.fetch_add(1, SeqCst);
+        let message_id = MessageId(envelope.id);
         let (tx, rx) = oneshot::channel();
-        let mut response_channels_lock = self.response_channels.lock();
-        response_channels_lock.insert(MessageId(envelope.id), tx);
-        drop(response_channels_lock);
+        self.response_channels.lock().insert(message_id, tx);
+        let response_channels = Arc::downgrade(&self.response_channels);
+        let cleanup = util::defer(move || {
+            if let Some(response_channels) = response_channels.upgrade() {
+                response_channels.lock().remove(&message_id);
+            }
+        });
 
         let result = if use_buffer {
             self.send_buffered(envelope)
@@ -1903,6 +1916,7 @@ impl ChannelClient {
             self.send_unbuffered(envelope)
         };
         async move {
+            let _cleanup = cleanup;
             if let Err(error) = &result {
                 log::error!("failed to send message: {error}");
                 anyhow::bail!("failed to send message: {error}");
@@ -1987,6 +2001,10 @@ impl ChannelClient {
 }
 
 impl ProtoClient for ChannelClient {
+    fn supports_syntax_symbols(&self) -> bool {
+        self.peer_supports_syntax_symbols.load(SeqCst)
+    }
+
     fn request(
         &self,
         envelope: proto::Envelope,
@@ -2126,7 +2144,7 @@ mod tests {
             Some(proto::envelope::Payload::RemoteStarted(_))
         ));
         incoming_tx
-            .unbounded_send(proto::RemoteStarted {}.into_envelope(0, None, None))
+            .unbounded_send(proto::RemoteStarted::default().into_envelope(0, None, None))
             .unwrap();
         outgoing_rx.next().await.unwrap();
 
@@ -2136,6 +2154,9 @@ mod tests {
         ping_response.ack_id = Some(ping.id);
         incoming_tx.unbounded_send(ping_response).unwrap();
         let remote = initial_connection.await.unwrap().unwrap();
+        assert!(!remote.read_with(cx, |remote, _| {
+            remote.proto_client().supports_syntax_symbols()
+        }));
 
         remote.update(cx, |remote, _| {
             remote.client.send(proto::Test { id: 1 }).unwrap();
@@ -2168,10 +2189,18 @@ mod tests {
 
         let server_greeting_id = 99;
         incoming_tx
-            .unbounded_send(proto::RemoteStarted {}.into_envelope(server_greeting_id, None, None))
+            .unbounded_send(
+                proto::RemoteStarted {
+                    supports_syntax_symbols: true,
+                }
+                .into_envelope(server_greeting_id, None, None),
+            )
             .unwrap();
         let greeting_ack = outgoing_rx.next().await.unwrap();
         assert_eq!(greeting_ack.responding_to, Some(server_greeting_id));
+        assert!(remote.read_with(cx, |remote, _| {
+            remote.proto_client().supports_syntax_symbols()
+        }));
         assert!(matches!(
             greeting_ack.payload,
             Some(proto::envelope::Payload::Ack(_))
@@ -2212,6 +2241,23 @@ mod tests {
         }
         assert_eq!(outgoing_rx.next().await.unwrap(), message_during_resync);
         assert!(outgoing_rx.next().now_or_never().is_none());
+    }
+
+    #[gpui::test]
+    async fn test_channel_client_releases_cancelled_requests(cx: &mut TestAppContext) {
+        let (_incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
+        let (outgoing_tx, _outgoing_rx) = mpsc::unbounded::<Envelope>();
+        let client =
+            cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test-client", false));
+
+        let request = client.request(proto::Ping {});
+        assert_eq!(client.response_channels.lock().len(), 1);
+        drop(request);
+        assert!(client.response_channels.lock().is_empty());
+
+        let request = client.request(proto::Ping {});
+        drop(client);
+        assert_eq!(request.await.unwrap_err().to_string(), "connection lost");
     }
 
     #[gpui::test]

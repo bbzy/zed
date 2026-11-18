@@ -346,6 +346,19 @@ async fn syntax_symbols_invalidate_closed_files_on_change_rename_and_delete(
             .any(|completion| completion.new_text == "FreshNext")
     );
 
+    buffer.update(cx, |buffer, cx| buffer.set_text("FreshNext value;", cx));
+    let locations = project
+        .update(cx, |project, cx| project.definitions(&buffer, 3, cx))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(locations.len(), 1);
+    locations[0].target.buffer.read_with(cx, |buffer, _| {
+        assert_eq!(buffer.file().unwrap().path().as_unix_str(), "renamed.hpp");
+    });
+    drop(locations);
+    buffer.update(cx, |buffer, cx| buffer.set_text("Fresh", cx));
+
     fs.remove_file(path!("/symbols/renamed.hpp").as_ref(), Default::default())
         .await
         .unwrap();
@@ -394,7 +407,11 @@ async fn syntax_symbols_normalize_crlf_and_decode_bom_files(cx: &mut TestAppCont
         .await
         .unwrap();
     cx.run_until_parked();
-    for receiver in ["one", "two", "three"] {
+    for (receiver, header) in [
+        ("one", "crlf.hpp"),
+        ("two", "bom.hpp"),
+        ("three", "utf16.hpp"),
+    ] {
         let offset = text.find(&format!("{receiver}.reset")).unwrap() + receiver.len() + 1;
         let definitions = project
             .update(cx, |project, cx| project.definitions(&buffer, offset, cx))
@@ -403,10 +420,63 @@ async fn syntax_symbols_normalize_crlf_and_decode_bom_files(cx: &mut TestAppCont
             .unwrap();
         assert_eq!(definitions.len(), 1);
         definitions[0].target.buffer.read_with(cx, |target, _| {
+            assert_eq!(target.file().unwrap().path().as_unix_str(), header);
             let snapshot = target.snapshot();
             let range = definitions[0].target.range.to_offset(&snapshot);
             assert_eq!(snapshot.text().get(range), Some("reset"));
             assert_eq!(snapshot.line_ending(), LineEnding::Windows);
+        });
+    }
+}
+
+#[gpui::test]
+async fn syntax_symbols_closed_files_follow_language_settings_and_modelines(
+    cx: &mut TestAppContext,
+) {
+    let (fs, project, buffer) = setup(cx).await;
+    cx.update(|cx| {
+        settings::SettingsStore::update_global(cx, |store, cx| {
+            store
+                .set_user_settings(r#"{"file_types":{"C++":["custom-header"]}}"#, cx)
+                .unwrap();
+        });
+    });
+    fs.insert_tree(
+        path!("/symbols"),
+        json!({
+            "settings.custom-header": "struct SettingsType {};",
+            "modeline.data": "// -*- mode: C++; -*-\nstruct ModelineType {};",
+        }),
+    )
+    .await;
+    cx.run_until_parked();
+    let text = "SettingsType settings; ModelineType modeline; Widget widget;";
+    buffer.update(cx, |buffer, cx| buffer.set_text(text, cx));
+
+    let header = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer(path!("/symbols/widget.hpp"), cx)
+        })
+        .await
+        .unwrap();
+    header.update(cx, |buffer, cx| {
+        buffer.set_language(Some(language::PLAIN_TEXT.clone()), cx)
+    });
+
+    for (name, path) in [
+        ("SettingsType", "settings.custom-header"),
+        ("ModelineType", "modeline.data"),
+        ("Widget", "widget.hpp"),
+    ] {
+        let offset = text.find(name).unwrap() + 1;
+        let locations = project
+            .update(cx, |project, cx| project.definitions(&buffer, offset, cx))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(locations.len(), 1);
+        locations[0].target.buffer.read_with(cx, |buffer, _| {
+            assert_eq!(buffer.file().unwrap().path().as_unix_str(), path);
         });
     }
 }

@@ -5641,37 +5641,7 @@ impl LspStore {
                 .or(settings_store.raw_default_settings().modeline_lines)
                 .unwrap_or(5);
 
-            const MAX_MODELINE_BYTES: usize = 1024;
-
-            let first_bytes =
-                content.clip_offset(content.len().min(MAX_MODELINE_BYTES), Bias::Left);
-            let mut first_lines = Vec::new();
-            let mut lines = content.chunks_in_range(0..first_bytes).lines();
-            for _ in 0..modeline_lines {
-                if let Some(line) = lines.next() {
-                    first_lines.push(line.to_string());
-                } else {
-                    break;
-                }
-            }
-            let first_lines_ref: Vec<_> = first_lines.iter().map(|line| line.as_str()).collect();
-
-            let last_start =
-                content.clip_offset(content.len().saturating_sub(MAX_MODELINE_BYTES), Bias::Left);
-            let mut last_lines = Vec::new();
-            let mut lines = content
-                .reversed_chunks_in_range(last_start..content.len())
-                .lines();
-            for _ in 0..modeline_lines {
-                if let Some(line) = lines.next() {
-                    last_lines.push(line.to_string());
-                } else {
-                    break;
-                }
-            }
-            let last_lines_ref: Vec<_> =
-                last_lines.iter().rev().map(|line| line.as_str()).collect();
-            modeline::parse_modeline(&first_lines_ref, &last_lines_ref)
+            modeline::parse_modeline_from_rope(content, modeline_lines)
         };
 
         log::debug!("Parsed modeline settings: {:?}", modeline_settings);
@@ -6427,6 +6397,10 @@ impl LspStore {
     }
 
     fn on_settings_changed(&mut self, cx: &mut Context<Self>) {
+        let mut jobs = self.symbol_index.jobs.lock();
+        jobs.settings_generation = jobs.settings_generation.wrapping_add(1);
+        drop(jobs);
+
         self.request_workspace_config_refresh();
 
         let new_semantic_token_rules = crate::project_settings::ProjectSettings::get_global(cx)

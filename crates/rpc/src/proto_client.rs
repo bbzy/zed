@@ -84,6 +84,10 @@ pub trait ProtoClient: Send + Sync {
 
     fn is_via_collab(&self) -> bool;
     fn has_wsl_interop(&self) -> bool;
+
+    fn supports_syntax_symbols(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Default)]
@@ -212,6 +216,10 @@ where
 }
 
 impl AnyProtoClient {
+    pub fn supports_syntax_symbols(&self) -> bool {
+        self.0.client.supports_syntax_symbols()
+    }
+
     pub fn new<T: ProtoClient + 'static>(client: Arc<T>) -> Self {
         Self(Arc::new(State {
             client,

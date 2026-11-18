@@ -262,18 +262,20 @@ async fn syntax_symbols_remote_cancellation_reaches_server(
         kind: rpc::proto::get_syntax_symbols::Kind::Definition.into(),
         trace_id: "wire-cancel".into(),
     });
-    let task = cx.executor().spawn({
+    let mut task = cx.executor().spawn({
         let client = client.clone();
         async move { client.request(request).await }
     });
     cx.run_until_parked();
+    assert!(futures::poll!(&mut task).is_pending());
     client
         .send(rpc::proto::CancelSyntaxSymbols {
             project_id: 0,
             trace_id: "wire-cancel".into(),
         })
         .unwrap();
-    assert!(task.await.is_err());
+    let error = task.await.unwrap_err();
+    assert!(format!("{error:#}").contains("Syntax query cancelled"));
     let offset = buffer.read_with(cx, |buffer, _| buffer.text().rfind("reset").unwrap());
     assert!(
         project

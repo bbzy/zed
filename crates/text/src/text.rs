@@ -2577,6 +2577,40 @@ impl BufferSnapshot {
         }
     }
 
+    pub fn try_offset_for_anchor(&self, anchor: &Anchor) -> Option<usize> {
+        if !self.can_resolve(anchor) {
+            return None;
+        }
+        if anchor.is_min() {
+            return Some(0);
+        }
+        if anchor.is_max() {
+            return Some(self.len());
+        }
+
+        let insertion = self.try_find_fragment(anchor)?;
+        if insertion.timestamp != anchor.timestamp() {
+            return None;
+        }
+        let (start, _, fragment) = self
+            .fragments
+            .find::<Dimensions<Option<&Locator>, usize>, _>(
+                &None,
+                &Some(&insertion.fragment_id),
+                Bias::Left,
+            );
+        let fragment = fragment?;
+        if fragment.id != insertion.fragment_id {
+            return None;
+        }
+        let offset = anchor.offset.checked_sub(insertion.split_offset)?;
+        if offset > fragment.len {
+            return None;
+        }
+        let offset = start.1 + if fragment.visible { offset as usize } else { 0 };
+        (self.clip_offset(offset, Bias::Left) == offset).then_some(offset)
+    }
+
     #[cold]
     fn panic_bad_anchor(&self, anchor: &Anchor) -> ! {
         if anchor.buffer_id != self.remote_id {

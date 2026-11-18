@@ -3357,6 +3357,42 @@ mod tests {
         panel.read_with(cx, |panel, _| {
             assert!(panel.error.is_none(), "{:?}", panel.error)
         });
+
+        let project = workspace.update_in(cx, |workspace, window, cx| {
+            let diff_pane = workspace.pane_for_item_id(diff.entity_id()).unwrap();
+            workspace::move_item(
+                &other_pane,
+                &diff_pane,
+                editor.entity_id(),
+                0,
+                true,
+                window,
+                cx,
+            );
+            workspace.project().clone()
+        });
+        let root_entry = project.read_with(cx, |project, cx| {
+            let worktree_id = buffer.read(cx).file().unwrap().worktree_id(cx);
+            project
+                .entry_for_path(
+                    &project::ProjectPath {
+                        worktree_id,
+                        path: util::rel_path::RelPath::empty_arc(),
+                    },
+                    cx,
+                )
+                .unwrap()
+                .id
+        });
+        project
+            .update(cx, |project, cx| project.delete_entry(root_entry, cx))
+            .unwrap()
+            .await
+            .unwrap();
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.pane_for_item_id(diff.entity_id()).is_none());
+            assert!(workspace.pane_for_item_id(editor.entity_id()).is_none());
+        });
     }
 
     #[gpui::test(iterations = 3)]

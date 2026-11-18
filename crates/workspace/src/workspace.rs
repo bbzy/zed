@@ -8033,7 +8033,9 @@ impl Workspace {
                             .push(item.item_id().as_u64() as ItemId);
                     }
 
-                    if let Some(project_path) = item.project_path(cx) {
+                    if item.singleton_view_type(cx).is_none()
+                        && let Some(project_path) = item.project_path(cx)
+                    {
                         items_by_project_path.insert(project_path, item.clone());
                     }
                     all_deserialized_items.push(item);
