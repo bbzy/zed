@@ -8,6 +8,7 @@ fn cpp_language() -> Arc<Language> {
             name: "C++".into(),
             matcher: LanguageMatcher {
                 path_suffixes: vec!["cpp".into(), "hpp".into()],
+                modeline_aliases: vec!["cpp".into()],
                 ..Default::default()
             }
             .into(),
@@ -437,7 +438,10 @@ async fn syntax_symbols_closed_files_follow_language_settings_and_modelines(
     cx.update(|cx| {
         settings::SettingsStore::update_global(cx, |store, cx| {
             store
-                .set_user_settings(r#"{"file_types":{"C++":["custom-header"]}}"#, cx)
+                .set_user_settings(
+                    r#"{"file_types":{"C++":["custom-header"]},"modeline_lines":66}"#,
+                    cx,
+                )
                 .unwrap();
         });
     });
@@ -449,8 +453,30 @@ async fn syntax_symbols_closed_files_follow_language_settings_and_modelines(
         }),
     )
     .await;
+    let trailer = format!(
+        "{}struct LateType {{}};\n// vim: set ft=cpp :\n",
+        "// filler\n".repeat(1024)
+    );
+    fs.insert_file(path!("/symbols/trailer.data"), trailer.into_bytes())
+        .await;
+    let utf16 = "// -*- mode: C++; -*-\nstruct WideType {};"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    fs.insert_file(path!("/symbols/wide.data"), utf16).await;
+    let crlf = format!(
+        "//{}\r\n{}// -*- mode: C++; -*-\r\nstruct CrlfType {{}};\r\n{}",
+        "x".repeat(916),
+        "\r\n".repeat(64),
+        "// filler\r\n".repeat(600),
+    );
+    fs.insert_file(path!("/symbols/crlf.data"), crlf.into_bytes())
+        .await;
     cx.run_until_parked();
-    let text = "SettingsType settings; ModelineType modeline; Widget widget;";
+    let text = concat!(
+        "SettingsType settings; ModelineType modeline; LiveWidget widget; ",
+        "LateType trailer; WideType wide; CrlfType crlf;",
+    );
     buffer.update(cx, |buffer, cx| buffer.set_text(text, cx));
 
     let header = project
@@ -460,13 +486,17 @@ async fn syntax_symbols_closed_files_follow_language_settings_and_modelines(
         .await
         .unwrap();
     header.update(cx, |buffer, cx| {
-        buffer.set_language(Some(language::PLAIN_TEXT.clone()), cx)
+        buffer.set_language(Some(language::PLAIN_TEXT.clone()), cx);
+        buffer.set_text("struct LiveWidget {};", cx);
     });
 
     for (name, path) in [
         ("SettingsType", "settings.custom-header"),
         ("ModelineType", "modeline.data"),
-        ("Widget", "widget.hpp"),
+        ("LiveWidget", "widget.hpp"),
+        ("LateType", "trailer.data"),
+        ("WideType", "wide.data"),
+        ("CrlfType", "crlf.data"),
     ] {
         let offset = text.find(name).unwrap() + 1;
         let locations = project

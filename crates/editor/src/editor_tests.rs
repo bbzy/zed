@@ -25160,6 +25160,69 @@ async fn test_word_completion(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_word_completions_with_empty_incomplete_lsp_response(cx: &mut TestAppContext) {
+    init_test(cx, |language_settings| {
+        language_settings.defaults.completions = Some(CompletionSettingsContent {
+            words: Some(WordsCompletionMode::Fallback),
+            words_min_length: Some(0),
+            ..Default::default()
+        });
+    });
+    let mut cx = EditorLspTestContext::new_rust(
+        lsp::ServerCapabilities {
+            completion_provider: Some(lsp::CompletionOptions::default()),
+            ..Default::default()
+        },
+        cx,
+    )
+    .await;
+    let mut requests = cx
+        .lsp
+        .set_request_handler::<lsp::request::Completion, _, _>(|request, _| {
+            let followup = request.text_document_position.position.character == 5;
+            async move {
+                Ok(Some(lsp::CompletionResponse::List(lsp::CompletionList {
+                    is_incomplete: !followup,
+                    item_defaults: None,
+                    items: if followup {
+                        vec![lsp::CompletionItem {
+                            label: "prefixFromServer".into(),
+                            ..Default::default()
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                })))
+            }
+        });
+    cx.set_state("prefix\nprefˇ");
+    cx.update_editor(|editor, window, cx| {
+        editor.show_completions(&ShowCompletions, window, cx);
+    });
+    cx.executor().run_until_parked();
+    assert!(requests.next().await.is_some());
+    cx.update_editor(|editor, _, _| {
+        let context_menu = editor.context_menu.borrow();
+        let Some(CodeContextMenu::Completions(menu)) = context_menu.as_ref() else {
+            panic!("expected word completions");
+        };
+        assert_eq!(completion_menu_entries(menu), &["prefix"]);
+        assert!(menu.is_incomplete);
+    });
+
+    cx.simulate_keystroke("i");
+    cx.executor().run_until_parked();
+    assert!(requests.next().await.is_some());
+    cx.update_editor(|editor, _, _| {
+        let context_menu = editor.context_menu.borrow();
+        let Some(CodeContextMenu::Completions(menu)) = context_menu.as_ref() else {
+            panic!("expected LSP completions");
+        };
+        assert_eq!(completion_menu_entries(menu), &["prefixFromServer"]);
+    });
+}
+
+#[gpui::test]
 async fn test_word_completions_do_not_duplicate_lsp_ones(cx: &mut TestAppContext) {
     init_test(cx, |language_settings| {
         language_settings.defaults.completions = Some(CompletionSettingsContent {

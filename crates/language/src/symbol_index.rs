@@ -10,7 +10,7 @@ use std::{
 #[cfg(test)]
 mod tests;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SymbolLanguage {
     Cpp,
     Java,
@@ -85,6 +85,7 @@ pub struct Symbol {
     pub owner: String,
     pub type_name: String,
     pub signature: Option<String>,
+    pub method_qualifiers: String,
     pub arity: Option<(usize, Option<usize>)>,
     pub definition: bool,
     pub local: bool,
@@ -198,6 +199,7 @@ impl Document {
                         + symbol.owner.len()
                         + symbol.type_name.len()
                         + symbol.signature.as_ref().map_or(0, String::len)
+                        + symbol.method_qualifiers.capacity()
                 })
                 .sum::<usize>()
             + self
@@ -305,10 +307,12 @@ impl Document {
             .map_or(offset, |(index, character)| {
                 offset + index + character.len_utf8()
             });
-        let receiver = if let Some(before) = ["->", "::", "."]
-            .iter()
-            .find_map(|separator| before.strip_suffix(separator))
-        {
+        let receiver = if let Some((separator, before)) =
+            ["->", "::", "."].into_iter().find_map(|separator| {
+                before
+                    .strip_suffix(separator)
+                    .map(|before| (separator, before))
+            }) {
             let before = before.trim_end();
             let receiver = before
                 .char_indices()
@@ -317,16 +321,49 @@ impl Document {
                     identifier_character(*character) || *character == ':' || *character == '.'
                 })
                 .last()
-                .map(|(index, _)| &before[index..])?;
-            let receiver = normalize(receiver);
-            if receiver
-                .chars()
-                .next()
-                .is_none_or(|character| !character.is_alphabetic() && character != '_')
-            {
-                return None;
+                .map(|(index, _)| normalize(&before[index..]));
+            match receiver {
+                _ if separator == "::"
+                    && self.language == SymbolLanguage::Cpp
+                    && receiver.as_deref().is_none_or(|receiver| {
+                        matches!(
+                            receiver,
+                            ":" | "return"
+                                | "co_return"
+                                | "throw"
+                                | "co_yield"
+                                | "co_await"
+                                | "new"
+                                | "delete"
+                                | "sizeof"
+                                | "alignof"
+                                | "case"
+                                | "using"
+                                | "typename"
+                                | "typedef"
+                                | "const"
+                                | "volatile"
+                                | "struct"
+                                | "class"
+                                | "enum"
+                                | "union"
+                                | "friend"
+                        )
+                    }) =>
+                {
+                    Some("::".to_owned())
+                }
+                Some(receiver)
+                    if receiver
+                        .trim_start_matches("::")
+                        .starts_with(|character: char| {
+                            character.is_alphabetic() || matches!(character, '_' | '$')
+                        }) =>
+                {
+                    Some(receiver)
+                }
+                _ => return None,
             }
-            Some(receiver)
         } else {
             None
         };
@@ -476,9 +513,12 @@ impl Document {
                     });
                 let mut minimum_arity = 0;
                 let mut variadic = false;
-                let parameter_types: Vec<_> = parameters
+                let mut parameter_types: Vec<_> = parameters
                     .into_iter()
-                    .flat_map(named_children)
+                    .flat_map(|parameters| {
+                        (0..parameters.child_count())
+                            .filter_map(move |index| parameters.child(index))
+                    })
                     .filter(|child| {
                         matches!(
                             child.kind(),
@@ -511,6 +551,10 @@ impl Document {
                         self.parameter_signature(parameter)
                     })
                     .collect();
+                if self.language == SymbolLanguage::Cpp && parameter_types.as_slice() == ["void"] {
+                    parameter_types.clear();
+                    minimum_arity = 0;
+                }
                 let body = node.child_by_field_name("body").or_else(|| {
                     named_children(node).find(|child| {
                         matches!(
@@ -550,6 +594,20 @@ impl Document {
                     owner = extension;
                 }
                 let type_name = self.type_for(node);
+                let mut method_qualifiers = String::new();
+                if self.language == SymbolLanguage::Cpp
+                    && let Some(declarator) = declarator
+                {
+                    for qualifier in ["const", "volatile", "&", "&&"] {
+                        if named_children(declarator).any(|child| {
+                            matches!(child.kind(), "type_qualifier" | "ref_qualifier")
+                                && self.source(child) == qualifier
+                        }) {
+                            method_qualifiers.push(' ');
+                            method_qualifiers.push_str(qualifier);
+                        }
+                    }
+                }
                 self.add_symbol(
                     name,
                     kind,
@@ -560,13 +618,9 @@ impl Document {
                     Some(owner.clone()),
                 );
                 if let Some(symbol) = self.symbols.last_mut() {
-                    let no_cpp_parameters = self.language == SymbolLanguage::Cpp
-                        && parameter_types.as_slice() == ["void"];
-                    symbol.arity = Some(if no_cpp_parameters {
-                        (0, Some(0))
-                    } else {
-                        (minimum_arity, (!variadic).then_some(parameter_types.len()))
-                    });
+                    symbol.method_qualifiers = method_qualifiers;
+                    symbol.arity =
+                        Some((minimum_arity, (!variadic).then_some(parameter_types.len())));
                 }
             }
         }
@@ -827,13 +881,64 @@ impl Document {
             .map_or(parameter.end_byte(), |separator| separator.start_byte());
         let declarator = parameter.child_by_field_name("declarator");
         let name = declarator.and_then(declarator_name);
-        let mut signature = String::new();
-        if let Some(name) = name {
-            signature.push_str(&self.text[parameter.start_byte()..name.start_byte()]);
-            signature.push_str(&self.text[name.end_byte()..end]);
-        } else {
-            signature.push_str(&self.text[parameter.start_byte()..end]);
+        let by_value = declarator.is_none() || declarator == name;
+        let mut omitted = Vec::new();
+        let mut qualifiers = BTreeSet::new();
+        for child in named_children(parameter).take_while(|child| child.start_byte() < end) {
+            if child.kind() == "type_qualifier"
+                && matches!(self.source(child), "const" | "volatile")
+            {
+                omitted.push(child.byte_range());
+                if !by_value {
+                    qualifiers.insert(self.source(child));
+                }
+            }
         }
+        if let Some(name) = name {
+            omitted.push(name.byte_range());
+        }
+        let mut outer_type = declarator;
+        while let Some(inner) = outer_type.and_then(|node| node.child_by_field_name("declarator")) {
+            if Some(inner) == name {
+                break;
+            }
+            outer_type = Some(inner);
+        }
+        if let Some(pointer) = outer_type.filter(|node| {
+            matches!(
+                node.kind(),
+                "pointer_declarator" | "abstract_pointer_declarator"
+            )
+        }) {
+            omitted.extend(named_children(pointer).filter_map(|child| {
+                (child.kind() == "type_qualifier"
+                    && matches!(self.source(child), "const" | "volatile"))
+                .then_some(child.byte_range())
+            }));
+        }
+        let raw = &self.text[parameter.start_byte()..end];
+        if raw.contains("/*") || raw.contains("//") {
+            let mut nodes = vec![parameter];
+            while let Some(node) = nodes.pop() {
+                nodes.extend(named_children(node).filter(|child| child.start_byte() < end));
+                if node.kind() == "comment" {
+                    omitted.push(node.byte_range());
+                }
+            }
+        }
+        omitted.sort_by_key(|range| range.start);
+        let mut signature = String::new();
+        for qualifier in qualifiers {
+            signature.push_str(qualifier);
+            signature.push(' ');
+        }
+        let mut offset = parameter.start_byte();
+        for range in omitted {
+            signature.push_str(&self.text[offset..range.start]);
+            signature.push(' ');
+            offset = range.end;
+        }
+        signature.push_str(&self.text[offset..end]);
         let mut normalized = String::new();
         for word in signature.split_whitespace() {
             if normalized.ends_with(identifier_character) && word.starts_with(identifier_character)
@@ -941,6 +1046,7 @@ impl Document {
             owner,
             type_name,
             signature,
+            method_qualifiers: String::new(),
             arity: None,
             definition,
             local: self.scopes[scope].callable,
@@ -1132,7 +1238,8 @@ impl<'a> Index<'a> {
                 let symbol = &self.documents[location.document].symbols[location.symbol];
                 seen.insert((
                     self.name_in_document(source, location).to_owned(),
-                    symbol.signature.clone(),
+                    symbol.signature.as_deref(),
+                    symbol.method_qualifiers.as_str(),
                 ))
                 .then_some(location)
             })
@@ -1173,6 +1280,7 @@ impl<'a> Index<'a> {
             && (left_symbol.kind == right_symbol.kind
                 || (left_symbol.kind.is_callable() && right_symbol.kind.is_callable()))
             && left_symbol.signature == right_symbol.signature
+            && left_symbol.method_qualifiers == right_symbol.method_qualifiers
     }
 
     fn candidates(
@@ -1200,6 +1308,11 @@ impl<'a> Index<'a> {
 
         let owner = &document.scopes[occurrence.scope].owner;
         let receiver = occurrence.receiver.as_ref().and_then(|receiver| {
+            if document.language == SymbolLanguage::Cpp {
+                if let Some(global) = receiver.strip_prefix("::") {
+                    return Some(global.to_owned());
+                }
+            }
             if receiver == "this" || receiver == "self" {
                 return Some(qualify(&normalize(&document.package), owner));
             }
@@ -1371,7 +1484,10 @@ impl<'a> Index<'a> {
                 }
                 distance
             } else if let Some(receiver) = &receiver {
-                if !self.owner_matches(source, receiver, document_index, &symbol.owner) {
+                if receiver.is_empty() && !symbol.owner.is_empty()
+                    || !receiver.is_empty()
+                        && !self.owner_matches(source, receiver, document_index, &symbol.owner)
+                {
                     reject("receiver_owner_mismatch");
                     continue;
                 }

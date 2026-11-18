@@ -399,7 +399,7 @@ fn java_packages_imports_inheritance_and_overloads() {
         ),
         document(
             SymbolLanguage::Java,
-            "package other; import sample.Base; class Child extends Base { void run(Child widget) { int value = 1; widget.reset(); value++; } }",
+            "package other; import sample.Base; class Child extends Base { void run(Child $widget) { int value = 1; $widget.reset(); value++; } }",
         ),
     ];
     let targets = resolved_symbols(&documents, 1, documents[1].text.rfind("reset()").unwrap());
@@ -408,7 +408,7 @@ fn java_packages_imports_inheritance_and_overloads() {
         targets[0].range.start,
         documents[0].text.find("reset()").unwrap()
     );
-    let names = completion_names(&documents, 1, "widget.re");
+    let names = completion_names(&documents, 1, "$widget.re");
     assert_eq!(names, ["reset", "reset"]);
     assert_eq!(
         resolved_names(&documents, 1, "value++"),
@@ -557,6 +557,65 @@ fn cpp_qualified_default_arguments_and_declaration_identity() {
     }
 
     assert!(document.completion_context(offset("1.;") + 2).is_none());
+}
+
+#[test]
+fn cpp_function_identity_variadics_and_global_completion() {
+    let document = document(
+        SymbolLanguage::Cpp,
+        r#"void match(const int);
+         void match(int value) {}
+         void pointee(int const *arg);
+         void pointee(const int *value) {}
+         void pointee(int *value);
+         void pointer(int *const);
+         void pointer(int *value) {}
+         void zero(void);
+         void zero() {}
+         void log(const char *, ...);
+         struct Widget { void run(int); void run(const int) const; };
+         int global();
+         namespace other { int global(); int run() {
+             log("%d", 1);
+             zero();
+             (void)sizeof(::global());
+             (void)(true ? 0 : ::global());
+             return ::global();
+         } }"#,
+    );
+    let index = Index::new(std::slice::from_ref(&document));
+    for (declaration, target_count) in [
+        ("match(const", 2),
+        ("pointee(int const", 2),
+        ("pointer(int *const", 2),
+        ("zero(void", 2),
+        (r#"log("%d"#, 1),
+        ("zero();", 2),
+        ("run(int)", 1),
+        ("run(const int)", 1),
+    ] {
+        let offset = document.text.find(declaration).unwrap();
+        let occurrence = document.occurrence_at(offset).unwrap();
+        assert_eq!(
+            index.resolve(0, &occurrence).len(),
+            target_count,
+            "{declaration}"
+        );
+    }
+    let qualified = resolved_symbols(
+        std::slice::from_ref(&document),
+        0,
+        document.text.find("run(const int)").unwrap(),
+    );
+    assert_eq!(qualified[0].signature.as_deref(), Some("int"));
+    assert_eq!(qualified[0].method_qualifiers, " const");
+    for (start, _) in document.text.match_indices("::global()") {
+        let offset = start + "::glo".len();
+        let (_, occurrence) = document.completion_context(offset).unwrap();
+        let targets = index.complete(0, &occurrence);
+        assert_eq!(targets.len(), 1);
+        assert!(document.symbols[targets[0].symbol].owner.is_empty());
+    }
 }
 
 #[test]

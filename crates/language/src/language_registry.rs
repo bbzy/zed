@@ -110,6 +110,7 @@ struct LanguageRegistryState {
     subscription: (watch::Sender<()>, watch::Receiver<()>),
     theme: Option<Arc<Theme>>,
     version: usize,
+    language_configuration_version: usize,
     reload_count: usize,
 
     #[cfg(any(test, feature = "test-support"))]
@@ -184,6 +185,7 @@ impl LanguageRegistry {
                 subscription: watch::channel(),
                 theme: Default::default(),
                 version: 0,
+                language_configuration_version: 0,
                 reload_count: 0,
 
                 #[cfg(any(test, feature = "test-support"))]
@@ -461,6 +463,7 @@ impl LanguageRegistry {
             state.languages.retain(|language| language.name() != name);
         }
 
+        state.language_configuration_version += 1;
         state.version += 1;
         state.reload_count += 1;
         *state.subscription.0.borrow_mut() = ();
@@ -525,6 +528,7 @@ impl LanguageRegistry {
             || !grammars_to_remove.is_empty()
             || registrations.iter().any(|status| status.is_registered());
         if changed {
+            state.language_configuration_version += 1;
             state.version += 1;
             state.reload_count += 1;
             *state.subscription.0.borrow_mut() = ();
@@ -541,7 +545,9 @@ impl LanguageRegistry {
         &self,
         grammars: impl IntoIterator<Item = (impl Into<Arc<str>>, impl Into<tree_sitter::Language>)>,
     ) {
-        self.state.write().grammars.extend(
+        let mut state = self.state.write();
+        state.language_configuration_version += 1;
+        state.grammars.extend(
             grammars
                 .into_iter()
                 .map(|(name, grammar)| (name.into(), AvailableGrammar::Native(grammar.into()))),
@@ -566,6 +572,7 @@ impl LanguageRegistry {
                 .grammars
                 .insert(name, AvailableGrammar::Unloaded(path));
         }
+        state.language_configuration_version += 1;
         state.version += 1;
         state.reload_count += 1;
         *state.subscription.0.borrow_mut() = ();
@@ -609,6 +616,7 @@ impl LanguageRegistry {
             loaded: true,
             origin: LanguageOrigin::Native,
         });
+        state.language_configuration_version += 1;
         state.add(language);
     }
 
@@ -620,6 +628,20 @@ impl LanguageRegistry {
     /// by adding languages or reloading.
     pub fn version(&self) -> usize {
         self.state.read().version
+    }
+
+    /// Changes when language matchers or grammar registrations change, or languages are reloaded.
+    /// Loading a registered language on demand does not change its configuration.
+    pub fn language_configuration_version(&self) -> usize {
+        self.state.read().language_configuration_version
+    }
+
+    pub fn has_loaded_grammar(&self, name: &str) -> bool {
+        self.state
+            .read()
+            .languages
+            .iter()
+            .any(|language| language.name().as_ref() == name && language.grammar().is_some())
     }
 
     /// Returns the number of times that the registry has been reloaded.
@@ -1138,6 +1160,7 @@ impl LanguageRegistryState {
 
     fn reload(&mut self) {
         self.languages.clear();
+        self.language_configuration_version += 1;
         self.version += 1;
         self.reload_count += 1;
         self.available_languages.mark_all_unloaded();

@@ -2594,7 +2594,7 @@ impl BufferSnapshot {
         }
         let (start, _, fragment) = self
             .fragments
-            .find::<Dimensions<Option<&Locator>, usize>, _>(
+            .find::<Dimensions<Option<&Locator>, FragmentTextSummary>, _>(
                 &None,
                 &Some(&insertion.fragment_id),
                 Bias::Left,
@@ -2607,8 +2607,16 @@ impl BufferSnapshot {
         if offset > fragment.len {
             return None;
         }
-        let offset = start.1 + if fragment.visible { offset as usize } else { 0 };
-        (self.clip_offset(offset, Bias::Left) == offset).then_some(offset)
+        let offset = offset as usize;
+        if fragment.visible {
+            let visible_offset = start.1.visible + offset;
+            (self.visible_text.clip_offset(visible_offset, Bias::Left) == visible_offset)
+                .then_some(visible_offset)
+        } else {
+            let deleted_offset = start.1.deleted + offset;
+            (self.deleted_text.clip_offset(deleted_offset, Bias::Left) == deleted_offset)
+                .then_some(start.1.visible)
+        }
     }
 
     #[cold]

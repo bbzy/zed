@@ -1,6 +1,8 @@
 use regex::Regex;
 use std::{num::NonZeroU32, sync::LazyLock};
 
+pub const MAX_MODELINE_BYTES: usize = 1024;
+
 /// The settings extracted from an emacs/vim modelines.
 ///
 /// The parsing tries to best match the modeline directives and
@@ -63,6 +65,19 @@ pub fn parse_modeline(first_lines: &[&str], last_lines: &[&str]) -> Option<Model
     Some(settings).filter(|s| s.has_settings())
 }
 
+pub fn may_have_modeline(bytes: &[u8]) -> bool {
+    [
+        b"-*-".as_slice(),
+        b"Local Variables:",
+        b"vi:",
+        b"vim:",
+        b"Vim:",
+        b"ex:",
+    ]
+    .into_iter()
+    .any(|marker| bytes.windows(marker.len()).any(|window| window == marker))
+}
+
 /// Parse the configured number of modelines from the bounded ends of a buffer.
 pub fn parse_modeline_from_rope(
     content: &text::Rope,
@@ -70,7 +85,6 @@ pub fn parse_modeline_from_rope(
 ) -> Option<ModelineSettings> {
     use text::Bias;
 
-    const MAX_MODELINE_BYTES: usize = 1024;
     let first_end = content.clip_offset(content.len().min(MAX_MODELINE_BYTES), Bias::Left);
     let first_lines =
         collect_modeline_lines(content.chunks_in_range(0..first_end).lines(), line_count);

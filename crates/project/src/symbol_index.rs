@@ -24,7 +24,7 @@ use settings::SettingsStore;
 use std::{
     collections::VecDeque,
     fmt,
-    io::Read as _,
+    io::{Read as _, Seek as _, SeekFrom},
     path::PathBuf,
     sync::{
         Arc, Weak,
@@ -117,25 +117,49 @@ const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const CACHE_BYTES: usize = 16 * 1024 * 1024;
 const DISK_INDEX_BYTES: usize = 64 * 1024 * 1024;
 const OVERLAY_INDEX_BYTES: usize = 16 * 1024 * 1024;
+const DISK_RETRY_DELAY: Duration = Duration::from_secs(1);
 const REMOTE_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 type IndexTask = BoxFuture<'static, Result<Arc<ProjectIndex>, Arc<anyhow::Error>>>;
 type SharedIndex = Shared<IndexTask>;
+type DiskTask = BoxFuture<'static, Result<Arc<DiskIndex>, Arc<anyhow::Error>>>;
+
+struct DiskBuild {
+    generation: DiskGeneration,
+    task: WeakShared<DiskTask>,
+    _driver: Task<()>,
+}
 
 #[derive(Default)]
 pub(super) struct SymbolIndexStore {
     cache: Arc<Mutex<DocumentCache>>,
     pub(super) jobs: Arc<Mutex<IndexJobs>>,
     build_lock: Arc<futures::lock::Mutex<()>>,
+    disk_build: Mutex<Option<DiskBuild>>,
     remote_queries: Arc<Mutex<RemoteQueries>>,
 }
 
 #[derive(Default)]
 pub(super) struct IndexJobs {
     pub(super) generation: usize,
-    pub(super) settings_generation: usize,
+    settings_generation: usize,
+    settings: Option<Arc<DiskLanguageSettings>>,
     disk: Option<Arc<DiskIndex>>,
     pending: HashMap<String, IndexJob>,
+}
+
+impl IndexJobs {
+    fn update_settings(&mut self, settings: DiskLanguageSettings) -> Arc<DiskLanguageSettings> {
+        if let Some(previous) = &self.settings
+            && previous.matches(&settings)
+        {
+            return previous.clone();
+        }
+        let settings = Arc::new(settings);
+        self.settings_generation = self.settings_generation.wrapping_add(1);
+        self.settings = Some(settings.clone());
+        settings
+    }
 }
 
 struct IndexJob {
@@ -265,6 +289,8 @@ struct ProjectIndex {
     files: Vec<IndexedFile>,
     source: usize,
     source_snapshot: BufferSnapshot,
+    complete: bool,
+    retry_disk: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -278,6 +304,9 @@ struct DiskIndex {
     generation: DiskGeneration,
     entries: HashMap<ProjectPath, DiskIndexEntry>,
     limit_reached: bool,
+    retry_after: Option<Instant>,
+    failed_files: HashMap<ProjectPath, SymbolLanguage>,
+    failed_grammars: HashSet<SymbolLanguage>,
 }
 
 #[derive(Clone)]
@@ -304,21 +333,57 @@ struct DiskLanguageSettings {
 }
 
 impl DiskLanguageSettings {
-    fn new(cx: &App) -> Self {
+    fn new(cx: &App, worktrees: &[worktree::WorktreeId]) -> Self {
         let settings = cx.global::<SettingsStore>();
+        let global = settings.get::<AllLanguageSettings>(None);
+        let mut local: Vec<(worktree::WorktreeId, Arc<RelPath>, AllLanguageSettings)> = Vec::new();
+        for (worktree, path, settings) in settings.get_all_locals::<AllLanguageSettings>() {
+            if !worktrees.contains(&worktree) {
+                continue;
+            }
+            let inherited = local
+                .iter()
+                .rev()
+                .find_map(|(id, prefix, settings)| {
+                    (*id == worktree && path.starts_with(prefix)).then_some(settings)
+                })
+                .unwrap_or(global);
+            if !Self::same_file_types(inherited, settings) {
+                local.push((worktree, path, settings.clone()));
+            }
+        }
         Self {
-            global: settings.get::<AllLanguageSettings>(None).clone(),
-            local: settings
-                .get_all_locals::<AllLanguageSettings>()
-                .into_iter()
-                .map(|(worktree, path, settings)| (worktree, path, settings.clone()))
-                .collect(),
+            global: global.clone(),
+            local,
             modeline_lines: settings
                 .raw_user_settings()
                 .and_then(|settings| settings.content.modeline_lines)
                 .or(settings.raw_default_settings().modeline_lines)
                 .unwrap_or(5),
         }
+    }
+
+    fn same_file_types(left: &AllLanguageSettings, right: &AllLanguageSettings) -> bool {
+        left.file_types.len() == right.file_types.len()
+            && left.file_types.iter().all(|(name, (_, patterns))| {
+                right
+                    .file_types
+                    .get(name)
+                    .is_some_and(|(_, other)| patterns == other)
+            })
+    }
+
+    fn matches(&self, other: &Self) -> bool {
+        self.modeline_lines == other.modeline_lines
+            && Self::same_file_types(&self.global, &other.global)
+            && self.local.len() == other.local.len()
+            && self.local.iter().zip(&other.local).all(
+                |((id, path, settings), (other_id, other_path, other_settings))| {
+                    id == other_id
+                        && path == other_path
+                        && Self::same_file_types(settings, other_settings)
+                },
+            )
     }
 
     fn language(
@@ -339,6 +404,25 @@ impl DiskLanguageSettings {
                 .map(|language| language.id());
         }
 
+        self.path_language(
+            languages,
+            path,
+            full_path,
+            absolute_path,
+            path_style,
+            Some(content),
+        )
+    }
+
+    fn path_language(
+        &self,
+        languages: &Arc<LanguageRegistry>,
+        path: &ProjectPath,
+        full_path: &std::path::Path,
+        absolute_path: &std::path::Path,
+        path_style: util::paths::PathStyle,
+        content: Option<&text::Rope>,
+    ) -> Option<language::LanguageId> {
         let settings = self
             .local
             .iter()
@@ -352,7 +436,7 @@ impl DiskLanguageSettings {
                 .file_name()
                 .or_else(|| absolute_path.file_name().and_then(|name| name.to_str())),
             &[full_path, absolute_path],
-            Some(content),
+            content,
             path_style,
             settings,
         )
@@ -760,11 +844,17 @@ impl LspStore {
             })
             .collect();
         overlay_keys.sort();
+        let worktree_ids: Vec<_> = worktrees
+            .iter()
+            .map(|(worktree, _)| worktree.id())
+            .collect();
+        let settings = DiskLanguageSettings::new(cx, &worktree_ids);
         let mut state = jobs.lock();
+        let settings = state.update_settings(settings);
         let generation = DiskGeneration {
             worktree: state.generation,
             settings: state.settings_generation,
-            languages: languages.version(),
+            languages: languages.language_configuration_version(),
         };
         let key = format!(
             "{generation:?}:{source_path:?}:{:?}:{:?}:{:?}:{overlay_keys:?}",
@@ -791,43 +881,22 @@ impl LspStore {
         let scan_trace_id = trace
             .as_ref()
             .map_or_else(String::new, |trace| trace.0.id.clone());
-        let build_lock = self.symbol_index.build_lock.clone();
-        let settings = DiskLanguageSettings::new(cx);
+        let disk = self.prepare_disk_index(
+            generation,
+            &state,
+            fs,
+            languages.clone(),
+            settings,
+            worktrees,
+            trace.clone(),
+            cx,
+        );
         let task: SharedIndex = {
             let jobs = jobs.clone();
             let key = key.clone();
             async move {
-                let _build_guard = build_lock.lock().await;
                 let result = async {
-                    let previous = jobs.lock().disk.clone();
-                    let disk = if let Some(disk) = previous
-                        .as_ref()
-                        .filter(|disk| disk.generation == generation)
-                    {
-                        disk.clone()
-                    } else {
-                        let disk = Arc::new(
-                            build_disk_index(
-                                &*fs,
-                                &languages,
-                                &settings,
-                                &worktrees,
-                                previous.as_deref(),
-                                generation,
-                                trace.as_ref(),
-                            )
-                            .await,
-                        );
-                        let mut state = jobs.lock();
-                        if state.generation == generation.worktree
-                            && state.settings_generation == generation.settings
-                            && languages.version() == disk.generation.languages
-                        {
-                            state.disk = Some(disk.clone());
-                        }
-                        disk
-                    };
-
+                    let disk = disk.await.map_err(|error| anyhow::anyhow!("{error:#}"))?;
                     let source_language = source_snapshot
                         .language()
                         .context("No language for syntax index")?;
@@ -854,6 +923,10 @@ impl LspStore {
                             continue;
                         }
 
+                        let disk_document = disk
+                            .entries
+                            .get(&path)
+                            .and_then(|entry| entry.document.as_ref());
                         let language = snapshot.language().filter(|language| {
                             SymbolLanguage::for_name(language.name().as_ref()).is_some()
                                 && language.grammar().is_some()
@@ -862,17 +935,25 @@ impl LspStore {
                         let detected;
                         let language = if let Some(language) = language {
                             language
-                        } else if let Some(kind) = disk
-                            .entries
-                            .get(&path)
-                            .and_then(|entry| entry.document.as_ref())
-                            .map(|document| document.language)
-                        {
+                        } else if let Some(kind) = disk_document.map(|document| document.language) {
                             detected = languages.language_for_name(kind.name()).await?;
                             &detected
                         } else {
                             continue;
                         };
+                        if disk_document.is_some_and(|document| {
+                            SymbolLanguage::for_name(language.name().as_ref())
+                                == Some(document.language)
+                                && snapshot.len() == document.text.len()
+                                && snapshot
+                                    .as_rope()
+                                    .chunks_in_range(0..snapshot.len())
+                                    .flat_map(str::bytes)
+                                    .eq(document.text.bytes())
+                        }) {
+                            seen.remove(&path);
+                            continue;
+                        }
                         if snapshot.len() as u64 > MAX_FILE_BYTES {
                             overlay_limit_reached = true;
                             continue;
@@ -886,6 +967,7 @@ impl LspStore {
                             Ok(document) => document,
                             Err(error) => {
                                 log::warn!("Indexing open buffer {path:?}: {error:#}");
+                                overlay_limit_reached = true;
                                 continue;
                             }
                         };
@@ -922,16 +1004,23 @@ impl LspStore {
                             ),
                         );
                     }
+                    let source_kind = files[0].document.language;
                     anyhow::Ok(ProjectIndex {
                         files,
                         source: 0,
                         source_snapshot,
+                        complete: !overlay_limit_reached
+                            && !disk.limit_reached
+                            && !disk.failed_files.values().any(|kind| *kind == source_kind)
+                            && !disk.failed_grammars.contains(&source_kind),
+                        retry_disk: disk.retry_after.is_some() || !disk.failed_grammars.is_empty(),
                     })
                 }
                 .await
                 .map(Arc::new)
                 .map_err(Arc::new);
                 if let Ok(index) = &result
+                    && !index.retry_disk
                     && let Some(job) = jobs.lock().pending.get_mut(&key)
                 {
                     job.ready = Arc::downgrade(index);
@@ -953,6 +1042,101 @@ impl LspStore {
         }
         drop(state);
         cx.background_spawn(async move { task.await.map_err(|error| anyhow::anyhow!("{error:#}")) })
+    }
+
+    pub(super) fn update_symbol_index_settings(&self, cx: &App) {
+        let jobs = &self.symbol_index.jobs;
+        if jobs.lock().settings.is_none() {
+            return;
+        }
+        let worktrees: Vec<_> = self
+            .worktree_store()
+            .read(cx)
+            .worktrees()
+            .filter_map(|worktree| {
+                let worktree = worktree.read(cx);
+                worktree.is_local().then_some(worktree.id())
+            })
+            .collect();
+        let settings = DiskLanguageSettings::new(cx, &worktrees);
+        jobs.lock().update_settings(settings);
+    }
+
+    fn prepare_disk_index(
+        &self,
+        generation: DiskGeneration,
+        state: &IndexJobs,
+        fs: Arc<dyn fs::Fs>,
+        languages: Arc<LanguageRegistry>,
+        settings: Arc<DiskLanguageSettings>,
+        worktrees: Vec<(worktree::Snapshot, PathBuf)>,
+        trace: Option<SymbolQueryTrace>,
+        cx: &App,
+    ) -> Shared<DiskTask> {
+        let previous = state.disk.clone();
+        if let Some(disk) = previous.as_ref().filter(|disk| {
+            disk.generation == generation
+                && disk.retry_after.is_none_or(|retry| Instant::now() < retry)
+                && !disk
+                    .failed_grammars
+                    .iter()
+                    .any(|kind| languages.has_loaded_grammar(kind.name()))
+        }) {
+            return futures::future::ready(Ok(disk.clone())).boxed().shared();
+        }
+
+        let mut pending = self.symbol_index.disk_build.lock();
+        if let Some(task) = pending
+            .as_ref()
+            .filter(|build| build.generation == generation)
+            .and_then(|build| build.task.upgrade())
+            .filter(|task| task.peek().is_none())
+        {
+            return task;
+        }
+
+        let jobs = self.symbol_index.jobs.clone();
+        let build_lock = self.symbol_index.build_lock.clone();
+        let task: Shared<DiskTask> = async move {
+            let _guard = build_lock.lock().await;
+            let disk = Arc::new(
+                build_disk_index(
+                    &*fs,
+                    &languages,
+                    &settings,
+                    &worktrees,
+                    previous.as_deref(),
+                    generation,
+                    trace.as_ref(),
+                )
+                .await,
+            );
+            let mut jobs = jobs.lock();
+            if jobs.generation != generation.worktree
+                || jobs.settings_generation != generation.settings
+                || languages.language_configuration_version() != generation.languages
+            {
+                return Err(Arc::new(anyhow::anyhow!(
+                    "Syntax index inputs changed during the scan"
+                )));
+            }
+            jobs.disk = Some(disk.clone());
+            Ok(disk)
+        }
+        .boxed()
+        .shared();
+        if let Some(weak) = task.downgrade() {
+            let driver = task.clone();
+            // Keep the scan alive when the queries waiting on it are cancelled.
+            *pending = Some(DiskBuild {
+                generation,
+                task: weak,
+                _driver: cx.background_executor().spawn(async move {
+                    drop(driver.await);
+                }),
+            });
+        }
+        task
     }
 
     pub(super) fn syntax_definitions(
@@ -1057,6 +1241,12 @@ impl LspStore {
                         "resolved",
                         format_args!("targets={} diagnostics={diagnostics:?}", locations.len()),
                     );
+                    if !prepared.complete {
+                        locations.retain(|location| {
+                            location.document == prepared.source
+                                && documents[location.document].symbols[location.symbol].local
+                        });
+                    }
                     let preferred: Vec<_> = locations
                         .iter()
                         .copied()
@@ -1215,11 +1405,17 @@ impl LspStore {
                             format_args!("targets={} diagnostics={diagnostics:?}", resolved.len()),
                         );
                         if let Some(target) = resolved.first().copied().filter(|target| {
-                            resolved
-                                .iter()
-                                .all(|other| index.same_symbol(*target, *other))
+                            (prepared.complete
+                                || target.document == prepared.source
+                                    && documents[target.document].symbols[target.symbol].local)
+                                && resolved
+                                    .iter()
+                                    .all(|other| index.same_symbol(*target, *other))
                         }) {
                             for (document, file) in documents.iter().enumerate() {
+                                if !prepared.complete && document != prepared.source {
+                                    continue;
+                                }
                                 for (symbol, declaration) in file.symbols.iter().enumerate() {
                                     if index
                                         .same_symbol(target, SymbolLocation { document, symbol })
@@ -1424,7 +1620,7 @@ impl LspStore {
                             let symbol = &documents[location.document].symbols[location.symbol];
                             let name = index.name_in_document(prepared.source, location).to_owned();
                             let label = if let Some(signature) = &symbol.signature {
-                                format!("{name}({signature})")
+                                format!("{name}({signature}){}", symbol.method_qualifiers)
                             } else {
                                 name.clone()
                             };
@@ -1553,11 +1749,17 @@ async fn build_disk_index(
     settings: &DiskLanguageSettings,
     worktrees: &[(worktree::Snapshot, PathBuf)],
     previous: Option<&DiskIndex>,
-    mut generation: DiskGeneration,
+    generation: DiskGeneration,
     trace: Option<&SymbolQueryTrace>,
 ) -> DiskIndex {
     let mut supported = HashMap::default();
-    for name in ["C++", "Java", "Kotlin"] {
+    let mut failed_grammars = HashSet::default();
+    for kind in [
+        SymbolLanguage::Cpp,
+        SymbolLanguage::Java,
+        SymbolLanguage::Kotlin,
+    ] {
+        let name = kind.name();
         if languages.available_language_for_name(name).is_none() {
             continue;
         }
@@ -1566,18 +1768,23 @@ async fn build_disk_index(
                 supported.insert(language.id(), language);
             }
             Ok(_) => {}
-            Err(error) => log::warn!("Loading {name} grammar for syntax index: {error:#}"),
+            Err(error) => {
+                failed_grammars.insert(kind);
+                log::warn!("Loading {name} grammar for syntax index: {error:#}");
+            }
         }
     }
 
-    generation.languages = languages.version();
     let previous = previous.filter(|previous| {
         previous.generation.settings == generation.settings
             && previous.generation.languages == generation.languages
     });
+    let reusable = previous.filter(|previous| previous.failed_grammars == failed_grammars);
     let mut entries = HashMap::default();
     let mut bytes = 0usize;
     let mut limit_reached = false;
+    let mut retry_needed = false;
+    let mut failed_files = HashMap::default();
     let mut scanned = 0usize;
     let mut reads = 0;
     'worktrees: for (worktree, full_root) in worktrees {
@@ -1603,7 +1810,7 @@ async fn build_disk_index(
                 break 'worktrees;
             }
 
-            let cached = previous
+            let cached = reusable
                 .and_then(|index| index.entries.get(&path))
                 .filter(|cached| cached.matches(entry));
             let document = if let Some(cached) = cached {
@@ -1618,6 +1825,30 @@ async fn build_disk_index(
                     Ok(document) => document,
                     Err(error) => {
                         log::debug!("Indexing {path:?}: {error:#}");
+                        retry_needed = true;
+                        let (full_path, absolute_path) = disk_paths(&path, worktree, full_root);
+                        // A read failure may leave no language evidence. Retrying the file
+                        // still permits navigation in languages it could not be identified as.
+                        let language = previous
+                            .and_then(|index| index.entries.get(&path))
+                            .and_then(|entry| entry.document.as_ref())
+                            .map(|document| document.language)
+                            .or_else(|| previous?.failed_files.get(&path).copied())
+                            .or_else(|| {
+                                let id = settings.path_language(
+                                    languages,
+                                    &path,
+                                    &full_path,
+                                    &absolute_path,
+                                    worktree.path_style(),
+                                    None,
+                                )?;
+                                SymbolLanguage::for_name(supported.get(&id)?.name().as_ref())
+                            });
+                        if let Some(language) = language {
+                            bytes += entry_bytes;
+                            failed_files.insert(path, language);
+                        }
                         continue;
                     }
                 }
@@ -1664,7 +1895,24 @@ async fn build_disk_index(
         generation,
         entries,
         limit_reached,
+        retry_after: retry_needed.then(|| Instant::now() + DISK_RETRY_DELAY),
+        failed_files,
+        failed_grammars,
     }
+}
+
+fn disk_paths(
+    path: &ProjectPath,
+    worktree: &worktree::Snapshot,
+    full_root: &std::path::Path,
+) -> (PathBuf, PathBuf) {
+    let absolute_path = worktree.absolutize(&path.path);
+    let full_path = if path.path.is_empty() {
+        full_root.to_path_buf()
+    } else {
+        full_root.join(path.path.display(worktree.path_style()).as_ref())
+    };
+    (full_path, absolute_path)
 }
 
 async fn read_disk_document(
@@ -1677,14 +1925,71 @@ async fn read_disk_document(
     full_root: &std::path::Path,
 ) -> Result<Option<Arc<Document>>> {
     let path_style = worktree.path_style();
-    let relative = path.path.display(path_style);
-    let absolute_path = worktree.abs_path().join(relative.as_ref());
-    let full_path = full_root.join(relative.as_ref());
-    let mut bytes = Vec::new();
-    fs.open_sync(&absolute_path)
-        .await?
-        .take(MAX_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)?;
+    let (full_path, absolute_path) = disk_paths(path, worktree, full_root);
+    let mut file = fs.open_sync(&absolute_path).await?;
+    let (mut bytes, eof) = file_content::read_byte_header(&mut *file)?;
+    let (bom, content_kind) = file_content::decode_byte_header(&bytes);
+    if content_kind == file_content::ByteContent::Binary {
+        return Ok(None);
+    }
+
+    // ASCII first-line matching can rule out most text resources. Files with
+    // potentially different decoding or a modeline still need full detection.
+    if bom.is_none()
+        && content_kind == file_content::ByteContent::Unknown
+        && bytes.is_ascii()
+        && !bytes.contains(&0x1b)
+    {
+        let mut header = String::from_utf8_lossy(&bytes).into_owned();
+        language::LineEnding::normalize(&mut header);
+        let header = text::Rope::from(header.as_str());
+        let candidate = settings
+            .path_language(
+                languages,
+                path,
+                &full_path,
+                &absolute_path,
+                path_style,
+                Some(&header),
+            )
+            .is_some_and(|id| supported.contains_key(&id));
+        if !candidate {
+            use language::modeline::{MAX_MODELINE_BYTES, may_have_modeline};
+
+            let mut possible_modeline = settings.modeline_lines > 0 && may_have_modeline(&bytes);
+            if settings.modeline_lines > 0 && !possible_modeline && !eof {
+                // The normalized prefix may be shorter than the raw bytes with CRLF.
+                const PREFIX_BYTES: usize = 2 * MAX_MODELINE_BYTES;
+                let additional = PREFIX_BYTES.saturating_sub(bytes.len()) as u64;
+                (&mut file).take(additional).read_to_end(&mut bytes)?;
+                possible_modeline = bytes.contains(&0x1b) || may_have_modeline(&bytes);
+
+                if !possible_modeline && bytes.len() >= PREFIX_BYTES {
+                    // Allow room for multibyte encodings and normalized line endings.
+                    const TAIL_BYTES: u64 = 4 * MAX_MODELINE_BYTES as u64;
+                    let length = file.seek(SeekFrom::End(0))?;
+                    if length > MAX_FILE_BYTES {
+                        return Ok(None);
+                    }
+                    file.seek(SeekFrom::Start(length.saturating_sub(TAIL_BYTES)))?;
+                    let mut tail = Vec::new();
+                    (&mut file).take(TAIL_BYTES).read_to_end(&mut tail)?;
+                    possible_modeline = tail.contains(&0x1b) || may_have_modeline(&tail);
+                    if possible_modeline {
+                        file.seek(SeekFrom::Start(bytes.len() as u64))?;
+                    }
+                }
+            }
+            if !possible_modeline {
+                return Ok(None);
+            }
+        }
+    }
+
+    let remaining = MAX_FILE_BYTES + 1 - bytes.len() as u64;
+    if !eof {
+        file.take(remaining).read_to_end(&mut bytes)?;
+    }
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Ok(None);
     }

@@ -31,6 +31,22 @@ fn test_edit() {
 }
 
 #[test]
+fn test_try_offset_for_anchor_checks_deleted_utf8_boundaries() {
+    let mut buffer = Buffer::new(ReplicaId::LOCAL, BufferId::new(1).unwrap(), "aéb");
+    let anchor = buffer.anchor_after(1);
+    let invalid = Anchor {
+        offset: anchor.offset + 1,
+        ..anchor
+    };
+    assert_eq!(buffer.try_offset_for_anchor(&anchor), Some(1));
+    assert_eq!(buffer.try_offset_for_anchor(&invalid), None);
+
+    buffer.edit([(1..3, "")]);
+    assert_eq!(buffer.try_offset_for_anchor(&anchor), Some(1));
+    assert_eq!(buffer.try_offset_for_anchor(&invalid), None);
+}
+
+#[test]
 fn test_summaries_for_unordered_anchors() {
     let mut buffer = Buffer::new(ReplicaId::LOCAL, BufferId::new(1).unwrap(), "ab\ncdef");
     let old_right = buffer.anchor_before(6);

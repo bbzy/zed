@@ -676,7 +676,9 @@ impl Editor {
                         Some(options) => options.merge(&response.display_options),
                     }
                 }
-                if completion_settings.words == WordsCompletionMode::Fallback {
+                if !completions.is_empty()
+                    && completion_settings.words == WordsCompletionMode::Fallback
+                {
                     words = Task::ready(BTreeMap::default());
                 }
             }

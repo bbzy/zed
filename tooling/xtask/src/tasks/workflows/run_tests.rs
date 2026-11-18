@@ -669,22 +669,37 @@ pub(crate) fn run_platform_tests_no_filter(platform: Platform) -> NamedJob {
 fn test_symbol_index_extension_grammars() -> Step<Run> {
     named::bash(indoc::indoc! {r#"
         set -euo pipefail
-        export ZED_SYMBOL_GRAMMAR_DIR="$(mktemp -d "${RUNNER_TEMP}/zed-symbol-grammars.XXXXXX")"
+        test_filter='package(language) & test(symbol_index::tests::)'
+        if [[ -n "$CHANGED_PACKAGES" ]]; then
+          test_filter="($CHANGED_PACKAGES) & ($test_filter)"
+          selected_tests="$(cargo nextest list --workspace --run-ignored ignored-only \
+            --message-format oneline -E "$test_filter")"
+          if [[ -z "$selected_tests" ]]; then
+            exit 0
+          fi
+        fi
+        ZED_SYMBOL_GRAMMAR_DIR="$(mktemp -d "${RUNNER_TEMP}/zed-symbol-grammars.XXXXXX")"
+        export ZED_SYMBOL_GRAMMAR_DIR
         trap 'rm -rf "$ZED_SYMBOL_GRAMMAR_DIR"' EXIT
 
         fetch_grammar() {
           local name="$1" version="$2" digest="$3"
           local destination="$ZED_SYMBOL_GRAMMAR_DIR/$name.wasm"
+          local archive="$ZED_SYMBOL_GRAMMAR_DIR/$name.tar.gz"
           curl --fail --silent --show-error --location --retry 3 --max-time 60 \
-            "https://api.zed.dev/extensions/$name/$version/download" |
-            tar -xzOf - "grammars/$name.wasm" > "$destination"
+            --output "$archive" "https://api.zed.dev/extensions/$name/$version/download"
+          tar -xzOf "$archive" "grammars/$name.wasm" > "$destination"
           printf '%s  %s\n' "$digest" "$destination" | sha256sum --check --status
         }
 
         fetch_grammar java 6.8.30 366485d5b4f6fa97f3bc786828e1cfb253dc12f393cc80b1cc04c8c311dfdc19
         fetch_grammar kotlin 0.3.4 6a29a5e9aed398bf2c98a032c5e8d22a0593461bd8588b821bf7e87624499746
-        cargo nextest run --workspace --run-ignored ignored-only -E 'package(language) & test(symbol_index::tests::)'
+        cargo nextest run --workspace --run-ignored ignored-only -E "$test_filter"
     "#})
+    .add_env((
+        "CHANGED_PACKAGES",
+        "${{ needs.orchestrate.outputs.changed_packages }}",
+    ))
 }
 
 fn run_platform_tests_impl(platform: Platform, filter_packages: bool, harden: bool) -> NamedJob {

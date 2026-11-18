@@ -6397,10 +6397,7 @@ impl LspStore {
     }
 
     fn on_settings_changed(&mut self, cx: &mut Context<Self>) {
-        let mut jobs = self.symbol_index.jobs.lock();
-        jobs.settings_generation = jobs.settings_generation.wrapping_add(1);
-        drop(jobs);
-
+        self.update_symbol_index_settings(cx);
         self.request_workspace_config_refresh();
 
         let new_semantic_token_rules = crate::project_settings::ProjectSettings::get_global(cx)
