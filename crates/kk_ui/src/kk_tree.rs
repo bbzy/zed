@@ -471,6 +471,8 @@ impl KkPanel {
         }
 
         self.load_tasks.retain(|key, _| !key.starts_with("commit:"));
+        self.file_load_progress
+            .retain(|key, _| !key.starts_with("commit:"));
         self.model_generation += 1;
         cx.notify();
     }
@@ -1088,23 +1090,28 @@ impl KkPanel {
                     icon = Some(IconName::GitWorktree);
                 }
 
-                if matches!(row.id, TreeRowId::History(_))
+                let is_history = matches!(row.id, TreeRowId::History(_));
+                let mut label = label.clone();
+                if is_history
                     && self.repositories.iter().any(|repository| {
                         repository.snapshot.repository().root() == row.id.root()
                             && repository.mode != self.mode
                     })
                 {
-                    format!(
-                        "{label} · Previous history{}",
-                        if self.refreshing_repositories.contains(row.id.root()) {
-                            " (refreshing…)"
-                        } else {
-                            ""
-                        }
-                    )
-                } else {
-                    label.clone()
+                    label.push_str(" · Previous history");
                 }
+
+                if (matches!(row.id, TreeRowId::Repository(_))
+                    || is_history && !self.tree_selection.grouped)
+                    && let Some(phase) = self.repository_progress(row.id.root())
+                {
+                    let stage = phase.label();
+                    tooltip = Some(format!("{} · {stage}", row.id.root().display()));
+                    label.push_str(" · ");
+                    label.push_str(&stage);
+                }
+
+                label
             }
             TreeRowKind::Recovery(label) => {
                 icon = Some(IconName::Warning);
@@ -5014,7 +5021,7 @@ impl TreeProjection {
                     Some(RevisionFiles::Loading) => {
                         rendered.push(TreeRenderRow::Message {
                             depth: row.depth + 1,
-                            text: "Loading…",
+                            text: "Reading changed files…",
                         });
                     }
                     Some(RevisionFiles::Loaded(files)) if files.is_empty() => {

@@ -1409,10 +1409,10 @@ impl Render for KkConflict {
             if self.error.is_some() {
                 "Conflict status is not verified".into()
             } else {
-                "Checking conflict status…".into()
+                format!("Checking conflict status for {}…", self.draft.conflict.path)
             }
         } else if self.applying {
-            "Applying resolution…".into()
+            format!("Applying resolution to {}…", self.draft.conflict.path)
         } else if self.draft.has_newer_edits() {
             "Applied · newer edits have not been applied".into()
         } else if self.draft.applied_digest.is_some() {

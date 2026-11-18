@@ -1,3 +1,4 @@
+use super::kk_diff::DiffLoadPhase;
 use super::{
     kk_diff::{DiffOpenMode, DiffTarget, KkDiff},
     kk_diff_controls::KkDiffControls,
@@ -21,7 +22,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
 };
-use ui::{CommonAnimationExt as _, ContextMenu, prelude::*};
+use ui::{ContextMenu, prelude::*};
 use util::ResultExt as _;
 use workspace::{
     Item, ItemId, SerializableItem, Workspace, WorkspaceId,
@@ -43,6 +44,7 @@ pub(super) struct KkMultiDiff {
     workspace: WeakEntity<Workspace>,
     window: gpui::AnyWindowHandle,
     refresh_generation: u64,
+    load_phase: Option<DiffLoadPhase>,
     refresh_snapshot: Option<Snapshot>,
     pending_target: Option<DiffTarget>,
     refresh_task: Task<()>,
@@ -345,6 +347,7 @@ impl KkMultiDiff {
                         view.refresh_generation += 1;
                         view.refresh_task = Task::ready(());
                         view.refresh_snapshot = None;
+                        view.load_phase = None;
                         view.pending_target = None;
                         view.error = None;
                         view.loading = false;
@@ -395,6 +398,11 @@ impl KkMultiDiff {
         cx: &mut Context<Self>,
     ) {
         self.loading = true;
+        let total = files.len();
+        self.load_phase = Some(DiffLoadPhase::LoadingMany {
+            processed: 0,
+            total,
+        });
         self.pending_target = None;
         self.initial_reveal_pending = self.entries.is_empty();
         self.refresh_generation += 1;
@@ -408,6 +416,7 @@ impl KkMultiDiff {
                 let mut remaining = files.into_iter();
                 let mut pending = futures::stream::FuturesOrdered::new();
                 let mut errors = Vec::new();
+                let mut processed = 0;
                 loop {
                     while pending.len() < 8 {
                         let Some(file) = remaining.next() else {
@@ -433,10 +442,13 @@ impl KkMultiDiff {
                         break;
                     };
                     snapshot.repository().check_lifetime()?;
+                    processed += 1;
                     let current = this.update_in(cx, |this, window, cx| {
                         if this.refresh_generation != generation {
                             return false;
                         }
+                        this.load_phase = Some(DiffLoadPhase::LoadingMany { processed, total });
+                        cx.notify();
                         match entry {
                             Ok(entry) => {
                                 let mut entries = this.entries.clone();
@@ -465,6 +477,7 @@ impl KkMultiDiff {
             this.update(cx, |this, cx| {
                 if this.refresh_generation == generation {
                     this.loading = false;
+                    this.load_phase = None;
                     if let Err(error) = result {
                         this.error = Some(format!("Could not load diff: {error:#}"));
                     }
@@ -588,6 +601,7 @@ impl KkMultiDiff {
             workspace: workspace.downgrade(),
             window: window.window_handle(),
             refresh_generation: 0,
+            load_phase: None,
             refresh_snapshot: None,
             pending_target: None,
             refresh_task: Task::ready(()),
@@ -838,6 +852,7 @@ impl KkMultiDiff {
             self.refresh_generation += 1;
             self.refresh_task = Task::ready(());
             self.refresh_snapshot = None;
+            self.load_phase = None;
             self.pending_target = target;
             self.loading = true;
             self.error = None;
@@ -884,6 +899,8 @@ impl KkMultiDiff {
             cx.notify();
         }
         self.refresh_snapshot = Some(snapshot.clone());
+        self.load_phase = Some(DiffLoadPhase::ResolvingTarget);
+        cx.notify();
         self.pending_target = target.clone();
         let generation = self.refresh_generation;
         let snapshot = snapshot.clone();
@@ -894,7 +911,7 @@ impl KkMultiDiff {
         let previous = self.entries.clone();
         self.refresh_task = cx.spawn(async move |this, cx| {
             let result = async {
-                let (snapshot, target, mut files) = cx
+                let (snapshot, target) = cx
                     .background_spawn(async move {
                         snapshot.repository().check_lifetime()?;
                         let snapshot = if capture_queued {
@@ -902,21 +919,27 @@ impl KkMultiDiff {
                         } else {
                             snapshot
                         };
-                        if retarget && let Some(intent) = target.comparison.clone() {
-                            let comparison =
-                                super::kk_comparison::Comparison::load(&snapshot, intent).await?;
-                            Ok((
-                                snapshot,
-                                comparison.diff_target(),
-                                comparison.files,
-                            ))
-                        } else {
-                            let (target, _) = target.resolve(&snapshot).await?;
-                            let files = snapshot.changed_files(&target.scope).await?;
-                            anyhow::Ok((snapshot, target, files))
+                        if retarget && target.comparison.is_some() {
+                            return anyhow::Ok((snapshot, target));
                         }
+
+                        let (target, _) = target.resolve(&snapshot).await?;
+                        anyhow::Ok((snapshot, target))
                     })
                     .await?;
+                this.update(cx, |this, cx| this.set_load_phase(generation, DiffLoadPhase::ReadingFiles, cx))?;
+                let (target, mut files) = cx.background_spawn({
+                    let snapshot = snapshot.clone();
+                    async move {
+                        if retarget && let Some(intent) = target.comparison.clone() {
+                            let comparison = super::kk_comparison::Comparison::load(&snapshot, intent).await?;
+                            return anyhow::Ok((comparison.diff_target(), comparison.files));
+                        }
+
+                        let files = snapshot.changed_files(&target.scope).await?;
+                        anyhow::Ok((target, files))
+                    }
+                }).await?;
                 let previous_by_path = cx.update(|cx| {
                     previous.iter().map(|entry| {
                         (entry.read(cx).file.path.clone(), entry.clone())
@@ -971,7 +994,9 @@ impl KkMultiDiff {
                 } else {
                     snapshot
                 };
-                let mut entries = Vec::with_capacity(files.len());
+                let total = files.len();
+                this.update(cx, |this, cx| this.set_load_phase(generation, DiffLoadPhase::LoadingMany { processed: 0, total }, cx))?;
+                let mut entries = Vec::with_capacity(total);
                 for (index, file) in files.iter().cloned().enumerate() {
                     if index % 32 == 0 {
                         futures_lite::future::yield_now().await;
@@ -1012,6 +1037,7 @@ impl KkMultiDiff {
                         })?;
                         entries.push(task.await?);
                     }
+                    this.update(cx, |this, cx| this.set_load_phase(generation, DiffLoadPhase::LoadingMany { processed: index + 1, total }, cx))?;
                 }
 
                 if !opening.is_current() {
@@ -1031,11 +1057,12 @@ impl KkMultiDiff {
                 }
                 this.update(cx, |this, cx| {
                     if this.refresh_generation == generation {
-                        let presentation_changed = this.loading || this.files != files || this.target != target || this.error.is_some();
+                        let presentation_changed = this.load_phase.is_some() || this.loading || this.files != files || this.target != target || this.error.is_some();
                         this.loading = false;
                         this.files = files;
                         this.snapshot = snapshot;
                         this.refresh_snapshot = None;
+                        this.load_phase = None;
                         this.target = target;
                         this.pending_target = None;
                         this.error = None;
@@ -1053,6 +1080,7 @@ impl KkMultiDiff {
                 if this.refresh_generation == generation && this.refresh_snapshot.is_some() {
                     this.loading = false;
                     this.refresh_snapshot = None;
+                    this.load_phase = None;
                     this.pending_target = None;
                     if let Err(error) = result {
                         let action = if retarget { "change comparison base" } else { "refresh diff" };
@@ -1063,6 +1091,26 @@ impl KkMultiDiff {
             })
             .log_err();
         });
+    }
+    fn progress_label(&self) -> Option<String> {
+        if let Some(target) = &self.pending_target {
+            let target = target.label.trim_end_matches(" → @");
+            let phase = self
+                .load_phase
+                .map(DiffLoadPhase::label)
+                .unwrap_or_else(|| "Waiting to switch comparison base…".into());
+            return Some(format!("{target} · {phase}"));
+        }
+
+        self.load_phase
+            .map(|phase| format!("{} · {}", self.target.label, phase.label()))
+    }
+
+    fn set_load_phase(&mut self, generation: u64, phase: DiffLoadPhase, cx: &mut Context<Self>) {
+        if self.refresh_generation == generation {
+            self.load_phase = Some(phase);
+            cx.notify();
+        }
     }
 }
 
@@ -1111,45 +1159,22 @@ impl Render for KkMultiDiff {
                     .into_iter()
                     .map(|error| Label::new(error).color(Color::Error)),
             )
-            .when(self.loading && self.entries.is_empty(), |view| {
-                view.child(
-                    div()
-                        .flex_1()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            Icon::new(IconName::LoadCircle)
-                                .size(IconSize::Custom(TextSize::Large.rems(cx)))
-                                .color(Color::Accent)
-                                .with_rotate_animation(3),
-                        ),
-                )
-            })
             .when(
                 self.entries.is_empty() && !self.loading && self.error.is_none(),
                 |view| view.child(Label::new("No changes").color(Color::Muted)),
             )
             .child(self.controls.clone())
-            .when_some(self.pending_target.as_ref(), |view, target| {
+            .when_some(self.progress_label(), |view, label| {
                 view.child(
                     h_flex()
                         .px_2()
                         .gap_1()
+                        .child(ui::SpinnerLabel::new())
                         .child(
-                            Icon::new(IconName::LoadCircle)
-                                .size(IconSize::Small)
-                                .color(Color::Muted)
-                                .with_rotate_animation(3),
-                        )
-                        .child(
-                            Label::new(format!(
-                                "Switching base to {}…",
-                                target.label.trim_end_matches(" → @")
-                            ))
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
+                            Label::new(label)
+                                .truncate()
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
                         ),
                 )
             })
@@ -2212,6 +2237,11 @@ pub(crate) mod tests {
             assert!(view.loading);
             assert!(view.entries.is_empty());
             assert_eq!(view.files.len(), count);
+            assert!(
+                view.progress_label()
+                    .expect("loading label")
+                    .contains(&format!("(0/{count})"))
+            );
             assert!(!view.can_split());
         });
         let other = cx.new_window_entity(|window, cx| Editor::single_line(window, cx));
@@ -2228,6 +2258,7 @@ pub(crate) mod tests {
         view.read_with(cx, |view, _| {
             assert!(view.error.is_none(), "{:?}", view.error);
             assert_eq!(view.entries.len(), count);
+            assert!(view.progress_label().is_none());
             assert!(view.can_split());
         });
         panel.update(cx, |panel, cx| {

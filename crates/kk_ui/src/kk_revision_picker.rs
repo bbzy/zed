@@ -296,7 +296,11 @@ impl PickerDelegate for RevisionDelegate {
                 .child(
                     Label::new(self.error.clone().unwrap_or_else(|| {
                         if self.loading {
-                            "Searching…".into()
+                            super::kk_panel::progress_message(
+                                self.snapshot.repository().root(),
+                                "Searching commits…",
+                            )
+                            .0
                         } else {
                             "Results are ranked by match quality; IDs match from the start.".into()
                         }

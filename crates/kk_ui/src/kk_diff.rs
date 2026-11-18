@@ -702,6 +702,27 @@ struct PendingClassification {
     uncertain_ids: HashSet<u64>,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum DiffLoadPhase {
+    ResolvingTarget,
+    ReadingFiles,
+    LoadingContents,
+    LoadingMany { processed: usize, total: usize },
+}
+
+impl DiffLoadPhase {
+    pub fn label(self) -> String {
+        match self {
+            Self::ResolvingTarget => "Resolving diff target…".into(),
+            Self::ReadingFiles => "Reading changed files…".into(),
+            Self::LoadingContents => "Loading diff contents…".into(),
+            Self::LoadingMany { processed, total } => {
+                format!("Loading diff contents ({processed}/{total})…")
+            }
+        }
+    }
+}
+
 pub(super) struct KkDiff {
     identity: DiffIdentity,
     target: DiffTarget,
@@ -718,7 +739,7 @@ pub(super) struct KkDiff {
     update_task: Task<()>,
     refresh_task: Task<()>,
     refresh_generation: u64,
-    refreshing: Option<(u64, Snapshot)>,
+    refreshing: Option<(u64, Snapshot, DiffLoadPhase)>,
     classification_sequence: u64,
     classification: Option<PendingClassification>,
     preview_task: Task<()>,
@@ -1179,6 +1200,9 @@ impl KkDiff {
                             || view.classification.is_some();
                         view.refresh_generation += 1;
                         view.refresh_task = Task::ready(());
+                        if view.refreshing.take().is_some() {
+                            cx.notify();
+                        }
                         view.error = None;
                         view.snapshot = Some(snapshot_for_view);
                         view.classification = None;
@@ -1834,7 +1858,7 @@ impl KkDiff {
         if self
             .refreshing
             .as_ref()
-            .is_some_and(|(generation, pending)| {
+            .is_some_and(|(generation, pending, _)| {
                 *generation == self.refresh_generation
                     && pending.operation() == snapshot.operation()
                     && pending.repository().lifetime() == snapshot.repository().lifetime()
@@ -1846,7 +1870,8 @@ impl KkDiff {
 
         self.refresh_generation += 1;
         let generation = self.refresh_generation;
-        self.refreshing = Some((generation, snapshot.clone()));
+        self.refreshing = Some((generation, snapshot.clone(), DiffLoadPhase::ResolvingTarget));
+        cx.notify();
         let preview_task = std::mem::replace(&mut self.preview_task, Task::ready(()));
         let target = self.target.clone();
         let path = self.identity.path.clone();
@@ -1861,34 +1886,49 @@ impl KkDiff {
         let lifetime = snapshot.repository().lifetime().cloned();
         self.refresh_task = cx.spawn(async move |this, cx| {
             preview_task.await;
-            let result = cx
-                .background_spawn(async move {
-                    let (target, _) = target.resolve(&snapshot).await?;
-                    let file = snapshot
-                        .changed_files(&target.scope)
-                        .await?
-                        .into_iter()
-                        .find(|file| file.path == path)
-                        .unwrap_or(ChangedFile {
-                            path,
-                            change_type: ChangeKind::Modified,
-                            renamed_from: None,
-                            has_conflict: false,
-                        });
-                    let contents = DiffContents::load(
-                        &snapshot,
-                        &target,
-                        &file,
-                        live,
-                        draft,
-                        Some(presentation),
-                    )
-                    .await?;
-                    anyhow::Ok((snapshot, target, file, contents))
-                })
-                .await;
             let result = async {
-                let (snapshot, target, file, contents) = result?;
+                let (snapshot, target) = cx
+                    .background_spawn(async move {
+                        let (target, _) = target.resolve(&snapshot).await?;
+                        anyhow::Ok((snapshot, target))
+                    })
+                    .await?;
+                this.update(cx, |this, cx| {
+                    this.set_refresh_phase(generation, DiffLoadPhase::ReadingFiles, cx)
+                })?;
+                let (snapshot, target, file) = cx
+                    .background_spawn(async move {
+                        let file = snapshot
+                            .changed_files(&target.scope)
+                            .await?
+                            .into_iter()
+                            .find(|file| file.path == path)
+                            .unwrap_or(ChangedFile {
+                                path,
+                                change_type: ChangeKind::Modified,
+                                renamed_from: None,
+                                has_conflict: false,
+                            });
+                        anyhow::Ok((snapshot, target, file))
+                    })
+                    .await?;
+                this.update(cx, |this, cx| {
+                    this.set_refresh_phase(generation, DiffLoadPhase::LoadingContents, cx)
+                })?;
+                let (snapshot, target, file, contents) = cx
+                    .background_spawn(async move {
+                        let contents = DiffContents::load(
+                            &snapshot,
+                            &target,
+                            &file,
+                            live,
+                            draft,
+                            Some(presentation),
+                        )
+                        .await?;
+                        anyhow::Ok((snapshot, target, file, contents))
+                    })
+                    .await?;
                 let edits = if let Some(text) = contents.historical {
                     let edits = this.read_with(cx, |this, cx| {
                         let buffer = this.buffer.read(cx);
@@ -1958,9 +1998,10 @@ impl KkDiff {
                 anyhow::Ok(())
             }
             .await;
-            this.update(cx, |this, _| {
+            this.update(cx, |this, cx| {
                 if generation == this.refresh_generation {
                     this.refreshing = None;
+                    cx.notify();
                 }
             })
             .log_err();
@@ -1978,6 +2019,16 @@ impl KkDiff {
                 .log_err();
             }
         });
+    }
+
+    fn set_refresh_phase(&mut self, generation: u64, phase: DiffLoadPhase, cx: &mut Context<Self>) {
+        if let Some((current, _, previous)) = &mut self.refreshing
+            && *current == generation
+            && self.refresh_generation == generation
+        {
+            *previous = phase;
+            cx.notify();
+        }
     }
 
     pub(super) fn copy_reference(&self, include_selection: bool, cx: &mut App) {
@@ -2234,6 +2285,7 @@ impl KkDiff {
         self.classification = Some(preview);
         self.refresh_generation += 1;
         self.refresh_task = Task::ready(());
+        self.refreshing = None;
         self.render_classification_preview(cx);
         Ok(queued)
     }
@@ -2303,6 +2355,7 @@ impl KkDiff {
         self.classification = Some(preview);
         self.refresh_generation += 1;
         self.refresh_task = Task::ready(());
+        self.refreshing = None;
         self.render_classification_preview(cx);
         Ok((id, ranges))
     }
@@ -2596,6 +2649,19 @@ impl Render for KkDiff {
                 view.child(Label::new(error).color(Color::Error))
             })
             .child(self.controls.clone())
+            .when_some(self.refreshing.as_ref(), |view, (_, _, phase)| {
+                view.child(
+                    h_flex()
+                        .px_2()
+                        .gap_1()
+                        .child(ui::SpinnerLabel::new())
+                        .child(
+                            Label::new(format!("{} · {}", self.identity.path, phase.label()))
+                                .truncate()
+                                .color(Color::Muted),
+                        ),
+                )
+            })
             .child(div().flex_1().min_h_0().child(self.editor.clone()))
     }
 }

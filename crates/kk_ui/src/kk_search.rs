@@ -504,9 +504,9 @@ impl Render for DiffSearch {
         let status = if let Some(error) = &self.error {
             error.clone()
         } else if self.loading {
-            "Loading diff…".into()
+            format!("Preparing diff for {}…", self.target.label)
         } else if self.searching {
-            "Searching…".into()
+            format!("Searching changes in {}…", self.target.label)
         } else if self.query.read(cx).text(cx).is_empty() {
             "Type to search · ↑/↓ for history".into()
         } else {

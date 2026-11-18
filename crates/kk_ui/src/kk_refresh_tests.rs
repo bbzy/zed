@@ -281,10 +281,29 @@ async fn kk_refresh_cached_repositories_load_before_discovery_finishes(cx: &mut 
         .expect("discovery barrier") = Some(blocked);
     let (output, mut events) = mpsc::unbounded();
     let worker = cx.background_spawn(request.run(output));
-    let Some(RefreshEvent::Loaded(completion)) = events.next().await else {
-        panic!("cached repository did not finish first")
-    };
-    completion.view.expect("loaded cached repository");
+    let mut phases = Vec::new();
+    loop {
+        match events.next().await.expect("progress or completion") {
+            RefreshEvent::Loaded(completion) => {
+                completion.view.expect("loaded cached repository");
+                break;
+            }
+            RefreshEvent::Phase { root, phase } => {
+                assert_eq!(root, transport.roots[0]);
+                phases.push(phase);
+            }
+            RefreshEvent::Scanning { .. } => {}
+            RefreshEvent::Discovered { .. } => panic!("discovery is still blocked"),
+        }
+    }
+    assert_eq!(
+        phases,
+        [
+            RefreshPhase::Opening,
+            RefreshPhase::ReadingWorkspace,
+            RefreshPhase::ReadingHistory,
+        ]
+    );
     // Two overlapping discovery paths are deliberately blocked while the cached repo completes.
     release.send(()).await.expect("release discovery");
     release
@@ -292,7 +311,10 @@ async fn kk_refresh_cached_repositories_load_before_discovery_finishes(cx: &mut 
         .await
         .expect("release overlapping discovery");
     while let Some(event) = events.next().await {
-        assert!(matches!(event, RefreshEvent::Discovered { .. }));
+        assert!(matches!(
+            event,
+            RefreshEvent::Discovered { .. } | RefreshEvent::Scanning { .. }
+        ));
     }
     worker.await;
 }

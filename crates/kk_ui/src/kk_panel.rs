@@ -54,7 +54,7 @@ mod refresh;
 mod refresh_demand;
 use futures::{FutureExt as _, StreamExt as _};
 use list_preview::{ListPreviews, MutationPreviews};
-use refresh::{RefreshEvent, RefreshRequest, RepositoryRefresh};
+use refresh::{RefreshEvent, RefreshPhase, RefreshRequest, RepositoryRefresh};
 use refresh_demand::RefreshDemand;
 
 #[cfg(test)]
@@ -143,6 +143,18 @@ pub(super) enum FileOpenKind {
     Before,
 }
 
+pub(super) fn progress_message(path: &Path, stage: &str) -> (String, String) {
+    let full_path = path.display();
+    let name = path
+        .file_name()
+        .map(std::ffi::OsStr::to_string_lossy)
+        .unwrap_or_else(|| path.to_string_lossy());
+    (
+        format!("{name} · {stage}"),
+        format!("{full_path} · {stage}"),
+    )
+}
+
 struct KkStatus {
     panel: WeakEntity<KkPanel>,
     _subscription: Subscription,
@@ -192,29 +204,57 @@ impl KkStatus {
 
 impl Render for KkStatus {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let progress = self.panel.upgrade().and_then(|panel| {
-            let panel = panel.read(cx);
-            if panel.pending_writes > 0 {
-                Some(panel.pending_status.to_owned())
-            } else if let Some((_, label, _)) = &panel.opening_feedback {
-                Some(label.clone())
-            } else if panel.loading {
-                Some("Loading…".to_owned())
-            } else {
-                None
-            }
-        });
-        div().when_some(progress, |view, message| {
+        let panel = self.panel.clone();
+        let progress = panel
+            .upgrade()
+            .map(|panel| panel.read(cx).progress_messages())
+            .unwrap_or_default();
+        div().when_some(progress.first(), |view, (message, _)| {
+            let remaining = progress.len() - 1;
             view.child(
                 h_flex()
                     .id("kk-progress-status")
                     .gap_1()
                     .max_w(rems(24.))
-                    .overflow_hidden()
                     .child(ui::SpinnerLabel::new())
                     .child(Label::new(format!("KK: {message}")).truncate())
-                    .tooltip(Tooltip::text(message)),
+                    .when(remaining > 0, |view| {
+                        view.child(Label::new(format!("+{remaining}")).color(Color::Muted))
+                    })
+                    .tooltip(move |_, cx| {
+                        cx.new(|cx| {
+                            let subscription = panel
+                                .upgrade()
+                                .map(|panel| cx.observe(&panel, |_, _, cx| cx.notify()));
+                            KkProgressTooltip {
+                                panel: panel.clone(),
+                                _subscription: subscription,
+                            }
+                        })
+                        .into()
+                    }),
             )
+        })
+    }
+}
+
+struct KkProgressTooltip {
+    panel: WeakEntity<KkPanel>,
+    _subscription: Option<Subscription>,
+}
+
+impl Render for KkProgressTooltip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let progress = self
+            .panel
+            .upgrade()
+            .map(|panel| panel.read(cx).progress_messages())
+            .unwrap_or_default();
+        ui::tooltip_container(cx, |container, _| {
+            container
+                .gap_1()
+                .max_w(rems(48.))
+                .children(progress.into_iter().map(|(_, detail)| Label::new(detail)))
         })
     }
 }
@@ -231,6 +271,12 @@ impl workspace::StatusItemView for KkStatus {
         _: &mut Context<Self>,
     ) {
     }
+}
+
+#[derive(Default)]
+struct RefreshProgress {
+    directories: HashMap<(EntityId, PathBuf), bool>,
+    repositories: HashMap<PathBuf, RefreshPhase>,
 }
 
 pub struct KkPanel {
@@ -255,9 +301,12 @@ pub struct KkPanel {
     refresh_task: Task<()>,
     refresh_sequence: u64,
     refreshing_repositories: HashSet<PathBuf>,
+    refresh_progress: Option<RefreshProgress>,
+    repository_refresh_progress: HashMap<PathBuf, RefreshPhase>,
     refresh_errors: HashMap<PathBuf, Vec<String>>,
     discovery_errors: HashMap<PathBuf, Vec<String>>,
     load_tasks: HashMap<String, Task<()>>,
+    file_load_progress: HashMap<String, (PathBuf, RefreshPhase)>,
     model_generation: u64,
     buffer_subscriptions: HashMap<EntityId, Vec<Subscription>>,
     scroll_handle: UniformListScrollHandle,
@@ -284,6 +333,7 @@ pub struct KkPanel {
     context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
     pending_writes: usize,
     pending_status: &'static str,
+    active_writes: HashMap<PathBuf, String>,
     operation_error: Option<(PathBuf, String)>,
     uncertain_operations: HashMap<PathBuf, OperationReceipt>,
     write_queues: HashMap<PathBuf, RepositoryQueue>,
@@ -490,9 +540,12 @@ impl KkPanel {
                         refresh_task: Task::ready(()),
                         refresh_sequence: 0,
                         refreshing_repositories: HashSet::new(),
+                        refresh_progress: None,
+                        repository_refresh_progress: HashMap::new(),
                         refresh_errors: HashMap::new(),
                         discovery_errors: HashMap::new(),
                         load_tasks: HashMap::new(),
+                        file_load_progress: HashMap::new(),
                         model_generation: 0,
                         buffer_subscriptions: HashMap::new(),
                         scroll_handle: UniformListScrollHandle::new(),
@@ -519,6 +572,7 @@ impl KkPanel {
                         context_menu: None,
                         pending_writes: 0,
                         pending_status: "",
+                        active_writes: HashMap::new(),
                         operation_error: None,
                         uncertain_operations: HashMap::new(),
                         write_queues: HashMap::new(),
@@ -583,6 +637,7 @@ impl KkPanel {
                     this.model_generation += 1;
                     this.invalidate_closed_repositories(cx);
                     this.invalidate_refresh(cx);
+                    cx.notify();
                 }
             }));
         self._subscriptions
@@ -760,6 +815,70 @@ impl KkPanel {
             .log_err();
     }
 
+    fn repository_progress(&self, root: &Path) -> Option<&RefreshPhase> {
+        self.repository_refresh_progress
+            .get(root)
+            .or_else(|| self.refresh_progress.as_ref()?.repositories.get(root))
+    }
+
+    fn progress_messages(&self) -> Vec<(String, String)> {
+        let mut messages = Vec::new();
+        let mut active_writes = self
+            .active_writes
+            .iter()
+            .map(|(root, stage)| progress_message(root, stage))
+            .collect::<Vec<_>>();
+        active_writes.sort();
+        messages.extend(active_writes);
+        if self.pending_writes > 0 && self.active_writes.is_empty() {
+            let label = self.pending_status.to_owned();
+            messages.push((label.clone(), label));
+        }
+        if let Some((_, label, _)) = &self.opening_feedback {
+            messages.push((label.clone(), label.clone()));
+        }
+
+        let mut reads = self
+            .file_load_progress
+            .values()
+            .map(|(root, phase)| progress_message(root, &phase.label()))
+            .collect::<Vec<_>>();
+        reads.sort();
+        messages.extend(reads);
+
+        let mut refreshes = Vec::new();
+        if let Some(progress) = &self.refresh_progress {
+            for ((_, path), scanning) in &progress.directories {
+                let label = if *scanning {
+                    "Scanning for KK repositories…"
+                } else {
+                    "Waiting to scan for KK repositories…"
+                };
+                refreshes.push((!*scanning, path, label.to_owned()));
+            }
+            for (root, phase) in &progress.repositories {
+                if !self.repository_refresh_progress.contains_key(root) {
+                    refreshes.push((*phase == RefreshPhase::Queued, root, phase.label()));
+                }
+            }
+        }
+        for (root, phase) in &self.repository_refresh_progress {
+            refreshes.push((*phase == RefreshPhase::Queued, root, phase.label()));
+        }
+        refreshes.sort();
+        refreshes.dedup();
+        messages.extend(
+            refreshes
+                .into_iter()
+                .map(|(_, path, label)| progress_message(path, &label)),
+        );
+        if self.refresh_queued && messages.is_empty() {
+            let label = "Preparing repository refresh…".to_owned();
+            messages.push((label.clone(), label));
+        }
+        messages
+    }
+
     fn refresh(&mut self, cx: &mut Context<Self>) {
         self.error = self.refresh_error.clone();
         self.loading = true;
@@ -849,6 +968,25 @@ impl KkPanel {
             .iter()
             .map(|view| view.snapshot.repository().root().to_owned())
             .collect();
+        self.repository_refresh_progress.clear();
+        self.refresh_progress = Some(RefreshProgress {
+            directories: request
+                .paths
+                .iter()
+                .cloned()
+                .map(|path| (path, false))
+                .collect(),
+            repositories: request
+                .previous
+                .iter()
+                .map(|view| {
+                    (
+                        view.snapshot.repository().root().to_owned(),
+                        RefreshPhase::Queued,
+                    )
+                })
+                .collect(),
+        });
         let active_paths = request.paths.clone();
         self.refresh_task = cx.spawn(async move |this, cx| {
             pending_writes.await;
@@ -867,12 +1005,37 @@ impl KkPanel {
                         }
 
                         match event {
+                            RefreshEvent::Scanning { worktree, path } => {
+                                if let Some(scanning) =
+                                    this.refresh_progress.as_mut().and_then(|progress| {
+                                        progress.directories.get_mut(&(worktree, path))
+                                    })
+                                {
+                                    *scanning = true;
+                                }
+                                cx.notify();
+                                return true;
+                            }
+                            RefreshEvent::Phase { root, phase } => {
+                                if let Some(current) = this
+                                    .refresh_progress
+                                    .as_mut()
+                                    .and_then(|progress| progress.repositories.get_mut(&root))
+                                {
+                                    *current = phase;
+                                }
+                                cx.notify();
+                                return true;
+                            }
                             RefreshEvent::Discovered {
                                 worktree,
                                 path,
                                 roots,
                                 errors,
                             } => {
+                                if let Some(progress) = &mut this.refresh_progress {
+                                    progress.directories.remove(&(worktree, path.clone()));
+                                }
                                 // Failed discovery cannot establish that cached repositories disappeared.
                                 if errors.is_empty() {
                                     for paths in this.repository_paths.values_mut() {
@@ -890,6 +1053,12 @@ impl KkPanel {
                                 for root in roots {
                                     if !completed.contains(&root) {
                                         this.refreshing_repositories.insert(root.clone());
+                                        if let Some(progress) = &mut this.refresh_progress {
+                                            progress
+                                                .repositories
+                                                .entry(root.clone())
+                                                .or_insert(RefreshPhase::Queued);
+                                        }
                                     }
                                     let paths = this.repository_paths.entry(root).or_default();
                                     if !paths.contains(&(worktree, path.clone())) {
@@ -906,8 +1075,14 @@ impl KkPanel {
                             RefreshEvent::Loaded(completion) => {
                                 let root = completion.root.clone();
                                 completed.insert(root.clone());
-                                this.refreshing_repositories.remove(&root);
+                                if !this.repository_refresh_progress.contains_key(&root) {
+                                    this.refreshing_repositories.remove(&root);
+                                }
+                                if let Some(progress) = &mut this.refresh_progress {
+                                    progress.repositories.remove(&root);
+                                }
                                 if !this.repository_is_open(&root, cx) {
+                                    cx.notify();
                                     return true;
                                 }
 
@@ -945,8 +1120,10 @@ impl KkPanel {
                     return;
                 }
 
-                this.loading = false;
-                this.refreshing_repositories.clear();
+                this.refresh_progress = None;
+                this.loading = !this.repository_refresh_progress.is_empty();
+                this.refreshing_repositories
+                    .retain(|root| this.repository_refresh_progress.contains_key(root));
                 this.pending_history_mode = None;
                 for paths in this.repository_paths.values_mut() {
                     paths.retain(|attachment| active_paths.contains(attachment));
@@ -1037,6 +1214,8 @@ impl KkPanel {
         };
         self.loading = true;
         self.refreshing_repositories.insert(root.clone());
+        self.repository_refresh_progress
+            .insert(root.clone(), RefreshPhase::Queued);
         let repository = previous.snapshot.repository().clone();
         let sequence = self.refresh_sequence;
         let confirmed_previews = self.list_previews.confirmed();
@@ -1045,16 +1224,44 @@ impl KkPanel {
         let task_key = key.clone();
         let task = cx.spawn(async move |this, cx| {
             pending_writes.await;
-            let event = cx
-                .background_spawn(async move { request.load(repository, true).await })
-                .await;
+            let (sender, mut events) = futures::channel::mpsc::unbounded();
+            let worker =
+                cx.background_spawn(async move { request.load(repository, true, &sender).await });
+            while let Some(RefreshEvent::Phase { phase, .. }) = events.next().await {
+                let accepted = this
+                    .update(cx, |this, cx| {
+                        if this.refresh_sequence != sequence {
+                            return false;
+                        }
+                        let Some(current) = this.repository_refresh_progress.get_mut(&root) else {
+                            return false;
+                        };
+                        *current = phase;
+                        cx.notify();
+                        true
+                    })
+                    .log_err();
+                if accepted != Some(true) {
+                    // Progress is obsolete, but the existing refresh task still owns the read.
+                    break;
+                }
+            }
+            let event = worker.await;
             this.update(cx, |this, cx| {
                 this.load_tasks.remove(&task_key);
                 if this.refresh_sequence != sequence {
                     return;
                 }
-                this.refreshing_repositories.remove(&root);
-                this.loading = !this.refreshing_repositories.is_empty();
+                this.repository_refresh_progress.remove(&root);
+                if !this
+                    .refresh_progress
+                    .as_ref()
+                    .is_some_and(|progress| progress.repositories.contains_key(&root))
+                {
+                    this.refreshing_repositories.remove(&root);
+                }
+                this.loading =
+                    this.refresh_progress.is_some() || !this.repository_refresh_progress.is_empty();
                 if !this.repository_is_open(&root, cx) {
                     cx.notify();
                     return;
@@ -1093,6 +1300,7 @@ impl KkPanel {
             .log_err();
         });
         self.load_tasks.insert(key, task);
+        cx.notify();
     }
 
     fn update_refresh_errors(&mut self) {
@@ -1408,6 +1616,7 @@ impl KkPanel {
         };
         if comparison {
             self.load_tasks.remove(&key);
+            self.file_load_progress.remove(&key);
             let comparison = Comparison::new(&revision);
             self.comparison_state.save(
                 repository.snapshot.repository().root(),
@@ -1431,6 +1640,7 @@ impl KkPanel {
                 .is_some()
             {
                 self.load_tasks.remove(&key);
+                self.file_load_progress.remove(&key);
                 self.reconcile_prefetch(cx);
                 cx.notify();
                 return;
@@ -1453,6 +1663,12 @@ impl KkPanel {
         }
 
         let intent = comparison.then(|| Comparison::new(&revision).intent);
+        let phase = match &intent {
+            Some(intent) => RefreshPhase::UpdatingComparison(intent.target_label.clone()),
+            None => RefreshPhase::ReadingFiles(revision.change_id.clone()),
+        };
+        self.file_load_progress
+            .insert(key.clone(), (root.clone(), phase));
         let task_key = key.clone();
         let task = cx.spawn(async move |this, cx| {
             let revision_for_read = revision.clone();
@@ -1474,6 +1690,7 @@ impl KkPanel {
                 .await;
             this.update(cx, |this, cx| {
                 this.load_tasks.remove(&task_key);
+                this.file_load_progress.remove(&task_key);
                 let Some(repository) = this.repositories.iter_mut().find(|repository| {
                     repository.snapshot.repository().root() == root
                         && (repository.snapshot.operation() == operation
@@ -1482,6 +1699,7 @@ impl KkPanel {
                                 .as_ref()
                                 .is_some_and(|snapshot| snapshot.operation() == operation))
                 }) else {
+                    cx.notify();
                     return;
                 };
                 match result {
@@ -1820,10 +2038,12 @@ impl KkPanel {
             return;
         };
         self.model_generation += 1;
-        self.load_tasks.remove(&format!(
+        let load_key = format!(
             "compare:{}",
             repository.snapshot.repository().root().display()
-        ));
+        );
+        self.load_tasks.remove(&load_key);
+        self.file_load_progress.remove(&load_key);
         repository.comparison = None;
         self.comparison_state.save(
             repository.snapshot.repository().root(),
@@ -1932,7 +2152,11 @@ impl KkPanel {
         let rows = self
             .tree_selection
             .opening_rows(snapshot.repository().root(), &file.path);
-        let label = format!("Opening diff: {}…", file.path);
+        let label = progress_message(
+            snapshot.repository().root(),
+            &format!("Opening diff for {}…", file.path),
+        )
+        .0;
         let open = self.open_diff_task(snapshot, target, file, working_copy, mode, window, cx);
         let open = self.track_opening(label, Some(rows), open, cx);
         let task = cx.spawn_in(window, async move |this, cx| {
@@ -1970,7 +2194,11 @@ impl KkPanel {
         let rows = self
             .tree_selection
             .opening_rows(snapshot.repository().root(), &path);
-        let label = format!("Opening conflict: {path}…");
+        let label = progress_message(
+            snapshot.repository().root(),
+            &format!("Opening conflict for {path}…"),
+        )
+        .0;
         let key = format!(
             "conflict:{}:{revision}:{path}",
             snapshot.repository().root().display()
@@ -2015,7 +2243,11 @@ impl KkPanel {
         let rows = self
             .tree_selection
             .opening_rows(snapshot.repository().root(), &file.path);
-        let label = format!("Opening file: {}…", file.path);
+        let label = progress_message(
+            snapshot.repository().root(),
+            &format!("Opening file {}…", file.path),
+        )
+        .0;
         let task =
             self.open_plain_file_task(snapshot, target, file, working_copy, kind, window, cx);
         let task = self.track_opening(label, Some(rows), task, cx);
@@ -2507,7 +2739,23 @@ impl KkPanel {
         cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(std::time::Duration::ZERO).await;
                 loop {
-                    let batch = this.update(cx, |this, _| this.write_queues.get_mut(&root).and_then(RepositoryQueue::next));
+                    let batch = this.update(cx, |this, cx| {
+                        let batch = this.write_queues.get_mut(&root).and_then(RepositoryQueue::next)?;
+                        let label = match &batch.0.job {
+                            RepositoryJob::UpdateStale(_) => "Updating workspace…".to_owned(),
+                            RepositoryJob::Sparse(_) => "Preparing sparse checkout…".to_owned(),
+                            RepositoryJob::Classification(_) => "Splitting out…".to_owned(),
+                            RepositoryJob::File(job) => format!("{} · {}", job.request.action.label(), job.request.file.path),
+                            RepositoryJob::Edit(job) => format!("Saving Diffedit for {}…", job.edit.path),
+                            RepositoryJob::Conflict(job) => {
+                                let action = if job.request.restore.is_some() { "Restoring conflict" } else { "Applying resolution" };
+                                format!("{action} for {}…", job.request.conflict.path)
+                            }
+                        };
+                        this.active_writes.insert(root.clone(), label);
+                        cx.notify();
+                        Some(batch)
+                    });
                     let Ok(Some((mut queued, snapshot))) = batch else { break };
                     let parent = queued.waiting.as_ref().and_then(|waiting| waiting.context()).cloned();
                     if let Some(waiting) = queued.waiting.take() { waiting.finish("completed", serde_json::Value::Null); }
@@ -2521,10 +2769,12 @@ impl KkPanel {
                             async move { snapshot.repository().expand_sparse_checkout(&paths, || current()).await }
                         }).await;
                         if matches!(result, Ok(kk_workbench::SparseCheckout::PendingSavedInputs)) {
-                            this.update(cx, |this, _| {
+                            this.update(cx, |this, cx| {
                                 if let Some(queue) = this.write_queues.get_mut(&root) {
                                     queue.defer_sparse(queued);
                                 }
+                                this.active_writes.remove(&root);
+                                cx.notify();
                             }).log_err();
                             cx.background_executor().timer(std::time::Duration::from_millis(16)).await;
                             execution.finish("deferred", serde_json::Value::Null);
@@ -2593,12 +2843,10 @@ impl KkPanel {
                             let original = request.snapshot.clone();
                             let result = async {
                                 dependency?;
-                                this.update(cx, |this, cx| {
+                                this.read_with(cx, |this, cx| {
                                     this.check_repository_open(&root, cx)?;
                                     anyhow::ensure!(!this.uncertain_operations.contains_key(&root), "Refresh KK Workbench to confirm the previous operation before changing files");
                                     anyhow::ensure!(!this.file_is_dirty(&root, &request.file, cx), "Your draft was retained. Save or discard it before retrying.");
-                                    this.pending_status = request.action.label();
-                                    cx.notify();
                                     anyhow::Ok(())
                                 })??;
                                 let (snapshot, prepared) = cx.background_spawn({
@@ -2662,6 +2910,7 @@ impl KkPanel {
                     execution.finish(if uncertain { "uncertain" } else if outcome.is_ok() { "completed" } else { "error" }, serde_json::Value::Null);
                     let completion_count = completions.len();
                     this.update(cx, |this, cx| {
+                        this.active_writes.remove(&root);
                         this.list_previews.complete(&list_previews, &outcome);
                         this.mutation_previews.complete(&mutation_previews, &outcome);
                         if outcome.as_ref().is_err_and(|error| !error.uncertain) {
@@ -2867,6 +3116,18 @@ impl KkPanel {
         for root in closed {
             self.tree_cache.remove(&root);
             self.refreshing_repositories.remove(&root);
+            self.repository_refresh_progress.remove(&root);
+            self.file_load_progress.retain(|key, (repository, _)| {
+                if *repository == root {
+                    self.load_tasks.remove(key);
+                    return false;
+                }
+
+                true
+            });
+            if let Some(progress) = &mut self.refresh_progress {
+                progress.repositories.remove(&root);
+            }
             self.refresh_errors.remove(&root);
             self.list_previews.forget_root(&root);
             self.mutation_previews.forget_root(&root);
@@ -4250,6 +4511,16 @@ mod tests {
         panel.update(cx, |panel, cx| {
             panel.set_mode(HistoryMode::Lineage, cx);
             panel.start_refresh(cx);
+            panel.opening_feedback = Some((0, "Opening sample diff…".into(), HashSet::new()));
+            let progress = panel.progress_messages();
+            assert_eq!(progress[0].0, "Opening sample diff…");
+            for root in &roots {
+                assert!(
+                    progress.iter().any(|(_, detail)| detail
+                        == &format!("{} · Waiting to refresh…", root.display()))
+                );
+            }
+            panel.opening_feedback = None;
             panel.set_mode(HistoryMode::Log, cx);
             panel.refresh(cx);
         });
@@ -4258,6 +4529,7 @@ mod tests {
             assert_eq!(panel.mode, HistoryMode::Log);
             assert_eq!(panel.history_preference.mode, HistoryMode::Log);
             assert!(panel.pending_history_mode.is_none());
+            assert!(panel.progress_messages().is_empty());
             assert!(panel.error.is_none(), "{:?}", panel.error);
         });
         let stale_root = roots[1].clone();

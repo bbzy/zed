@@ -6,7 +6,40 @@ use std::sync::Arc;
 
 pub(super) const CONCURRENCY: usize = 4;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum RefreshPhase {
+    Queued,
+    Opening,
+    CheckingOperation,
+    ReadingWorkspace,
+    ReadingHistory,
+    ReadingFiles(String),
+    UpdatingComparison(String),
+}
+
+impl RefreshPhase {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Queued => "Waiting to refresh…".into(),
+            Self::Opening => "Opening repository…".into(),
+            Self::CheckingOperation => "Checking previous operation…".into(),
+            Self::ReadingWorkspace => "Reading workspace state…".into(),
+            Self::ReadingHistory => "Reading commit history…".into(),
+            Self::ReadingFiles(change) => format!("Reading changed files for {change}…"),
+            Self::UpdatingComparison(target) => format!("Updating comparison with {target}…"),
+        }
+    }
+}
+
 pub(super) enum RefreshEvent {
+    Scanning {
+        worktree: EntityId,
+        path: PathBuf,
+    },
+    Phase {
+        root: PathBuf,
+        phase: RefreshPhase,
+    },
     Discovered {
         worktree: EntityId,
         path: PathBuf,
@@ -57,24 +90,37 @@ impl RefreshRequest {
                 }
 
                 let mut discoveries = futures::stream::iter(request.paths.iter().cloned())
-                    .map(|(worktree, path)| async move {
-                        let discovery = if let Some(remote) = &request.remote {
-                            remote
-                                .discover(&path, &request.executable, request.diagnostics.clone())
-                                .await
-                        } else {
-                            Ok(discover_with_diagnostics(
-                                &path,
-                                &request.executable,
-                                request.diagnostics.clone(),
-                                request.performance_context.clone(),
-                            )
-                            .await)
-                        };
-                        (worktree, path, discovery)
+                    .map(|(worktree, path)| {
+                        let output = &output;
+                        async move {
+                            output
+                                .unbounded_send(RefreshEvent::Scanning {
+                                    worktree,
+                                    path: path.clone(),
+                                })
+                                .ok()?;
+                            let discovery = if let Some(remote) = &request.remote {
+                                remote
+                                    .discover(
+                                        &path,
+                                        &request.executable,
+                                        request.diagnostics.clone(),
+                                    )
+                                    .await
+                            } else {
+                                Ok(discover_with_diagnostics(
+                                    &path,
+                                    &request.executable,
+                                    request.diagnostics.clone(),
+                                    request.performance_context.clone(),
+                                )
+                                .await)
+                            };
+                            Some((worktree, path, discovery))
+                        }
                     })
                     .buffer_unordered(CONCURRENCY);
-                while let Some((worktree, path, discovery)) = discoveries.next().await {
+                while let Some(Some((worktree, path, discovery))) = discoveries.next().await {
                     let (repositories, errors) = match discovery {
                         Ok(discovery) => (
                             discovery.repositories,
@@ -114,7 +160,7 @@ impl RefreshRequest {
         drop(jobs);
         let load = async {
             let mut loads = pending
-                .map(|(repository, reopen)| self.load(repository, reopen))
+                .map(|(repository, reopen)| self.load(repository, reopen, &output))
                 .buffer_unordered(CONCURRENCY);
             while let Some(event) = loads.next().await {
                 if output.unbounded_send(event).is_err() {
@@ -125,12 +171,25 @@ impl RefreshRequest {
         futures::join!(discover, load);
     }
 
-    pub(super) async fn load(&self, repository: Repository, reopen: bool) -> RefreshEvent {
+    pub(super) async fn load(
+        &self,
+        repository: Repository,
+        reopen: bool,
+        output: &mpsc::UnboundedSender<RefreshEvent>,
+    ) -> RefreshEvent {
         let root = repository.root().to_owned();
+        let report = |phase| {
+            // The receiver can be dropped when a newer refresh replaces this one.
+            drop(output.unbounded_send(RefreshEvent::Phase {
+                root: root.clone(),
+                phase,
+            }));
+        };
         let repository = if reopen
             && (repository.is_remote()
                 || !repository.matches_source(&self.executable, self.remote.as_ref()))
         {
+            report(RefreshPhase::Opening);
             let opened = if let Some(remote) = &self.remote {
                 remote
                     .open(&root, &self.executable, self.diagnostics.clone())
@@ -172,6 +231,7 @@ impl RefreshRequest {
         let comparison_host = &self.comparison_host;
         let diagnostics = &self.diagnostics;
         if let Some(receipt) = self.uncertain.get(&root) {
+            report(RefreshPhase::CheckingOperation);
             match receipt.with_repository(&repository) {
                 Ok(receipt) => {
                     let status = async {
@@ -199,6 +259,7 @@ impl RefreshRequest {
             }
         }
         let loaded = async {
+            report(RefreshPhase::ReadingWorkspace);
             let snapshot = match repository.snapshot(true).await {
                 Ok(snapshot) => snapshot,
                 Err(error) if kk_workbench::is_stale_workspace(&error) => {
@@ -258,6 +319,7 @@ impl RefreshRequest {
                     .map(|view| view.history_targets.as_slice())
                     .unwrap_or_default()
             };
+            report(RefreshPhase::ReadingHistory);
             let (history, history_targets) =
                 snapshot.history_containing(mode, limit, targets).await?;
             let mut expanded = HashMap::new();
@@ -284,6 +346,7 @@ impl RefreshRequest {
                                             == 1))
                         });
                     if was_expanded {
+                        report(RefreshPhase::ReadingFiles(revision.change_id.clone()));
                         let files = match snapshot
                             .changed_files(&DiffScope::Change(revision.full_commit_id.clone()))
                             .await
@@ -309,6 +372,9 @@ impl RefreshRequest {
                     .and_then(|text| ComparisonIntent::decode(&text)),
             };
             if let Some(intent) = intent {
+                report(RefreshPhase::UpdatingComparison(
+                    intent.target_label.clone(),
+                ));
                 match Comparison::load(&snapshot, intent.clone()).await {
                     Ok(loaded) => {
                         loaded_comparisons.insert(repository.root().to_owned());

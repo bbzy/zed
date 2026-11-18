@@ -162,6 +162,15 @@ impl KkPanel {
         })
     }
 
+    fn update_opening_label(&mut self, sequence: u64, label: String, cx: &mut Context<Self>) {
+        if let Some((current, displayed, _)) = self.opening_feedback.as_mut()
+            && *current == sequence
+        {
+            *displayed = label;
+            cx.notify();
+        }
+    }
+
     pub(in super::super) fn open_all_changes(
         &mut self,
         index: usize,
@@ -197,6 +206,15 @@ impl KkPanel {
                 return;
             }
         };
+        let root = snapshot.repository().root().to_owned();
+        let target_label = target.label.clone();
+        let label =
+            super::progress_message(&root, &format!("Reading changed files for {target_label}…")).0;
+        let preparing =
+            super::progress_message(&root, &format!("Preparing files for {target_label}…")).0;
+        let opening_diff =
+            super::progress_message(&root, &format!("Opening Diff for {target_label}…")).0;
+        let sequence = self.opening_sequence + 1;
         let opening = self.file_opening.begin(&snapshot);
         self.error = None;
         cx.notify();
@@ -219,6 +237,7 @@ impl KkPanel {
                     .map(|file| file.path.clone())
                     .collect();
                 let preparation = this.update_in(cx, |this, window, cx| {
+                    this.update_opening_label(sequence, preparing, cx);
                     this.prepare_open(snapshot, paths, &opening, window, cx)
                 })?;
                 let Some(snapshot) = preparation
@@ -231,6 +250,7 @@ impl KkPanel {
                     return Ok(());
                 }
                 let open = this.update_in(cx, |this, window, cx| {
+                    this.update_opening_label(sequence, opening_diff, cx);
                     super::super::kk_multi_diff::KkMultiDiff::open(
                         snapshot,
                         target,
@@ -259,7 +279,7 @@ impl KkPanel {
             task.await;
             anyhow::Ok(())
         });
-        let task = self.track_opening("Opening changes…".into(), None, task, cx);
+        let task = self.track_opening(label, None, task, cx);
         self.load_tasks.insert(
             "open-diff".into(),
             cx.spawn(async move |_, _| {
