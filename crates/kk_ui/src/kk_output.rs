@@ -2,7 +2,7 @@ use super::kk_panel::ShowOutput;
 use editor::Editor;
 use futures::{FutureExt as _, future::Shared};
 use gpui::{
-    Action, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    Action, Anchor, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
     KeyContext, Pixels, Task, Window,
 };
 use kk_workbench::Diagnostics;
@@ -10,7 +10,7 @@ use language::{Buffer, Capability};
 use multi_buffer::MultiBuffer;
 use search::{BufferSearchBar, buffer_search::DivRegistrar};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use ui::{IconButton, Tooltip, prelude::*};
+use ui::{ContextMenu, IconButton, IconPosition, Indicator, PopoverMenu, Tooltip, prelude::*};
 use workspace::ToolbarItemView as _;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
@@ -32,9 +32,9 @@ impl OutputCategory {
 
     fn label(self) -> &'static str {
         match self {
-            Self::Performance => "PERF",
-            Self::Command => "COMMAND",
-            Self::Error => "ERROR",
+            Self::Performance => "Performance",
+            Self::Command => "Commands",
+            Self::Error => "Errors",
             Self::Other => "Other",
         }
     }
@@ -286,6 +286,54 @@ impl KkOutput {
         cx.notify();
     }
 
+    fn render_filter_menu(&self, cx: &Context<Self>) -> PopoverMenu<ContextMenu> {
+        let output = cx.entity().downgrade();
+        PopoverMenu::new("output-filter")
+            .anchor(Anchor::TopRight)
+            .trigger_with_tooltip(
+                IconButton::new("output-filter-trigger", IconName::Filter).when(
+                    self.selected_categories != OutputCategory::ALL_MASK,
+                    |button| button.indicator(Indicator::dot()),
+                ),
+                Tooltip::text("Filter Output"),
+            )
+            .menu(move |window, cx| {
+                let output = output.upgrade()?;
+                Some(ContextMenu::build_persistent(
+                    window,
+                    cx,
+                    move |menu, _, cx| {
+                        let selected = output.read(cx).selected_categories;
+                        let mut menu = menu;
+                        for category in OutputCategory::ALL {
+                            let output = output.clone();
+                            menu = menu.toggleable_entry(
+                                category.label(),
+                                selected & category.mask() != 0,
+                                IconPosition::Start,
+                                None,
+                                move |_, cx| {
+                                    output.update(cx, |output, cx| {
+                                        output.set_filter(
+                                            output.selected_categories ^ category.mask(),
+                                            cx,
+                                        );
+                                    });
+                                },
+                            );
+                        }
+
+                        let output = output.clone();
+                        menu.separator().entry("Show All", None, move |_, cx| {
+                            output.update(cx, |output, cx| {
+                                output.set_filter(OutputCategory::ALL_MASK, cx);
+                            });
+                        })
+                    },
+                ))
+            })
+    }
+
     fn clear(&mut self, cx: &mut Context<Self>) {
         // Advance past buffered batches as well, so pending updates cannot restore old output.
         self.cursor = self.diagnostics.end_cursor();
@@ -400,6 +448,7 @@ impl Render for KkOutput {
                                         });
                                     })),
                             )
+                            .child(self.render_filter_menu(cx))
                             .child(
                                 IconButton::new("clear-output", IconName::Trash)
                                     .tooltip(Tooltip::text("Clear Output"))
@@ -413,29 +462,6 @@ impl Render for KkOutput {
                                     ),
                             ),
                     ),
-            )
-            .child(
-                h_flex()
-                    .px_2()
-                    .gap_1()
-                    .child(
-                        div().debug_selector(|| "output-filter-all".into()).child(
-                            ui::Button::new("output-filter-all", "All")
-                                .toggle_state(self.selected_categories == OutputCategory::ALL_MASK)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.set_filter(OutputCategory::ALL_MASK, cx);
-                                })),
-                        ),
-                    )
-                    .children(OutputCategory::ALL.into_iter().map(|category| {
-                        div().debug_selector(move || category.label().into()).child(
-                            ui::Button::new(category.label(), category.label())
-                                .toggle_state(self.selected_categories & category.mask() != 0)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.set_filter(this.selected_categories ^ category.mask(), cx);
-                                })),
-                        )
-                    })),
             )
             .when(!self.search_bar.read(cx).is_dismissed(), |this| {
                 this.child(self.search_bar.clone())
@@ -515,6 +541,7 @@ mod tests {
             cx.set_global(settings);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             editor::init(cx);
+            cx.bind_keys([gpui::KeyBinding::new("escape", menu::Cancel, Some("menu"))]);
         });
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree("/project", serde_json::json!({})).await;
@@ -564,15 +591,40 @@ mod tests {
             cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
             Some(original)
         );
-        for category in ["COMMAND", "ERROR", "Other"] {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("MENU_ITEM-Performance").is_none());
+        let filter = cx.debug_bounds("ICON-Filter").expect("filter button");
+        cx.simulate_click(filter.center(), gpui::Modifiers::none());
+        for category in ["MENU_ITEM-Commands", "MENU_ITEM-Errors", "MENU_ITEM-Other"] {
             cx.update(|window, cx| window.draw(cx).clear(cx));
-            let button = cx.debug_bounds(category).expect("category button");
-            cx.simulate_click(button.center(), gpui::Modifiers::none());
+            let entry = cx.debug_bounds(category).expect("category menu entry");
+            cx.simulate_click(entry.center(), gpui::Modifiers::none());
             cx.run_until_parked();
         }
+
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("MENU_ITEM-Performance").is_none());
         let performance = buffer.read_with(cx, |buffer, _| buffer.text());
         assert!(performance.contains(&long_line));
         assert!(!performance.contains("command"));
+
+        cx.simulate_click(filter.center(), gpui::Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let commands = cx
+            .debug_bounds("MENU_ITEM-Commands")
+            .expect("commands entry");
+        cx.simulate_click(commands.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            output.read_with(cx, |output, _| output.selected_categories),
+            OutputCategory::Performance.mask() | OutputCategory::Command.mask(),
+        );
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_click(filter.center(), gpui::Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("MENU_ITEM-Commands").is_none());
+
         output.update(cx, |output, cx| {
             output.set_filter(
                 OutputCategory::Command.mask() | OutputCategory::Error.mask(),
@@ -588,11 +640,14 @@ mod tests {
         cx.run_until_parked();
         assert!(buffer.read_with(cx, |buffer, _| buffer.text()).is_empty());
         cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_click(filter.center(), gpui::Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         let all = cx
-            .debug_bounds("output-filter-all")
-            .expect("all categories button");
+            .debug_bounds("MENU_ITEM-Show All")
+            .expect("show all entry");
         cx.simulate_click(all.center(), gpui::Modifiers::none());
         cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
         assert!(
             buffer
                 .read_with(cx, |buffer, _| buffer.text())
